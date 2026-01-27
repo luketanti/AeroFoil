@@ -58,6 +58,24 @@ def verify_settings(section, data):
                     'error': f"Path {dir} does not exists."
                 })
                 break
+    elif section == 'shop':
+        # Validate HAUTH if provided
+        hauth = data.get('hauth', '')
+        if hauth and len(hauth) > 0:
+            # HAUTH should be a reasonable length (typically 32-64 characters for a secure token)
+            # Allow alphanumeric and common special characters
+            if len(hauth) < 8:
+                success = False
+                errors.append({
+                    'path': 'shop/hauth',
+                    'error': 'HAUTH value is too short. It should be at least 8 characters for security.'
+                })
+            elif len(hauth) > 256:
+                success = False
+                errors.append({
+                    'path': 'shop/hauth',
+                    'error': 'HAUTH value is too long. Maximum length is 256 characters.'
+                })
     return success, errors
 
 def add_library_path_to_settings(path):

@@ -341,6 +341,19 @@
                         header.
                     </div>
                 </div>
+                <!-- HAUTH Value -->
+                <div class="mb-3">
+                    <label for="shopHauthInput" class="form-label">HAUTH Value:</label>
+                    <input class="form-control" id="shopHauthInput" aria-describedby="shopHauthHelp"
+                        placeholder="Leave empty for automatic generation">
+                    <div id="shopHauthHelp" class="form-text">
+                        <a href="https://blawar.github.io/tinfoil/network/#host-signature" target="_blank">Host signature (HAUTH)</a> 
+                        is a security token used for Tinfoil client authentication to prevent unauthorized access.<br>
+                        <strong>Note:</strong> The HAUTH value is automatically generated when you first connect to the shop 
+                        from Tinfoil with an admin account over HTTPS. You can manually set or update it here if needed.<br>
+                        <strong>Warning:</strong> Changing this value will require Tinfoil clients to re-authenticate.
+                    </div>
+                </div>
                 <div class="mb-3 form-check">
                     <input type="checkbox" class="form-check-input" id="publicShopCheck"
                         aria-describedby="publicShopCheckHelp">
@@ -481,7 +494,8 @@
 <script>
 
     settings_map = {
-        'library/path': 'libraryPathInput'
+        'library/path': 'libraryPathInput',
+        'shop/hauth': 'shopHauthInput'
     };
 
 
@@ -1070,6 +1084,7 @@
         $('#submitShopSettingsBtn').prop('disabled', true);
         data = {
             host: $('#shopHostInput').val(),
+            hauth: $('#shopHauthInput').val(),
             public: getCheckboxStatus("publicShopCheck"),
             encrypt: getCheckboxStatus("encryptShopCheck"),
             motd: $('#motdTextArea').val(),
@@ -1251,6 +1266,7 @@
             // Shop settings
             shopSettings = result['shop'];
             setInputVal("shopHostInput", shopSettings['host']);
+            setInputVal("shopHauthInput", shopSettings['hauth']);
             setInputVal("motdTextArea", shopSettings['motd']);
             $("#publicShopCheck").prop("checked", shopSettings['public']);
             $("#encryptShopCheck").prop("checked", shopSettings['encrypt']);

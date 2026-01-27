@@ -489,10 +489,8 @@ def manage_page():
 def get_settings_api():
     reload_conf()
     settings = copy.deepcopy(app_settings)
-    if settings['shop'].get('hauth'):
-        settings['shop']['hauth'] = True
-    else:
-        settings['shop']['hauth'] = False
+    # Return the actual HAUTH value for admin users so they can view and edit it
+    # Note: The HAUTH value is kept as-is (not masked to boolean) for admins
     return jsonify(settings)
 
 @app.post('/api/settings/titles')
@@ -528,6 +526,15 @@ def set_titles_settings_api():
 @app.post('/api/settings/shop')
 def set_shop_settings_api():
     data = request.json
+    # Validate shop settings
+    success, errors = verify_settings('shop', data)
+    if not success:
+        resp = {
+            'success': False,
+            'errors': errors
+        }
+        return jsonify(resp)
+    
     set_shop_settings(data)
     reload_conf()
     resp = {
