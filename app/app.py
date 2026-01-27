@@ -489,8 +489,7 @@ def manage_page():
 def get_settings_api():
     reload_conf()
     settings = copy.deepcopy(app_settings)
-    # Return the actual HAUTH value for admin users so they can view and edit it
-    # Note: The HAUTH value is kept as-is (not masked to boolean) for admins
+    # Return the actual HAUTH value (not masked) since this endpoint requires admin access
     return jsonify(settings)
 
 @app.post('/api/settings/titles')

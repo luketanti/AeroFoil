@@ -62,8 +62,8 @@ def verify_settings(section, data):
         # Validate HAUTH if provided
         hauth = data.get('hauth', '')
         if hauth:
-            # HAUTH should be a reasonable length (typically 32-64 characters for a secure token)
-            # Allow alphanumeric and common special characters
+            # HAUTH should be a reasonable length for a secure token
+            # Validate length only - character composition is not restricted
             if len(hauth) < 8:
                 success = False
                 errors.append({
