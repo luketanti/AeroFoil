@@ -17,6 +17,8 @@ jobs:
   push_to_registry:
     name: Build and push Docker image to Docker Hub
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
