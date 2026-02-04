@@ -32,7 +32,10 @@ jobs:
 
       - name: Compute tags
         id: meta
-        run: echo "sha_tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "sha_tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          VERSION=$(git describe --tags --always)
+          echo "ownfoil_version=${VERSION}-dev" >> "$GITHUB_OUTPUT"
 
       - name: Build and push (multi-arch)
         uses: docker/build-push-action@v6
@@ -41,6 +44,8 @@ jobs:
           file: Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            OWNFOIL_VERSION=${{ steps.meta.outputs.ownfoil_version }}
           tags: |
             luketanti/ownfoil:dev
             luketanti/ownfoil:sha-${{ steps.meta.outputs.sha_tag }}

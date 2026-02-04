@@ -37,6 +37,7 @@ jobs:
           # Extract version from tag (removes 'v' prefix)
           VERSION=${GITHUB_REF#refs/tags/v}
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "ownfoil_version=v$VERSION" >> "$GITHUB_OUTPUT"
           
           # Extract major and minor versions for additional tags
           MAJOR=$(echo $VERSION | cut -d. -f1)
@@ -54,6 +55,8 @@ jobs:
           file: Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            OWNFOIL_VERSION=${{ steps.meta.outputs.ownfoil_version }}
           tags: |
             luketanti/ownfoil:latest
             luketanti/ownfoil:${{ steps.meta.outputs.version }}

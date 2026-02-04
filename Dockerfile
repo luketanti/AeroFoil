@@ -2,6 +2,8 @@ FROM python:3.11-alpine
 
 # Install platform-specific build dependencies
 ARG TARGETPLATFORM
+ARG OWNFOIL_VERSION
+ENV OWNFOIL_VERSION=$OWNFOIL_VERSION
 RUN apk update && apk add --no-cache bash sudo \
     && if [ "$TARGETPLATFORM" = "linux/arm/v6" ] || [ "$TARGETPLATFORM" = "linux/arm/v7" ]; then \
         apk add --no-cache build-base gcc musl-dev jpeg-dev zlib-dev libffi-dev cairo-dev pango-dev gdk-pixbuf-dev; \
@@ -29,4 +31,3 @@ RUN mkdir -p /app/data
 WORKDIR /app
 
 ENTRYPOINT [ "/app/run.sh" ]
-
