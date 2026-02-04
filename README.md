@@ -45,16 +45,19 @@ services:
   ownfoil:
     container_name: ownfoil
     image: luketanti/ownfoil:latest
-   # environment:
-   #   # For write permission in config directory
-   #   - PUID=1000
-   #   - PGID=1000
-   #   # to create/update an admin user at startup
-   #   - USER_ADMIN_NAME=admin
-   #   - USER_ADMIN_PASSWORD=asdvnf!546
-   #   # to create/update a regular user at startup
-   #   - USER_GUEST_NAME=guest
-   #   - USER_GUEST_PASSWORD=oerze!@8981
+    # environment:
+    #   # For write permission in config directory
+    #   - PUID=1000
+    #   - PGID=1000
+    #   # to create/update an admin user at startup
+    #   - USER_ADMIN_NAME=admin
+    #   - USER_ADMIN_PASSWORD=asdvnf!546
+    #   # to create/update a regular user at startup
+    #   - USER_GUEST_NAME=guest
+    #   - USER_GUEST_PASSWORD=oerze!@8981
+    #   # cache TTLs (seconds): use none/unset for rebuild-only
+    #   - SHOP_SECTIONS_CACHE_TTL_S=none
+    #   - MEDIA_INDEX_TTL_S=none
     volumes:
       - /your/game/directory:/games
       - ./config:/app/config
@@ -70,6 +73,13 @@ You can then create and start the container with the command (executed in the sa
     docker-compose up -d
 
 This is usefull if you don't want to remember the `docker run` command and have a persistent and reproductible container configuration.
+
+## Environment variables
+- `PUID` / `PGID`: control the user ID/group ID inside the container (default `1000:1000`).
+- `USER_ADMIN_NAME` / `USER_ADMIN_PASSWORD`: create or update an admin user at startup (default: unset).
+- `USER_GUEST_NAME` / `USER_GUEST_PASSWORD`: create or update a regular user at startup (default: unset).
+- `SHOP_SECTIONS_CACHE_TTL_S`: cache TTL for `/api/shop/sections` (seconds). Use `none`/unset for rebuild-only (default), `0` to disable caching. Recommended: `none` for stable libraries, or `600`-`900` for periodic refresh.
+- `MEDIA_INDEX_TTL_S`: cache TTL for icon/banner media index (seconds). Use `none`/unset for rebuild-only (default), `0` to disable caching. Recommended: `none` or `600`-`900`.
 
 ## Using Python
 Clone the repository using `git`, install the dependencies and you're good to go:
@@ -159,6 +169,9 @@ Encryption uses the Tinfoil public key and AES, and requires the `pycryptodome` 
 - Recommended volumes: `/games`, `/app/config`, and `/app/data`.
 - Map port `8465` from the container to any host port you prefer.
 - To bootstrap an admin account, set `USER_ADMIN_NAME` and `USER_ADMIN_PASSWORD` when starting the container.
+- Cache TTL env vars (seconds):
+  - `SHOP_SECTIONS_CACHE_TTL_S`: cache for `/api/shop/sections` (use `none`/unset for rebuild-only, `0` to disable caching).
+  - `MEDIA_INDEX_TTL_S`: media cache index for icons/banners (use `none`/unset for rebuild-only, `0` to disable caching).
 - Update the container with `docker pull luketanti/ownfoil:latest` and restart it.
 
 ## Reverse proxy: real client IP (Activity page)
