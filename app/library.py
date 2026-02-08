@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+import importlib.util
 from app.constants import *
 from app.db import *
 from app import titles as titles_lib
@@ -153,7 +154,7 @@ def scan_library_path(library_path):
 
 def get_files_to_identify(library_id):
     non_identified_files = get_all_non_identified_files_from_library(library_id)
-    if titles_lib.Keys.keys_loaded:
+    if titles_lib.keys_loaded():
         files_to_identify_with_cnmt = get_files_with_identification_from_library(library_id, 'filename')
         non_identified_files = list(set(non_identified_files).union(files_to_identify_with_cnmt))
     return non_identified_files
@@ -329,7 +330,7 @@ def add_missing_apps_to_db():
 
 def process_library_identification(app):
     logger.info(f"Starting library identification process for all libraries...")
-    if not titles_lib.Keys.keys_loaded:
+    if not titles_lib.keys_loaded():
         logger.warning("Skipping library identification: keys are not loaded yet.")
         return
     try:
@@ -667,7 +668,7 @@ def _ensure_unique_path(path):
         counter += 1
 
 def _get_file_signature(filepath):
-    if not titles_lib.Keys.keys_loaded:
+    if not titles_lib.keys_loaded():
         return None
     try:
         identification, success, contents, error = titles_lib.identify_file(filepath)
@@ -701,20 +702,19 @@ def _quote_arg(value):
         return value
     return f"\"{value}\""
 
-def _get_nsz_exe():
-    if os.path.exists(NSZ_SCRIPT):
-        return f"{_quote_arg(sys.executable)} {_quote_arg(NSZ_SCRIPT)}"
-    scripts_dir = os.path.join(os.path.dirname(sys.executable), 'Scripts')
-    nsz_exe = os.path.join(scripts_dir, 'nsz.exe')
-    return _quote_arg(nsz_exe) if os.path.exists(nsz_exe) else None
+def _get_nsz_runner():
+    if importlib.util.find_spec('nsz') is not None:
+        # `nsz` does not expose __main__ in this fork; call entrypoint directly.
+        return f"{_quote_arg(sys.executable)} -c \"import nsz; nsz.main()\""
+    return None
 
 def _format_nsz_command(command_template, input_file, output_file, threads=None):
-    nsz_exe = _get_nsz_exe() or 'nsz'
+    nsz_runner = _get_nsz_runner() or 'nsz'
     nsz_keys = _get_nsz_keys_file() or KEYS_FILE
     if not command_template:
-        command_template = '{nsz_exe} --keys-file "{nsz_keys}" -C -o "{output_dir}" "{input_file}" --verify --low-verbose'
+        command_template = '{nsz_runner} --keys "{nsz_keys}" --minimal-output --verify -C -o "{output_dir}" "{input_file}"'
     command = command_template.format(
-        nsz_exe=nsz_exe,
+        nsz_runner=nsz_runner,
         nsz_keys=nsz_keys,
         input_file=input_file,
         output_file=output_file,
@@ -1331,8 +1331,8 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
         add_detail(keys_error)
         return results
 
-    if '{nsz_exe}' in (command_template or '') and not _get_nsz_exe():
-        warning = 'NSZ tool not found in ./nsz; using PATH lookup.'
+    if '{nsz_runner}' in (command_template or '') and not _get_nsz_runner():
+        warning = 'NSZ tool not found. Install the nsz Python package from requirements and run via python -m nsz.'
         add_detail(warning)
         if log_cb:
             log_cb(warning)
@@ -1538,8 +1538,8 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
             results['details'].append(keys_error)
         return results
 
-    if '{nsz_exe}' in (command_template or '') and not _get_nsz_exe() and verbose:
-        warning = 'NSZ tool not found in ./nsz; using PATH lookup.'
+    if '{nsz_runner}' in (command_template or '') and not _get_nsz_runner() and verbose:
+        warning = 'NSZ tool not found. Install the nsz Python package from requirements and run via python -m nsz.'
         results['details'].append(warning)
         if log_cb:
             log_cb(warning)
@@ -1550,7 +1550,6 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
             results['details'].append(f"Skip existing output: {output_file}.")
         return results
 
-    nsz_exe = _get_nsz_exe() or 'nsz'
     command = _format_nsz_command(
         command_template,
         file_entry.filepath,

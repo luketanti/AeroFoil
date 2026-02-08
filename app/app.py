@@ -31,7 +31,7 @@ from app.auth import _effective_client_ip
 from app import titles
 from app.utils import *
 from app.library import *
-from app.library import _get_nsz_exe, _ensure_unique_path
+from app.library import _get_nsz_runner, _ensure_unique_path
 from app import titledb
 from app.title_requests import create_title_request, list_requests
 import requests
@@ -1166,6 +1166,7 @@ def _job_log(job_id, message):
         if not job:
             return
         percent_match = re.search(r'Compressed\s+([0-9.]+)%', message)
+        minimal_progress_match = re.search(r'^\s*(?:[^0-9]{1,4}\s*)?([0-9]{1,3}(?:\.[0-9]+)?)%\s*(.*)$', message)
         numeric_match = re.fullmatch(r'\d{1,3}', message)
         convert_match = re.search(r'^\[CONVERT\]\s+(.+?)\s+->\s+(.+)$', message)
         verify_match = re.search(r'^\[VERIFY\]\s+(.+)$', message)
@@ -1177,7 +1178,36 @@ def _job_log(job_id, message):
                     job['progress']['percent'] = float(percent_value)
                     stage = job['progress'].get('stage') or 'converting'
                     label = 'Verifying' if stage == 'verifying' else 'Converting'
-                    job['progress']['message'] = f"{label}: {percent_value}%"
+                    file_name = (job['progress'].get('file') or '').strip()
+                    file_suffix = f" ({file_name})" if file_name else ''
+                    job['progress']['message'] = f"{label}: {percent_value}%{file_suffix}"
+                    job['updated_at'] = time.time()
+                    return
+            except ValueError:
+                pass
+        if minimal_progress_match:
+            try:
+                percent_value = float(minimal_progress_match.group(1))
+                if 0 <= percent_value <= 100:
+                    status_hint = (minimal_progress_match.group(2) or '').strip()
+                    status_hint_lower = status_hint.lower()
+                    stage = job['progress'].get('stage') or 'converting'
+                    if 'verif' in status_hint_lower:
+                        stage = 'verifying'
+                    elif 'compress' in status_hint_lower or 'convert' in status_hint_lower:
+                        stage = 'converting'
+                    job['progress']['stage'] = stage
+                    file_match = re.search(r'([^\s].*\.(?:nsp|nsz|xci|xcz|nca|ncz))', status_hint, re.IGNORECASE)
+                    if file_match:
+                        status_file = os.path.basename(file_match.group(1).strip())
+                        if status_file:
+                            job['progress']['file'] = status_file
+                    job['progress']['percent'] = percent_value
+                    label = 'Verifying' if stage == 'verifying' else 'Converting'
+                    file_name = (job['progress'].get('file') or '').strip()
+                    file_suffix = f" ({file_name})" if file_name else ''
+                    suffix = f" - {status_hint}" if status_hint else ''
+                    job['progress']['message'] = f"{label}: {percent_value:.0f}%{file_suffix}{suffix}"
                     job['updated_at'] = time.time()
                     return
             except ValueError:
@@ -1187,7 +1217,9 @@ def _job_log(job_id, message):
                 job['progress']['percent'] = float(percent_match.group(1))
                 stage = job['progress'].get('stage') or 'converting'
                 label = 'Verifying' if stage == 'verifying' else 'Converting'
-                job['progress']['message'] = f"{label}: {job['progress']['percent']:.0f}%"
+                file_name = (job['progress'].get('file') or '').strip()
+                file_suffix = f" ({file_name})" if file_name else ''
+                job['progress']['message'] = f"{label}: {job['progress']['percent']:.0f}%{file_suffix}"
                 job['updated_at'] = time.time()
                 return
             except ValueError:
@@ -2606,14 +2638,14 @@ def manage_jobs_list():
 def manage_health():
     nsz_path = None
     try:
-        nsz_path = _get_nsz_exe()
+        nsz_path = _get_nsz_runner()
     except NameError:
         nsz_path = None
     keys_file = KEYS_FILE
     keys_ok = os.path.exists(KEYS_FILE)
     return jsonify({
         'success': True,
-        'nsz_exe': nsz_path,
+        'nsz_runner': nsz_path,
         'keys_file': keys_file,
         'keys_present': keys_ok
     })
@@ -2708,7 +2740,7 @@ def upload_file():
         # filename = secure_filename(file.filename)
         file.save(KEYS_FILE + '.tmp')
         logger.info(f'Validating {file.filename}...')
-        valid = load_keys(KEYS_FILE + '.tmp')
+        valid, validation_errors = validate_keys_file(KEYS_FILE + '.tmp')
         if valid:
             os.rename(KEYS_FILE + '.tmp', KEYS_FILE)
             success = True
@@ -2718,6 +2750,7 @@ def upload_file():
         else:
             os.remove(KEYS_FILE + '.tmp')
             logger.error(f'Invalid keys from {file.filename}')
+            errors = validation_errors or ['invalid_keys_file']
 
     resp = {
         'success': success,

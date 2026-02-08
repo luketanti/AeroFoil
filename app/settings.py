@@ -1,12 +1,7 @@
 from app.constants import *
 import yaml
-import os, sys
+import os
 import time
-
-if NSZ_DIR not in sys.path:
-    sys.path.insert(0, NSZ_DIR)
-
-from nsz.nut import Keys
 
 import logging
 
@@ -115,17 +110,63 @@ def _read_env_csv(key):
     return [item.strip() for item in raw.split(',') if item.strip()]
 
 def load_keys(key_file=KEYS_FILE):
-    valid = False
-    try:
-        if os.path.isfile(key_file):
-            valid = Keys.load(key_file)
-            return valid
-        else:
-            logger.debug(f'Keys file {key_file} does not exist.')
-
-    except:
-        logger.error(f'Provided keys file {key_file} is invalid.')
+    valid, _ = validate_keys_file(key_file)
     return valid
+
+
+def validate_keys_file(key_file=KEYS_FILE):
+    """
+    Validate a keys file and return (is_valid, errors).
+    Accept partially-valid key sets when at least one master key revision
+    was loaded, which is sufficient for many metadata operations.
+    """
+    valid = False
+    errors = []
+    if not os.path.isfile(key_file):
+        logger.debug(f'Keys file {key_file} does not exist.')
+        return valid, ['keys_file_missing']
+    try:
+        from nsz.nut import Keys
+    except Exception as e:
+        msg = f'nsz_keys_module_unavailable: {e}'
+        logger.debug(msg)
+        return valid, [msg]
+    try:
+        valid = bool(Keys.load(key_file))
+        if valid:
+            return True, []
+
+        incorrect = []
+        loaded = []
+        try:
+            getter = getattr(Keys, 'getIncorrectKeysRevisions', None)
+            if callable(getter):
+                incorrect = list(getter() or [])
+        except Exception:
+            incorrect = []
+        try:
+            getter = getattr(Keys, 'getLoadedKeysRevisions', None)
+            if callable(getter):
+                loaded = list(getter() or [])
+        except Exception:
+            loaded = []
+
+        if loaded:
+            logger.warning(
+                "Keys loaded with warnings. Loaded revisions: %s, incorrect revisions: %s",
+                loaded,
+                incorrect,
+            )
+            return True, []
+
+        if incorrect:
+            errors.extend([f"incorrect_{rev}" for rev in incorrect])
+        if not errors:
+            errors.append('no_valid_master_keys')
+        return False, errors
+    except Exception as e:
+        logger.error(f'Provided keys file {key_file} is invalid: {e}')
+        return False, [str(e)]
 
 def load_settings(force_reload=False):
     global _settings_cache, _settings_cache_time

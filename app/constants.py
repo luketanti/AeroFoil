@@ -2,8 +2,6 @@ import os
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(APP_DIR)
-NSZ_DIR = os.path.join(PROJECT_DIR, 'nsz')
-NSZ_SCRIPT = os.path.join(NSZ_DIR, 'nsz.py')
 DATA_DIR = os.path.join(APP_DIR, 'data')
 CONFIG_DIR = os.path.join(APP_DIR, 'config')
 DB_FILE = os.path.join(CONFIG_DIR, 'ownfoil.db')

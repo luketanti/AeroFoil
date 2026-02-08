@@ -120,6 +120,28 @@
                                             <button class="btn btn-outline-warning" type="button" id="convertSingleBtn"
                                                 onClick="convertSingleFile()">Convert selected</button>
                                         </div>
+                                        <div class="d-flex flex-wrap gap-3 align-items-center mt-2">
+                                            <div class="input-group" style="max-width: 180px;">
+                                                <span class="input-group-text">Threads</span>
+                                                <input type="number" min="1" class="form-control" id="convertSingleThreadsInput" placeholder="Auto">
+                                            </div>
+                                            <div class="input-group" style="max-width: 200px;">
+                                                <span class="input-group-text">Timeout</span>
+                                                <input type="number" min="1" class="form-control" id="convertSingleTimeoutInput" placeholder="sec">
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="convertSingleDeleteOriginal" checked>
+                                                <label class="form-check-label" for="convertSingleDeleteOriginal">Delete original</label>
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="convertSingleDryRun" checked>
+                                                <label class="form-check-label" for="convertSingleDryRun">Dry run</label>
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="convertSingleVerbose">
+                                                <label class="form-check-label" for="convertSingleVerbose">Verbose</label>
+                                            </div>
+                                        </div>
                                         <div class="form-text">Only NSP/XCI files are listed.</div>
                                     </div>
                                     <div class="border rounded p-3">
@@ -150,7 +172,7 @@
                                                 <label class="form-check-label" for="convertVerbose">Verbose</label>
                                             </div>
                                             <button type="button" id="convertNszBtn" class="btn btn-warning ms-auto"
-                                                onClick='convertToNsz()'>Convert to NSZ</button>
+                                                onClick='convertToNsz()'>Start Library Conversion</button>
                                         </div>
                                     </div>
                                 </div>
@@ -384,11 +406,11 @@
         const selectedLabel = $('#convertSingleSelect option:selected').text();
         data = {
             file_id: fileId,
-            dry_run: $('#convertDryRun').is(':checked'),
-            delete_original: $('#convertDeleteOriginal').is(':checked'),
-            verbose: $('#convertVerbose').is(':checked'),
-            threads: getThreadsValue(),
-            timeout_seconds: getTimeoutValue()
+            dry_run: $('#convertSingleDryRun').is(':checked'),
+            delete_original: $('#convertSingleDeleteOriginal').is(':checked'),
+            verbose: $('#convertSingleVerbose').is(':checked'),
+            threads: getSingleThreadsValue(),
+            timeout_seconds: getSingleTimeoutValue()
         }
         $.ajax({
             url: "/api/manage/convert-single-job",
@@ -397,7 +419,7 @@
             contentType: "application/json",
             success: function (result) {
                 if (result['success']) {
-                    showVerboseOutput = $('#convertVerbose').is(':checked');
+                    showVerboseOutput = $('#convertSingleVerbose').is(':checked');
                     startJobPolling(result['job_id'], `Single conversion started for ${selectedLabel}`);
                 } else {
                     showManageAlert(`Single conversion failed: ${result['errors'].join('; ')}`, 'danger');
@@ -442,6 +464,16 @@
         return val ? parseInt(val, 10) : null;
     }
 
+    function getSingleThreadsValue() {
+        const val = $('#convertSingleThreadsInput').val();
+        return val ? parseInt(val, 10) : null;
+    }
+
+    function getSingleTimeoutValue() {
+        const val = $('#convertSingleTimeoutInput').val();
+        return val ? parseInt(val, 10) : null;
+    }
+
     function getLibraryValue() {
         const val = $('#convertLibrarySelect').val();
         return val ? parseInt(val, 10) : null;
@@ -469,7 +501,9 @@
         if (!job || job['status'] !== 'running') {
             return;
         }
-        showVerboseOutput = $('#convertVerbose').is(':checked');
+        showVerboseOutput = (job['kind'] === 'convert-single')
+            ? $('#convertSingleVerbose').is(':checked')
+            : $('#convertVerbose').is(':checked');
         activeJobId = job['id'];
         lastLogCount = 0;
         localStorage.setItem('ownfoilJobPolling', 'true');
@@ -479,7 +513,8 @@
             progress['total'] || 0,
             progress['percent'] || 0,
             progress['message'] || '',
-            progress['file'] || ''
+            progress['file'] || '',
+            job['status'] || 'running'
         );
         if (showVerboseOutput) {
             const logs = job['logs'] || [];
@@ -513,7 +548,7 @@
             const percent = progress['percent'] || 0;
             const file = progress['file'] || '';
             const message = progress['message'] || '';
-            updateProgressDisplay(done, total, percent, message, file);
+            updateProgressDisplay(done, total, percent, message, file, job['status'] || 'running');
             if (message && job['status'] === 'running') {
                 showManageAlert(message, 'info');
             }
@@ -540,7 +575,7 @@
         });
     }
 
-    function updateProgressDisplay(done, total, percent, message, file) {
+    function updateProgressDisplay(done, total, percent, message, file, jobStatus = 'running') {
         const progressPercent = total ? Math.round((done / total) * 100) : 0;
         $('#manageProgressBar').css('width', `${progressPercent}%`);
         $('#manageProgressText').text(`Progress: ${done}/${total} (${progressPercent}%)`);
@@ -549,7 +584,15 @@
         } else {
             $('#manageFileText').text('');
         }
-        if (percent) {
+        if (jobStatus !== 'running') {
+            if (jobStatus === 'success') {
+                $('#manageCompressionText').text('Converter progress: Complete');
+            } else if (jobStatus === 'cancelled') {
+                $('#manageCompressionText').text('Converter progress: Cancelled');
+            } else {
+                $('#manageCompressionText').text('Converter progress: Failed');
+            }
+        } else if (percent) {
             $('#manageCompressionText').text(`Converter progress: ${percent.toFixed(0)}%`);
         } else {
             $('#manageCompressionText').text('');
@@ -618,7 +661,7 @@
                 return;
             }
             const keysOk = result['keys_present'];
-            const nszOk = !!result['nsz_exe'];
+            const nszOk = !!result['nsz_runner'];
             let badgeClass = 'text-bg-success';
             let text = 'Converter ready';
             if (!keysOk || !nszOk) {
@@ -653,6 +696,24 @@
         setInterval(loadDownloadsQueue, 5000);
         $('#convertLibrarySelect').on('change', loadConvertibleFiles);
         $('#convertVerbose').on('change', function () {
+            showVerboseOutput = $(this).is(':checked');
+            if (showVerboseOutput && activeJobId) {
+                $.getJSON(`/api/manage/convert-job/${activeJobId}`, function (result) {
+                    if (!result['success']) {
+                        return;
+                    }
+                    const job = result['job'];
+                    const logs = job['logs'] || [];
+                    if (logs.length) {
+                        showManageOutput(logs);
+                        lastLogCount = logs.length;
+                    }
+                });
+            } else if (!showVerboseOutput) {
+                $('#manageOutput').text('');
+            }
+        });
+        $('#convertSingleVerbose').on('change', function () {
             showVerboseOutput = $(this).is(':checked');
             if (showVerboseOutput && activeJobId) {
                 $.getJSON(`/api/manage/convert-job/${activeJobId}`, function (result) {

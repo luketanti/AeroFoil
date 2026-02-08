@@ -11,16 +11,72 @@ from app.settings import *
 from pathlib import Path
 import logging
 
-if NSZ_DIR not in sys.path:
-    sys.path.insert(0, NSZ_DIR)
-
-from nsz.Fs import Pfs0, Xci, Nsp, Nca, Type, factory
-from nsz.nut import Keys
-
 # Retrieve main logger
 logger = logging.getLogger('main')
 
-Pfs0.Print.silent = True
+
+class _KeysPlaceholder:
+    keys_loaded = False
+
+
+# Keep module-level names for compatibility with other modules (e.g. library.py),
+# but delay nsz import until needed so app startup does not invoke nsz.
+Keys = _KeysPlaceholder()
+Pfs0 = None
+Xci = None
+Nsp = None
+Nca = None
+Type = None
+factory = None
+_nsz_import_attempted = False
+_nsz_import_ok = False
+
+
+def _ensure_nsz_loaded(require_fs=False):
+    global Keys
+    global Pfs0
+    global Xci
+    global Nsp
+    global Nca
+    global Type
+    global factory
+    global _nsz_import_attempted
+    global _nsz_import_ok
+
+    if _nsz_import_ok and (not require_fs or factory is not None):
+        return True
+
+    if _nsz_import_attempted and not _nsz_import_ok:
+        return False
+
+    _nsz_import_attempted = True
+    try:
+        from nsz.nut import Keys as _Keys
+        Keys = _Keys
+        if require_fs:
+            from nsz.Fs import Pfs0 as _Pfs0, Xci as _Xci, Nsp as _Nsp, Nca as _Nca, Type as _Type, factory as _factory
+            Pfs0 = _Pfs0
+            Xci = _Xci
+            Nsp = _Nsp
+            Nca = _Nca
+            Type = _Type
+            factory = _factory
+            try:
+                Pfs0.Print.silent = True
+            except Exception:
+                pass
+        _nsz_import_ok = True
+        return True
+    except Exception as e:
+        logger.warning(f"NSZ modules are not available yet: {e}")
+        _nsz_import_ok = False
+        return False
+
+
+def keys_loaded():
+    if not _ensure_nsz_loaded(require_fs=False):
+        return False
+    return bool(getattr(Keys, 'keys_loaded', False))
 
 app_id_regex = r"\[([0-9A-Fa-f]{16})\]"
 version_regex = r"\[v(\d+)\]"
@@ -323,6 +379,8 @@ def identify_file_from_filename(filename):
     return app_id, title_id, app_type, version, error
 
 def get_cnmts(container):
+    if not _ensure_nsz_loaded(require_fs=True):
+        return []
     cnmts = []
     if isinstance(container, Nsp.Nsp):
         try:
@@ -338,6 +396,8 @@ def get_cnmts(container):
     return cnmts
 
 def extract_meta_from_cnmt(cnmt_sections):
+    if not _ensure_nsz_loaded(require_fs=True):
+        return []
     contents = []
     for section in cnmt_sections:
         if isinstance(section, Pfs0.Pfs0):
@@ -349,6 +409,8 @@ def extract_meta_from_cnmt(cnmt_sections):
     return contents
 
 def identify_file_from_cnmt(filepath):
+    if not _ensure_nsz_loaded(require_fs=True):
+        raise RuntimeError('NSZ modules are not available.')
     contents = []
     container = factory(Path(filepath).resolve())
     try:
@@ -372,7 +434,7 @@ def identify_file(filepath):
     contents = []
     success = True
     error = ''
-    if Keys.keys_loaded:
+    if keys_loaded():
         identification = 'cnmt'
         try:
             cnmt_contents = identify_file_from_cnmt(filepath)
