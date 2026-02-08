@@ -3535,8 +3535,7 @@ def post_library_change():
             # remove missing files
             remove_missing_files_from_db()
             organize_pending_downloads()
-            # The process_library_identification already handles updating titles and generating library
-            # So, we just need to ensure titles_library is updated from the generated library
+            # Generate the library after organization tasks so cache/UI reflect final file layout.
             generate_library()
             with shop_sections_cache_lock:
                 shop_sections_cache['payload'] = None
