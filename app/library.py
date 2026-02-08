@@ -631,6 +631,15 @@ def _sanitize_component(value, fallback='Unknown'):
     value = value.rstrip('. ')
     return value if value else fallback
 
+def _sanitize_relative_path(path_value, fallback='Other'):
+    raw = str(path_value or '').strip().replace('\\', '/')
+    parts = [part for part in raw.split('/') if part and part not in ('.', '..')]
+    clean_parts = [_sanitize_component(part, fallback='') for part in parts]
+    clean_parts = [part for part in clean_parts if part]
+    if not clean_parts:
+        return _sanitize_component(fallback)
+    return os.path.join(*clean_parts)
+
 def _safe_int(value, default=0):
     try:
         return int(value)
@@ -770,29 +779,125 @@ def _compute_relative_folder(library_path, full_path):
     normalized = folder.replace(library_path, '')
     return normalized if normalized.startswith(os.sep) else os.sep + normalized
 
-def _build_destination(library_path, file_entry, app, title_name, dlc_name):
+def _normalize_naming_templates(raw_templates):
+    default_templates = (
+        DEFAULT_SETTINGS.get('library', {})
+        .get('naming_templates', {})
+        .get('templates', {})
+    )
+    default_active = (
+        DEFAULT_SETTINGS.get('library', {})
+        .get('naming_templates', {})
+        .get('active', 'default')
+    )
+
+    templates = {}
+    if isinstance(raw_templates, dict):
+        templates = raw_templates.get('templates', {}) or {}
+        active = raw_templates.get('active') or default_active
+    else:
+        active = default_active
+
+    if not isinstance(templates, dict) or not templates:
+        templates = default_templates
+        active = default_active
+
+    normalized = {}
+    for template_name, template_cfg in templates.items():
+        if not isinstance(template_cfg, dict):
+            continue
+        clean_template = {}
+        for key in ('base', 'update', 'dlc', 'other'):
+            section = template_cfg.get(key) or {}
+            if not isinstance(section, dict):
+                section = {}
+            fallback = (default_templates.get('default') or {}).get(key, {})
+            clean_template[key] = {
+                'folder': str(section.get('folder') or fallback.get('folder') or ''),
+                'filename': str(section.get('filename') or fallback.get('filename') or ''),
+            }
+        normalized[str(template_name).strip() or 'default'] = clean_template
+
+    if not normalized:
+        normalized = default_templates
+        active = default_active
+
+    if active not in normalized:
+        active = next(iter(normalized.keys()))
+
+    return {
+        'active': active,
+        'templates': normalized,
+    }
+
+def _get_active_template():
+    from app.settings import load_settings
+
+    app_settings = load_settings()
+    library = (app_settings or {}).get('library', {})
+    naming_templates = _normalize_naming_templates(library.get('naming_templates'))
+    active = naming_templates.get('active')
+    templates = naming_templates.get('templates') or {}
+    return templates.get(active) or next(iter(templates.values()))
+
+def _render_template(template, values):
+    class _SafeFormatDict(dict):
+        def __missing__(self, key):
+            return ''
+    try:
+        return str(template or '').format_map(_SafeFormatDict(values))
+    except Exception:
+        return ''
+
+def _build_destination(library_path, file_entry, app, title_name, dlc_name, active_template=None):
+    if active_template is None:
+        active_template = _get_active_template()
     title_id = app.title.title_id if app.title else None
     safe_title = _sanitize_component(title_name or title_id or app.app_id)
     safe_title_id = _sanitize_component(title_id or app.app_id)
     version = app.app_version or '0'
     extension = file_entry.extension or os.path.splitext(file_entry.filename or '')[1].lstrip('.')
+    safe_ext = _sanitize_component(extension, fallback='nsp')
+    safe_app_id = _sanitize_component(app.app_id or safe_title_id)
+    safe_dlc_name = _sanitize_component(dlc_name or app.app_id)
+
+    template_vars = {
+        'title': safe_title,
+        'title_id': safe_title_id,
+        'app_id': safe_app_id,
+        'version': str(version),
+        'ext': safe_ext,
+        'dlc_name': safe_dlc_name,
+    }
 
     if app.app_type == APP_TYPE_BASE:
-        subdir = 'Base'
-        filename = f"{safe_title} [{safe_title_id}] [BASE][v{version}].{extension}"
+        section = active_template.get('base', {})
+        folder_tpl = section.get('folder')
+        filename_tpl = section.get('filename')
     elif app.app_type == APP_TYPE_UPD:
-        subdir = os.path.join('Updates', f"v{version}")
-        filename = f"{safe_title} [{safe_title_id}] [UPDATE][v{version}].{extension}"
+        section = active_template.get('update', {})
+        folder_tpl = section.get('folder')
+        filename_tpl = section.get('filename')
     elif app.app_type == APP_TYPE_DLC:
-        dlc_display = _sanitize_component(dlc_name or app.app_id)
-        subdir = os.path.join('DLC', f"{dlc_display} [{app.app_id}]")
-        filename = f"{safe_title} - {dlc_display} [{app.app_id}] [DLC][v{version}].{extension}"
+        section = active_template.get('dlc', {})
+        folder_tpl = section.get('folder')
+        filename_tpl = section.get('filename')
     else:
-        subdir = 'Other'
-        filename = file_entry.filename or f"{safe_title} [{safe_title_id}] [UNKNOWN].{extension}"
+        section = active_template.get('other', {})
+        folder_tpl = section.get('folder')
+        filename_tpl = section.get('filename')
 
-    folder = os.path.join(library_path, _sanitize_component(f"{safe_title} [{safe_title_id}]"), subdir)
+    folder_rel = _render_template(folder_tpl, template_vars)
+    if not folder_rel:
+        folder_rel = _sanitize_component(f"{safe_title} [{safe_title_id}]")
+    folder_rel = _sanitize_relative_path(folder_rel, fallback='Other')
+
+    filename = _render_template(filename_tpl, template_vars)
+    if not filename:
+        filename = file_entry.filename or f"{safe_title} [{safe_title_id}] [UNKNOWN].{safe_ext}"
     filename = _sanitize_component(filename)
+
+    folder = os.path.join(library_path, folder_rel)
     return folder, filename
 
 def organize_library(dry_run=False, verbose=False, detail_limit=200):
@@ -859,6 +964,7 @@ def organize_library(dry_run=False, verbose=False, detail_limit=200):
     titles_lib.load_titledb()
     title_name_cache = {}
     app_name_cache = {}
+    active_template = _get_active_template()
 
     files = Files.query.filter_by(identified=True).all()
     for file_entry in files:
@@ -895,7 +1001,8 @@ def organize_library(dry_run=False, verbose=False, detail_limit=200):
             file_entry,
             primary_app,
             title_name,
-            dlc_name
+            dlc_name,
+            active_template=active_template,
         )
         dest_path = os.path.join(dest_dir, dest_filename)
         if os.path.normpath(dest_path) == os.path.normpath(file_entry.filepath):
@@ -1005,6 +1112,7 @@ def organize_files(filepaths, dry_run=False, verbose=False, detail_limit=200):
     titles_lib.load_titledb()
     title_name_cache = {}
     app_name_cache = {}
+    active_template = _get_active_template()
 
     unique_paths = list(dict.fromkeys(filepaths))
     files = Files.query.filter(Files.filepath.in_(unique_paths)).all()
@@ -1053,7 +1161,8 @@ def organize_files(filepaths, dry_run=False, verbose=False, detail_limit=200):
             file_entry,
             primary_app,
             title_name,
-            dlc_name
+            dlc_name,
+            active_template=active_template,
         )
         dest_path = os.path.join(dest_dir, dest_filename)
         if os.path.normpath(dest_path) == os.path.normpath(file_entry.filepath):

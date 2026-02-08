@@ -49,6 +49,29 @@ DEFAULT_SETTINGS = {
         "auto_maintenance": False,
         "maintenance_interval_minutes": 720,
         "maintenance_delete_updates": True,
+        "naming_templates": {
+            "active": "default",
+            "templates": {
+                "default": {
+                    "base": {
+                        "folder": "{title} [{title_id}]/Base",
+                        "filename": "{title} [{title_id}] [BASE][v{version}].{ext}",
+                    },
+                    "update": {
+                        "folder": "{title} [{title_id}]/Updates/v{version}",
+                        "filename": "{title} [{title_id}] [UPDATE][v{version}].{ext}",
+                    },
+                    "dlc": {
+                        "folder": "{title} [{title_id}]/DLC/{dlc_name} [{app_id}]",
+                        "filename": "{title} - {dlc_name} [{app_id}] [DLC][v{version}].{ext}",
+                    },
+                    "other": {
+                        "folder": "{title} [{title_id}]/Other",
+                        "filename": "{title} [{title_id}] [UNKNOWN].{ext}",
+                    },
+                },
+            },
+        },
     },
     "titles": {
         "language": "en",

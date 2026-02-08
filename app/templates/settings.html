@@ -132,6 +132,68 @@
                     </div>
                 </div>
 
+                <div class="card mb-3">
+                    <div class="card-body">
+                        <div class="d-flex flex-wrap gap-2 align-items-end mb-3">
+                            <div class="flex-grow-1" style="min-width: 220px;">
+                                <label for="libraryNamingTemplateSelect" class="form-label mb-1">Organization naming template</label>
+                                <select id="libraryNamingTemplateSelect" class="form-select" onchange="onLibraryNamingTemplateChange()"></select>
+                            </div>
+                            <div>
+                                <button type="button" class="btn btn-outline-primary" onclick="addLibraryNamingTemplate()">Add template</button>
+                            </div>
+                            <div>
+                                <button type="button" class="btn btn-outline-danger" onclick="deleteLibraryNamingTemplate()">Delete template</button>
+                            </div>
+                        </div>
+
+                        <div class="form-text mb-3">
+                            Tokens: <code>{title}</code>, <code>{title_id}</code>, <code>{app_id}</code>, <code>{version}</code>, <code>{dlc_name}</code>, <code>{ext}</code>
+                        </div>
+
+                        <div class="d-flex flex-wrap gap-2 mb-3">
+                            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="applyLibraryNamingPreset('default')">Use Default Preset</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="applyLibraryNamingPreset('flat')">Use Flat Preset</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="applyLibraryNamingPreset('scene')">Use Scene Preset</button>
+                        </div>
+
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <label for="libraryTemplateBaseFolderInput" class="form-label">Base folder template</label>
+                                <input id="libraryTemplateBaseFolderInput" class="form-control" type="text">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="libraryTemplateBaseFilenameInput" class="form-label">Base filename template</label>
+                                <input id="libraryTemplateBaseFilenameInput" class="form-control" type="text">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="libraryTemplateUpdateFolderInput" class="form-label">Update folder template</label>
+                                <input id="libraryTemplateUpdateFolderInput" class="form-control" type="text">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="libraryTemplateUpdateFilenameInput" class="form-label">Update filename template</label>
+                                <input id="libraryTemplateUpdateFilenameInput" class="form-control" type="text">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="libraryTemplateDlcFolderInput" class="form-label">DLC folder template</label>
+                                <input id="libraryTemplateDlcFolderInput" class="form-control" type="text">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="libraryTemplateDlcFilenameInput" class="form-label">DLC filename template</label>
+                                <input id="libraryTemplateDlcFilenameInput" class="form-control" type="text">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="libraryTemplateOtherFolderInput" class="form-label">Other folder template</label>
+                                <input id="libraryTemplateOtherFolderInput" class="form-control" type="text">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="libraryTemplateOtherFilenameInput" class="form-label">Other filename template</label>
+                                <input id="libraryTemplateOtherFilenameInput" class="form-control" type="text">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <label class="form-label">Library paths:</label>
                 <div id="libraryPathHelp" class="form-text">Path of directory containing your games.</div>
                 <table class="table table-hover caption-top" id="pathsTable">
@@ -484,6 +546,206 @@
 
     function getCheckboxStatus(checkboxId) {
         return $('#' + checkboxId).is(":checked")
+    }
+
+    const DEFAULT_LIBRARY_NAMING_TEMPLATE = {
+        base: {
+            folder: "{title} [{title_id}]/Base",
+            filename: "{title} [{title_id}] [BASE][v{version}].{ext}"
+        },
+        update: {
+            folder: "{title} [{title_id}]/Updates/v{version}",
+            filename: "{title} [{title_id}] [UPDATE][v{version}].{ext}"
+        },
+        dlc: {
+            folder: "{title} [{title_id}]/DLC/{dlc_name} [{app_id}]",
+            filename: "{title} - {dlc_name} [{app_id}] [DLC][v{version}].{ext}"
+        },
+        other: {
+            folder: "{title} [{title_id}]/Other",
+            filename: "{title} [{title_id}] [UNKNOWN].{ext}"
+        }
+    };
+
+    const LIBRARY_NAMING_PRESETS = {
+        default: JSON.parse(JSON.stringify(DEFAULT_LIBRARY_NAMING_TEMPLATE)),
+        flat: {
+            base: {
+                folder: ".",
+                filename: "{title} [{title_id}] [BASE][v{version}].{ext}"
+            },
+            update: {
+                folder: ".",
+                filename: "{title} [{title_id}] [UPDATE][v{version}].{ext}"
+            },
+            dlc: {
+                folder: ".",
+                filename: "{title} - {dlc_name} [{app_id}] [DLC][v{version}].{ext}"
+            },
+            other: {
+                folder: ".",
+                filename: "{title} [{title_id}] [UNKNOWN].{ext}"
+            }
+        },
+        scene: {
+            base: {
+                folder: "{title} [{title_id}]",
+                filename: "{title} [{title_id}] [v{version}] [BASE].{ext}"
+            },
+            update: {
+                folder: "{title} [{title_id}]/Updates",
+                filename: "{title} [{title_id}] [UPDATE][v{version}].{ext}"
+            },
+            dlc: {
+                folder: "{title} [{title_id}]/DLC",
+                filename: "{title} [{title_id}] - {dlc_name} [{app_id}] [DLC][v{version}].{ext}"
+            },
+            other: {
+                folder: "{title} [{title_id}]/Other",
+                filename: "{title} [{title_id}] [UNKNOWN].{ext}"
+            }
+        }
+    };
+
+    let libraryNamingTemplatesState = {
+        active: 'default',
+        templates: { default: JSON.parse(JSON.stringify(DEFAULT_LIBRARY_NAMING_TEMPLATE)) }
+    };
+
+    function normalizeLibraryNamingTemplates(raw) {
+        const fallback = {
+            active: 'default',
+            templates: { default: JSON.parse(JSON.stringify(DEFAULT_LIBRARY_NAMING_TEMPLATE)) }
+        };
+        if (!raw || typeof raw !== 'object') {
+            return fallback;
+        }
+        const templatesRaw = raw.templates && typeof raw.templates === 'object' ? raw.templates : {};
+        const templates = {};
+        Object.keys(templatesRaw).forEach(name => {
+            const entry = templatesRaw[name] || {};
+            templates[name] = {
+                base: {
+                    folder: String(entry.base?.folder || DEFAULT_LIBRARY_NAMING_TEMPLATE.base.folder),
+                    filename: String(entry.base?.filename || DEFAULT_LIBRARY_NAMING_TEMPLATE.base.filename),
+                },
+                update: {
+                    folder: String(entry.update?.folder || DEFAULT_LIBRARY_NAMING_TEMPLATE.update.folder),
+                    filename: String(entry.update?.filename || DEFAULT_LIBRARY_NAMING_TEMPLATE.update.filename),
+                },
+                dlc: {
+                    folder: String(entry.dlc?.folder || DEFAULT_LIBRARY_NAMING_TEMPLATE.dlc.folder),
+                    filename: String(entry.dlc?.filename || DEFAULT_LIBRARY_NAMING_TEMPLATE.dlc.filename),
+                },
+                other: {
+                    folder: String(entry.other?.folder || DEFAULT_LIBRARY_NAMING_TEMPLATE.other.folder),
+                    filename: String(entry.other?.filename || DEFAULT_LIBRARY_NAMING_TEMPLATE.other.filename),
+                }
+            };
+        });
+        if (!Object.keys(templates).length) {
+            return fallback;
+        }
+        const active = templates[raw.active] ? raw.active : Object.keys(templates)[0];
+        return { active: active, templates: templates };
+    }
+
+    function writeLibraryTemplateInputs(template) {
+        const t = template || DEFAULT_LIBRARY_NAMING_TEMPLATE;
+        setInputVal("libraryTemplateBaseFolderInput", t.base.folder);
+        setInputVal("libraryTemplateBaseFilenameInput", t.base.filename);
+        setInputVal("libraryTemplateUpdateFolderInput", t.update.folder);
+        setInputVal("libraryTemplateUpdateFilenameInput", t.update.filename);
+        setInputVal("libraryTemplateDlcFolderInput", t.dlc.folder);
+        setInputVal("libraryTemplateDlcFilenameInput", t.dlc.filename);
+        setInputVal("libraryTemplateOtherFolderInput", t.other.folder);
+        setInputVal("libraryTemplateOtherFilenameInput", t.other.filename);
+    }
+
+    function saveActiveLibraryTemplateInputs() {
+        const active = libraryNamingTemplatesState.active;
+        if (!active || !libraryNamingTemplatesState.templates[active]) {
+            return;
+        }
+        libraryNamingTemplatesState.templates[active] = {
+            base: {
+                folder: getInputVal("libraryTemplateBaseFolderInput"),
+                filename: getInputVal("libraryTemplateBaseFilenameInput"),
+            },
+            update: {
+                folder: getInputVal("libraryTemplateUpdateFolderInput"),
+                filename: getInputVal("libraryTemplateUpdateFilenameInput"),
+            },
+            dlc: {
+                folder: getInputVal("libraryTemplateDlcFolderInput"),
+                filename: getInputVal("libraryTemplateDlcFilenameInput"),
+            },
+            other: {
+                folder: getInputVal("libraryTemplateOtherFolderInput"),
+                filename: getInputVal("libraryTemplateOtherFilenameInput"),
+            },
+        };
+    }
+
+    function renderLibraryNamingTemplateSelect() {
+        const select = $('#libraryNamingTemplateSelect');
+        select.empty();
+        Object.keys(libraryNamingTemplatesState.templates).forEach(name => {
+            const selected = name === libraryNamingTemplatesState.active ? 'selected' : '';
+            select.append(`<option value="${name}" ${selected}>${name}</option>`);
+        });
+        writeLibraryTemplateInputs(libraryNamingTemplatesState.templates[libraryNamingTemplatesState.active]);
+    }
+
+    function onLibraryNamingTemplateChange() {
+        saveActiveLibraryTemplateInputs();
+        libraryNamingTemplatesState.active = getInputVal("libraryNamingTemplateSelect");
+        writeLibraryTemplateInputs(libraryNamingTemplatesState.templates[libraryNamingTemplatesState.active]);
+    }
+
+    function addLibraryNamingTemplate() {
+        saveActiveLibraryTemplateInputs();
+        const name = (window.prompt('New template name:') || '').trim();
+        if (!name) {
+            return;
+        }
+        if (libraryNamingTemplatesState.templates[name]) {
+            alert('Template already exists.');
+            return;
+        }
+        const source = libraryNamingTemplatesState.templates[libraryNamingTemplatesState.active] || DEFAULT_LIBRARY_NAMING_TEMPLATE;
+        libraryNamingTemplatesState.templates[name] = JSON.parse(JSON.stringify(source));
+        libraryNamingTemplatesState.active = name;
+        renderLibraryNamingTemplateSelect();
+        submitLibrarySettings();
+    }
+
+    function deleteLibraryNamingTemplate() {
+        saveActiveLibraryTemplateInputs();
+        const names = Object.keys(libraryNamingTemplatesState.templates);
+        if (names.length <= 1) {
+            alert('At least one naming template is required.');
+            return;
+        }
+        const active = libraryNamingTemplatesState.active;
+        delete libraryNamingTemplatesState.templates[active];
+        libraryNamingTemplatesState.active = Object.keys(libraryNamingTemplatesState.templates)[0];
+        renderLibraryNamingTemplateSelect();
+        submitLibrarySettings();
+    }
+
+    function applyLibraryNamingPreset(presetName) {
+        const preset = LIBRARY_NAMING_PRESETS[presetName];
+        if (!preset) {
+            return;
+        }
+        const active = libraryNamingTemplatesState.active;
+        if (!active || !libraryNamingTemplatesState.templates[active]) {
+            return;
+        }
+        libraryNamingTemplatesState.templates[active] = JSON.parse(JSON.stringify(preset));
+        writeLibraryTemplateInputs(libraryNamingTemplatesState.templates[active]);
+        submitLibrarySettings();
     }
 
     function scanLibrary(path = null) {
@@ -917,10 +1179,12 @@
         }
         intervalVal = Math.max(30, intervalVal);
         setInputVal("libraryMaintenanceIntervalInput", intervalVal);
+        saveActiveLibraryTemplateInputs();
         const payload = {
             auto_maintenance: getCheckboxStatus("libraryAutoMaintenanceCheck"),
             maintenance_interval_minutes: intervalVal,
-            maintenance_delete_updates: getCheckboxStatus("libraryMaintenanceDeleteUpdatesCheck")
+            maintenance_delete_updates: getCheckboxStatus("libraryMaintenanceDeleteUpdatesCheck"),
+            naming_templates: libraryNamingTemplatesState,
         };
         $.ajax({
             url: "/api/settings/library",
@@ -1065,6 +1329,8 @@
         handleHashNavigation();
         
         fillLibraryTable();
+        $('#libraryTemplateBaseFolderInput, #libraryTemplateBaseFilenameInput, #libraryTemplateUpdateFolderInput, #libraryTemplateUpdateFilenameInput, #libraryTemplateDlcFolderInput, #libraryTemplateDlcFilenameInput, #libraryTemplateOtherFolderInput, #libraryTemplateOtherFilenameInput')
+            .on('change', function () { submitLibrarySettings(); });
 
         initTooltips();
         
@@ -1098,6 +1364,8 @@
             $("#libraryAutoMaintenanceCheck").prop("checked", !!librarySettings['auto_maintenance']);
             setInputVal("libraryMaintenanceIntervalInput", librarySettings['maintenance_interval_minutes'] || 720);
             $("#libraryMaintenanceDeleteUpdatesCheck").prop("checked", librarySettings['maintenance_delete_updates'] !== false);
+            libraryNamingTemplatesState = normalizeLibraryNamingTemplates(librarySettings['naming_templates']);
+            renderLibraryNamingTemplateSelect();
             const maintenanceLastRun = librarySettings['maintenance_last_run'];
             if (maintenanceLastRun) {
                 try {

@@ -15,6 +15,58 @@ _settings_cache = None
 _settings_cache_time = 0
 _settings_cache_ttl = 5  # Cache for 5 seconds
 
+def _normalize_library_naming_templates(raw_templates):
+    default_templates = (
+        DEFAULT_SETTINGS.get('library', {})
+        .get('naming_templates', {})
+        .get('templates', {})
+    )
+    default_active = (
+        DEFAULT_SETTINGS.get('library', {})
+        .get('naming_templates', {})
+        .get('active', 'default')
+    )
+
+    templates = {}
+    if isinstance(raw_templates, dict):
+        templates = raw_templates.get('templates', {}) or {}
+        active = raw_templates.get('active') or default_active
+    else:
+        active = default_active
+
+    if not isinstance(templates, dict) or not templates:
+        templates = default_templates
+        active = default_active
+
+    normalized = {}
+    for name, cfg in templates.items():
+        if not isinstance(cfg, dict):
+            continue
+        clean = {}
+        for section in ('base', 'update', 'dlc', 'other'):
+            sec = cfg.get(section) or {}
+            if not isinstance(sec, dict):
+                sec = {}
+            fallback = (default_templates.get('default') or {}).get(section, {})
+            clean[section] = {
+                'folder': str(sec.get('folder') or fallback.get('folder') or ''),
+                'filename': str(sec.get('filename') or fallback.get('filename') or ''),
+            }
+        clean_name = str(name or '').strip() or 'default'
+        normalized[clean_name] = clean
+
+    if not normalized:
+        normalized = default_templates
+        active = default_active
+
+    if active not in normalized:
+        active = next(iter(normalized.keys()))
+
+    return {
+        'active': active,
+        'templates': normalized,
+    }
+
 def _read_env_bool(key):
     raw = os.environ.get(key)
     if raw is None:
@@ -92,6 +144,9 @@ def load_settings(force_reload=False):
             merged = defaults.copy()
             merged.update(settings.get('library', {}))
             settings['library'] = merged
+        settings['library']['naming_templates'] = _normalize_library_naming_templates(
+            settings['library'].get('naming_templates')
+        )
 
         valid_keys = load_keys()
         settings['titles']['valid_keys'] = valid_keys
@@ -106,6 +161,10 @@ def load_settings(force_reload=False):
             settings['security']['trusted_proxies'] = env_proxies
         with open(CONFIG_FILE, 'w') as yaml_file:
             yaml.dump(settings, yaml_file)
+    settings.setdefault('library', {})
+    settings['library']['naming_templates'] = _normalize_library_naming_templates(
+        settings['library'].get('naming_templates')
+    )
     
     # Update cache
     _settings_cache = settings
@@ -228,6 +287,8 @@ def set_download_settings(data):
 def set_library_settings(data):
     settings = load_settings(force_reload=True)
     settings.setdefault('library', {})
+    if data and 'naming_templates' in data:
+        data['naming_templates'] = _normalize_library_naming_templates(data.get('naming_templates'))
     settings['library'].update(data)
     with open(CONFIG_FILE, 'w') as yaml_file:
         yaml.dump(settings, yaml_file)
