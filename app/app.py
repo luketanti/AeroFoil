@@ -2997,9 +2997,43 @@ def get_title_info_api(title_id):
         'success': True,
         'title_id': title_id,
         'name': info.get('name'),
+        'iconUrl': info.get('iconUrl'),
+        'bannerUrl': info.get('bannerUrl'),
         'description': info.get('description'),
         'screenshots': info.get('screenshots') or []
     })
+
+@app.post('/api/title-info/manual')
+@access_required('admin')
+def set_manual_title_info_api():
+    data = request.json or {}
+    title_id = str(data.get('title_id') or '').strip().upper()
+    if not title_id:
+        return jsonify({'success': False, 'error': 'missing_title_id'}), 400
+
+    payload = {
+        'name': data.get('name'),
+        'description': data.get('description'),
+        'iconUrl': data.get('iconUrl'),
+        'bannerUrl': data.get('bannerUrl'),
+        'screenshots': data.get('screenshots') or [],
+    }
+    ok = set_manual_title_override(title_id, payload)
+    if not ok:
+        return jsonify({'success': False, 'error': 'invalid_payload'}), 400
+
+    # Refresh in-memory settings and invalidate library/shop caches so UI picks up overrides.
+    reload_conf()
+    try:
+        if os.path.exists(LIBRARY_CACHE_FILE):
+            os.remove(LIBRARY_CACHE_FILE)
+    except Exception:
+        pass
+    with shop_sections_cache_lock:
+        shop_sections_cache['payload'] = None
+        shop_sections_cache['timestamp'] = 0
+        shop_sections_cache['limit'] = None
+    return jsonify({'success': True, 'title_id': title_id})
 
 @app.get('/api/library/size')
 @access_required('shop')

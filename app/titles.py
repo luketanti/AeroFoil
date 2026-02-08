@@ -410,6 +410,28 @@ def identify_file(filepath):
             } for c in contents]
     return identification, success, contents, error
 
+def _get_manual_title_override(title_id):
+    try:
+        settings = load_settings()
+        overrides = (settings.get('titles') or {}).get('manual_overrides') or {}
+        return overrides.get(str(title_id or '').strip().upper()) or {}
+    except Exception:
+        return {}
+
+def _apply_manual_title_override(title_id, info):
+    out = dict(info or {})
+    override = _get_manual_title_override(title_id)
+    if not isinstance(override, dict) or not override:
+        return out
+
+    for key in ('name', 'description', 'iconUrl', 'bannerUrl'):
+        value = str(override.get(key) or '').strip()
+        if value:
+            out[key] = value
+    screenshots = override.get('screenshots')
+    if isinstance(screenshots, list) and screenshots:
+        out['screenshots'] = [str(u).strip() for u in screenshots if str(u or '').strip()][:12]
+    return out
 
 def get_game_info(title_id):
     global _titles_db
@@ -419,7 +441,7 @@ def get_game_info(title_id):
     if _titles_db is None:
         logger.warning("titles_db is not loaded. Call load_titledb first.")
         # Return default structure so games can still be displayed
-        return {
+        return _apply_manual_title_override(title_id, {
             'name': 'Unrecognized',
             'bannerUrl': '//placehold.it/400x200',
             'iconUrl': '',
@@ -428,7 +450,7 @@ def get_game_info(title_id):
             'nsuId': None,
             'description': None,
             'screenshots': [],
-        }
+        })
 
     try:
         title_info = [_titles_db[t] for t in list(_titles_db.keys()) if _titles_db[t]['id'] == title_id][0]
@@ -446,7 +468,7 @@ def get_game_info(title_id):
                 screenshots = _titles_images_by_title_id.get(str(title_id).strip().upper()) or []
             except Exception:
                 screenshots = []
-        return {
+        return _apply_manual_title_override(title_id, {
             'name': title_info['name'],
             'bannerUrl': title_info['bannerUrl'],
             'iconUrl': title_info['iconUrl'],
@@ -455,17 +477,19 @@ def get_game_info(title_id):
             'nsuId': title_info.get('nsuId'),
             'description': description,
             'screenshots': screenshots,
-        }
+        })
     except Exception:
         logger.error(f"Title ID not found in titledb: {title_id}")
-        return {
+        return _apply_manual_title_override(title_id, {
             'name': 'Unrecognized',
             'bannerUrl': '//placehold.it/400x200',
             'iconUrl': '',
             'id': title_id + ' not found in titledb',
             'category': '',
             'nsuId': None,
-        }
+            'description': None,
+            'screenshots': [],
+        })
 
 
 def search_titles(query, limit=20):

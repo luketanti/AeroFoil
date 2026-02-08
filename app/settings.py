@@ -18,6 +18,30 @@ _settings_cache = None
 _settings_cache_time = 0
 _settings_cache_ttl = 5  # Cache for 5 seconds
 
+def _normalize_titles_manual_overrides(raw_overrides):
+    if not isinstance(raw_overrides, dict):
+        return {}
+
+    out = {}
+    for key, value in raw_overrides.items():
+        title_id = str(key or '').strip().upper()
+        if not title_id:
+            continue
+        if not isinstance(value, dict):
+            continue
+        screenshots = value.get('screenshots') or []
+        if not isinstance(screenshots, list):
+            screenshots = []
+        screenshots = [str(u).strip() for u in screenshots if str(u or '').strip()]
+        out[title_id] = {
+            'name': str(value.get('name') or '').strip(),
+            'description': str(value.get('description') or '').strip(),
+            'iconUrl': str(value.get('iconUrl') or '').strip(),
+            'bannerUrl': str(value.get('bannerUrl') or '').strip(),
+            'screenshots': screenshots[:12],
+        }
+    return out
+
 def _normalize_library_naming_templates(raw_templates):
     default_templates = (
         DEFAULT_SETTINGS.get('library', {})
@@ -140,6 +164,17 @@ def load_settings(force_reload=False):
             merged.update(settings.get('downloads', {}))
             settings['downloads'] = merged
 
+        if 'titles' not in settings:
+            settings['titles'] = DEFAULT_SETTINGS.get('titles', {})
+        else:
+            defaults = DEFAULT_SETTINGS.get('titles', {})
+            merged = defaults.copy()
+            merged.update(settings.get('titles', {}))
+            settings['titles'] = merged
+        settings['titles']['manual_overrides'] = _normalize_titles_manual_overrides(
+            settings['titles'].get('manual_overrides')
+        )
+
         if 'library' not in settings:
             settings['library'] = DEFAULT_SETTINGS.get('library', {})
         else:
@@ -167,6 +202,10 @@ def load_settings(force_reload=False):
     settings.setdefault('library', {})
     settings['library']['naming_templates'] = _normalize_library_naming_templates(
         settings['library'].get('naming_templates')
+    )
+    settings.setdefault('titles', {})
+    settings['titles']['manual_overrides'] = _normalize_titles_manual_overrides(
+        settings['titles'].get('manual_overrides')
     )
     
     # Update cache
@@ -264,6 +303,37 @@ def set_titles_settings(region, language):
     # Invalidate cache
     global _settings_cache
     _settings_cache = None
+
+def set_manual_title_override(title_id, data):
+    title_id = str(title_id or '').strip().upper()
+    if not title_id:
+        return False
+
+    settings = load_settings(force_reload=True)
+    settings.setdefault('titles', {})
+    overrides = _normalize_titles_manual_overrides(settings['titles'].get('manual_overrides'))
+    payload = _normalize_titles_manual_overrides({title_id: data}).get(title_id)
+    if not payload:
+        return False
+
+    has_value = any([
+        payload.get('name'),
+        payload.get('description'),
+        payload.get('iconUrl'),
+        payload.get('bannerUrl'),
+        bool(payload.get('screenshots')),
+    ])
+    if has_value:
+        overrides[title_id] = payload
+    else:
+        overrides.pop(title_id, None)
+
+    settings['titles']['manual_overrides'] = overrides
+    with open(CONFIG_FILE, 'w') as yaml_file:
+        yaml.dump(settings, yaml_file)
+    global _settings_cache
+    _settings_cache = None
+    return True
 
 def set_shop_settings(data):
     settings = load_settings(force_reload=True)

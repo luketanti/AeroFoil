@@ -77,6 +77,7 @@ DEFAULT_SETTINGS = {
         "language": "en",
         "region": "US",
         "valid_keys": False,
+        "manual_overrides": {},
     },
     "downloads": {
         "enabled": False,

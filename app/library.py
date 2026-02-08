@@ -443,6 +443,15 @@ def compute_apps_hash():
         hash_md5.update((app['title_id'] or '').encode())
         hash_md5.update(str(app.get('size') or 0).encode())
         hash_md5.update(str(app.get('title_db_id') or 0).encode())
+
+    # Include manual metadata overrides so cache invalidates when admins edit unknown titles.
+    try:
+        from app.settings import load_settings
+        settings = load_settings()
+        overrides = (settings.get('titles') or {}).get('manual_overrides') or {}
+        hash_md5.update(json.dumps(overrides, sort_keys=True).encode())
+    except Exception:
+        pass
     return hash_md5.hexdigest()
 
 
