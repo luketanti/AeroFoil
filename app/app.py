@@ -41,6 +41,7 @@ import time
 import uuid
 import re
 import secrets
+import gc
 
 from app.db import add_access_event, get_access_events
 
@@ -400,6 +401,8 @@ def _read_cache_ttl(env_key, default_value):
 # Set to 0 to disable in-memory caching entirely.
 # Set to None to disable expiry (cache refreshes on library rebuild).
 SHOP_SECTIONS_CACHE_TTL_S = _read_cache_ttl('SHOP_SECTIONS_CACHE_TTL_S', None)
+SHOP_SECTIONS_ALL_ITEMS_CAP = _read_cache_ttl('SHOP_SECTIONS_ALL_ITEMS_CAP', 300)
+SHOP_SECTIONS_MAX_IN_MEMORY_BYTES = _read_cache_ttl('SHOP_SECTIONS_MAX_IN_MEMORY_BYTES', 4 * 1024 * 1024)
 MEDIA_INDEX_TTL_S = _read_cache_ttl('MEDIA_INDEX_TTL_S', None)
 # ===============================
 
@@ -432,19 +435,114 @@ def _save_shop_sections_cache_to_disk(payload, limit, timestamp):
     except Exception:
         pass
 
-def _build_shop_sections_payload(limit):
-    titles.load_titledb()
+def _estimate_json_size_bytes(payload):
     try:
+        return len(json.dumps(payload, separators=(',', ':')).encode('utf-8'))
+    except Exception:
+        return None
+
+def _store_shop_sections_cache(payload, limit, timestamp, persist_disk=True):
+    cache_payload = payload
+    max_bytes = SHOP_SECTIONS_MAX_IN_MEMORY_BYTES
+    if max_bytes is not None:
+        try:
+            max_bytes = max(0, int(max_bytes))
+            payload_size = _estimate_json_size_bytes(payload)
+            if payload_size is not None and payload_size > max_bytes:
+                logger.info(
+                    "Skipping in-memory shop sections cache (%s bytes > %s bytes); using disk cache only.",
+                    payload_size,
+                    max_bytes
+                )
+                cache_payload = None
+        except Exception:
+            pass
+
+    with shop_sections_cache_lock:
+        if cache_payload is None:
+            shop_sections_cache['payload'] = None
+            shop_sections_cache['limit'] = None
+            shop_sections_cache['timestamp'] = 0
+        else:
+            shop_sections_cache['payload'] = cache_payload
+            shop_sections_cache['limit'] = limit
+            shop_sections_cache['timestamp'] = timestamp
+
+    if persist_disk:
+        _save_shop_sections_cache_to_disk(payload, limit, timestamp)
+
+def _summarize_shop_sections_payload(payload):
+    summary = {
+        'valid': isinstance(payload, dict),
+        'size_bytes': _estimate_json_size_bytes(payload),
+        'sections': []
+    }
+    if not isinstance(payload, dict):
+        return summary
+    sections = payload.get('sections')
+    if not isinstance(sections, list):
+        return summary
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        items = section.get('items') or []
+        total = section.get('total')
+        try:
+            total = int(total) if total is not None else len(items)
+        except Exception:
+            total = len(items)
+        summary['sections'].append({
+            'id': section.get('id'),
+            'title': section.get('title'),
+            'items': len(items) if isinstance(items, list) else 0,
+            'total': total,
+            'truncated': bool(section.get('truncated'))
+        })
+    return summary
+
+def _read_proc_meminfo_bytes():
+    values = {}
+    try:
+        with open('/proc/self/status', 'r', encoding='utf-8') as fh:
+            for line in fh:
+                if line.startswith('VmRSS:') or line.startswith('VmSize:'):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        key = parts[0].rstrip(':')
+                        values[key] = int(parts[1]) * 1024
+    except Exception:
+        pass
+    return {
+        'rss_bytes': values.get('VmRSS'),
+        'vms_bytes': values.get('VmSize')
+    }
+
+def _build_shop_sections_payload(limit):
+    try:
+        limit = int(limit or 50)
+    except (TypeError, ValueError):
+        limit = 50
+    limit = max(1, limit)
+    with titles.titledb_session():
         apps = Apps.query.options(
             joinedload(Apps.files),
             joinedload(Apps.title)
         ).filter_by(owned=True).all()
+        info_cache = {}
 
         def _safe_int(value, default=0):
             try:
                 return int(value)
             except (TypeError, ValueError):
                 return default
+
+        def _get_info(title_id):
+            key = (title_id or '').upper()
+            if not key:
+                return None
+            if key not in info_cache:
+                info_cache[key] = titles.get_game_info(key)
+            return info_cache[key]
 
         def _select_file(app):
             if not app.files:
@@ -456,10 +554,10 @@ def _build_shop_sections_payload(limit):
             if not file_obj:
                 return None
             title_id = app.title.title_id if app.title else None
-            base_info = titles.get_game_info(title_id) if title_id else None
+            base_info = _get_info(title_id)
             app_info = None
             if app.app_type == APP_TYPE_DLC:
-                app_info = titles.get_game_info(app.app_id)
+                app_info = _get_info(app.app_id)
             name = (app_info or base_info or {}).get('name') or app.app_id
             title_name = (base_info or {}).get('name') or name
             icon_url = f'/api/shop/icon/{title_id}' if title_id else ''
@@ -507,7 +605,7 @@ def _build_shop_sections_payload(limit):
             if item:
                 update_items_full.append(item)
         update_items_full.sort(key=lambda item: _safe_int(item['app_version']), reverse=True)
-        update_items = update_items_full
+        update_items = update_items_full[:limit]
 
         dlc_by_id = {}
         for app in dlc_apps:
@@ -519,7 +617,17 @@ def _build_shop_sections_payload(limit):
         dlc_items_full.sort(key=lambda item: _safe_int(item['app_version']), reverse=True)
         dlc_items = dlc_items_full[:limit]
 
-        all_items = sorted(base_items + update_items_full + dlc_items_full, key=lambda item: item['name'].lower())
+        all_total = len(base_items) + len(update_items_full) + len(dlc_items_full)
+        all_limit = None
+        if SHOP_SECTIONS_ALL_ITEMS_CAP is not None:
+            all_limit = max(limit, int(SHOP_SECTIONS_ALL_ITEMS_CAP))
+
+        all_items = sorted(
+            base_items + update_items_full + dlc_items_full,
+            key=lambda item: item['name'].lower()
+        )
+        if all_limit is not None:
+            all_items = all_items[:all_limit]
 
         return {
             'sections': [
@@ -527,12 +635,15 @@ def _build_shop_sections_payload(limit):
                 {'id': 'recommended', 'title': 'Recommended', 'items': recommended_items},
                 {'id': 'updates', 'title': 'Updates', 'items': update_items},
                 {'id': 'dlc', 'title': 'DLC', 'items': dlc_items},
-                {'id': 'all', 'title': 'All', 'items': all_items}
+                {
+                    'id': 'all',
+                    'title': 'All',
+                    'items': all_items,
+                    'total': all_total,
+                    'truncated': len(all_items) < all_total
+                }
             ]
         }
-    finally:
-        titles.identification_in_progress_count -= 1
-        titles.unload_titledb()
 
 def _refresh_shop_sections_cache(limit):
     global shop_sections_refresh_running
@@ -547,11 +658,7 @@ def _refresh_shop_sections_cache(limit):
             with app.app_context():
                 now = time.time()
                 payload = _build_shop_sections_payload(limit)
-                with shop_sections_cache_lock:
-                    shop_sections_cache['payload'] = payload
-                    shop_sections_cache['limit'] = limit
-                    shop_sections_cache['timestamp'] = now
-                _save_shop_sections_cache_to_disk(payload, limit, now)
+                _store_shop_sections_cache(payload, limit, now, persist_disk=True)
         finally:
             with shop_sections_refresh_lock:
                 shop_sections_refresh_running = False
@@ -1785,8 +1892,7 @@ def request_prowlarr_search_api():
             info = titles.get_game_info(title_id) or {}
             resolved_name = (info.get('name') or '').strip() or resolved_name
         finally:
-            titles.identification_in_progress_count -= 1
-            titles.unload_titledb()
+            titles.release_titledb()
 
     base_query = resolved_name or title_id
     prefix = (downloads.get('search_prefix') or '').strip()
@@ -2189,8 +2295,7 @@ def prefetch_media_icons_api():
                         'message': str(e)
                     })
     finally:
-        titles.identification_in_progress_count -= 1
-        titles.unload_titledb()
+        titles.release_titledb()
 
     return jsonify({
         'success': True,
@@ -2268,8 +2373,7 @@ def prefetch_media_banners_api():
                         'message': str(e)
                     })
     finally:
-        titles.identification_in_progress_count -= 1
-        titles.unload_titledb()
+        titles.release_titledb()
 
     return jsonify({
         'success': True,
@@ -2645,9 +2749,71 @@ def manage_health():
     keys_ok = os.path.exists(KEYS_FILE)
     return jsonify({
         'success': True,
+        'nsz_exe': nsz_path,
         'nsz_runner': nsz_path,
         'keys_file': keys_file,
         'keys_present': keys_ok
+    })
+
+@app.get('/api/manage/diagnostics/memory')
+@app.get('/api/diagnostics/memory')
+@access_required('admin')
+def manage_memory_diagnostics():
+    now = time.time()
+    with scan_lock:
+        scan_busy = bool(scan_in_progress)
+    with library_rebuild_lock:
+        rebuild_state = dict(library_rebuild_status)
+    with shop_sections_cache_lock:
+        in_memory_payload = shop_sections_cache.get('payload')
+        in_memory_limit = shop_sections_cache.get('limit')
+        in_memory_timestamp = float(shop_sections_cache.get('timestamp') or 0)
+
+    disk_cache = _load_shop_sections_cache_from_disk()
+    disk_payload = (disk_cache or {}).get('payload')
+    disk_ts = float((disk_cache or {}).get('timestamp') or 0)
+
+    sqlalchemy_diag = {
+        'current_session_identity_map_size': len(db.session.identity_map),
+        'new_count': len(getattr(db.session, 'new', []) or []),
+        'dirty_count': len(getattr(db.session, 'dirty', []) or []),
+    }
+
+    return jsonify({
+        'success': True,
+        'timestamp': now,
+        'process': _read_proc_meminfo_bytes(),
+        'python_gc': {
+            'counts': list(gc.get_count()),
+        },
+        'scan': {
+            'scan_in_progress': scan_busy,
+            'library_rebuild': rebuild_state,
+            'library_memory_diagnostics': get_memory_diagnostics(),
+        },
+        'sqlalchemy': sqlalchemy_diag,
+        'titledb': titles.get_titledb_diagnostics(),
+        'shop_sections_cache': {
+            'config': {
+                'ttl_s': SHOP_SECTIONS_CACHE_TTL_S,
+                'all_items_cap': SHOP_SECTIONS_ALL_ITEMS_CAP,
+                'max_in_memory_bytes': SHOP_SECTIONS_MAX_IN_MEMORY_BYTES,
+            },
+            'in_memory': {
+                'present': in_memory_payload is not None,
+                'limit': in_memory_limit,
+                'timestamp': in_memory_timestamp,
+                'age_s': max(0.0, now - in_memory_timestamp) if in_memory_timestamp else None,
+                'summary': _summarize_shop_sections_payload(in_memory_payload),
+            },
+            'disk': {
+                'present': bool(disk_cache),
+                'limit': (disk_cache or {}).get('limit'),
+                'timestamp': disk_ts if disk_ts else None,
+                'age_s': max(0.0, now - disk_ts) if disk_ts else None,
+                'summary': _summarize_shop_sections_payload(disk_payload),
+            },
+        }
     })
 
 @app.get('/api/manage/libraries')
@@ -2715,8 +2881,7 @@ def titledb_search_api():
             r['in_library'] = (r.get('id') or '').upper() in existing
         return jsonify({'success': True, 'results': results})
     finally:
-        titles.identification_in_progress_count -= 1
-        titles.unload_titledb()
+        titles.release_titledb()
 
 @app.post('/api/upload')
 @access_required('admin')
@@ -3055,8 +3220,7 @@ def get_title_info_api(title_id):
     try:
         info = titles.get_game_info(title_id) or {}
     finally:
-        titles.identification_in_progress_count -= 1
-        titles.unload_titledb()
+        titles.release_titledb()
 
     return jsonify({
         'success': True,
@@ -3286,19 +3450,12 @@ def shop_sections_api():
                     disk_ok = (now - disk_ts) <= SHOP_SECTIONS_CACHE_TTL_S
                 if disk_payload and disk_ok:
                     payload = disk_payload
-                    with shop_sections_cache_lock:
-                        shop_sections_cache['payload'] = payload
-                        shop_sections_cache['limit'] = limit
-                        shop_sections_cache['timestamp'] = disk_ts
+                    _store_shop_sections_cache(payload, limit, disk_ts, persist_disk=False)
 
     if payload is None:
         payload = _build_shop_sections_payload(limit)
         if SHOP_SECTIONS_CACHE_TTL_S is None or SHOP_SECTIONS_CACHE_TTL_S > 0:
-            with shop_sections_cache_lock:
-                shop_sections_cache['payload'] = payload
-                shop_sections_cache['limit'] = limit
-                shop_sections_cache['timestamp'] = now
-            _save_shop_sections_cache_to_disk(payload, limit, now)
+            _store_shop_sections_cache(payload, limit, now, persist_disk=True)
 
     if _is_cyberfoil_request():
         _log_access(
@@ -3376,8 +3533,7 @@ def shop_icon_api(title_id):
     try:
         info = titles.get_game_info(title_id)
     finally:
-        titles.identification_in_progress_count -= 1
-        titles.unload_titledb()
+        titles.release_titledb()
     icon_url = info.get('iconUrl') if info else ''
     if not icon_url:
         response = send_from_directory(app.static_folder, 'placeholder-icon.svg')
@@ -3529,8 +3685,7 @@ def shop_banner_api(title_id):
     try:
         info = titles.get_game_info(title_id)
     finally:
-        titles.identification_in_progress_count -= 1
-        titles.unload_titledb()
+        titles.release_titledb()
     banner_url = info.get('bannerUrl') if info else ''
     if not banner_url:
         response = send_from_directory(app.static_folder, 'placeholder-banner.svg')
@@ -3647,14 +3802,9 @@ def post_library_change():
                 _media_cache_index['banner'].clear()
             now = time.time()
             payload = _build_shop_sections_payload(50)
-            with shop_sections_cache_lock:
-                shop_sections_cache['payload'] = payload
-                shop_sections_cache['limit'] = 50
-                shop_sections_cache['timestamp'] = now
-            _save_shop_sections_cache_to_disk(payload, 50, now)
+            _store_shop_sections_cache(payload, 50, now, persist_disk=True)
         finally:
-            titles.identification_in_progress_count -= 1
-            titles.unload_titledb()
+            titles.release_titledb()
             with library_rebuild_lock:
                 library_rebuild_status['in_progress'] = False
                 library_rebuild_status['updated_at'] = time.time()
