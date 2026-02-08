@@ -1,6 +1,7 @@
 import logging
 
 from app.db import db, TitleRequests, Titles
+from sqlalchemy.orm import joinedload
 
 
 logger = logging.getLogger('main')
@@ -29,4 +30,6 @@ def list_requests(user_id=None, include_all=False, limit=500):
     q = TitleRequests.query
     if not include_all:
         q = q.filter_by(user_id=user_id)
+    else:
+        q = q.options(joinedload(TitleRequests.user))
     return q.order_by(TitleRequests.created_at.desc()).limit(limit).all()
