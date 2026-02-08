@@ -11,8 +11,11 @@ from app.settings import *
 from pathlib import Path
 import logging
 
-from nstools.Fs import Pfs0, Xci, Nsp, Nca, Type, factory
-from nstools.nut import Keys
+if NSZ_DIR not in sys.path:
+    sys.path.insert(0, NSZ_DIR)
+
+from nsz.Fs import Pfs0, Xci, Nsp, Nca, Type, factory
+from nsz.nut import Keys
 
 # Retrieve main logger
 logger = logging.getLogger('main')
@@ -348,7 +351,14 @@ def extract_meta_from_cnmt(cnmt_sections):
 def identify_file_from_cnmt(filepath):
     contents = []
     container = factory(Path(filepath).resolve())
-    container.open(filepath, 'rb', meta_only=True)
+    try:
+        container.open(filepath, 'rb', meta_only=True)
+    except TypeError as e:
+        # Backward compatibility: some nsz builds do not support meta_only.
+        if 'meta_only' not in str(e):
+            raise
+        logger.debug('meta_only is not supported by this nsz build; using full container open.')
+        container.open(filepath, 'rb')
     try:
         for cnmt_sections in get_cnmts(container):
             contents += extract_meta_from_cnmt(cnmt_sections)

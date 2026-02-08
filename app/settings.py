@@ -3,7 +3,10 @@ import yaml
 import os, sys
 import time
 
-from nstools.nut import Keys
+if NSZ_DIR not in sys.path:
+    sys.path.insert(0, NSZ_DIR)
+
+from nsz.nut import Keys
 
 import logging
 
