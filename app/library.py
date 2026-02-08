@@ -1,4 +1,6 @@
 import hashlib
+import copy
+import gc
 import os
 import re
 import shutil
@@ -16,6 +18,106 @@ from app.utils import *
 
 _organize_lock = threading.Lock()
 _pending_organize_paths = set()
+_SCAN_ADD_BATCH_SIZE = 250
+_SCAN_DELETE_PROGRESS_INTERVAL = 250
+_IDENTIFY_QUERY_BATCH_SIZE = 500
+_IDENTIFY_COMMIT_INTERVAL = 50
+_ORGANIZE_BATCH_SIZE = 400
+_memory_diag_lock = threading.Lock()
+_memory_diagnostics = {
+    'updated_at': 0,
+    'phases': {}
+}
+
+def _diag_phase_start(phase, **metadata):
+    now = time.time()
+    with _memory_diag_lock:
+        previous = _memory_diagnostics['phases'].get(phase) or {}
+        run_count = int(previous.get('run_count') or 0) + 1
+        _memory_diagnostics['phases'][phase] = {
+            'run_count': run_count,
+            'in_progress': True,
+            'started_at': now,
+            'finished_at': None,
+            'duration_s': None,
+            'identity_map_last': 0,
+            'identity_map_peak': 0,
+            'gc_collections': 0,
+            'counters': {},
+            'metadata': metadata or {},
+            'last_error': None,
+        }
+        _memory_diagnostics['updated_at'] = now
+
+def _diag_phase_update(phase, **counters):
+    now = time.time()
+    with _memory_diag_lock:
+        phase_state = _memory_diagnostics['phases'].get(phase)
+        if not phase_state:
+            return
+        phase_state['counters'].update(counters or {})
+        _memory_diagnostics['updated_at'] = now
+
+def _diag_sample_identity_map(phase):
+    try:
+        size = len(db.session.identity_map)
+    except Exception:
+        return
+    now = time.time()
+    with _memory_diag_lock:
+        phase_state = _memory_diagnostics['phases'].get(phase)
+        if not phase_state:
+            return
+        phase_state['identity_map_last'] = int(size)
+        phase_state['identity_map_peak'] = max(int(phase_state.get('identity_map_peak') or 0), int(size))
+        _memory_diagnostics['updated_at'] = now
+
+def _diag_note_gc(phase, collections=1):
+    now = time.time()
+    with _memory_diag_lock:
+        phase_state = _memory_diagnostics['phases'].get(phase)
+        if not phase_state:
+            return
+        phase_state['gc_collections'] = int(phase_state.get('gc_collections') or 0) + int(collections or 1)
+        _memory_diagnostics['updated_at'] = now
+
+def _diag_phase_error(phase, error):
+    now = time.time()
+    with _memory_diag_lock:
+        phase_state = _memory_diagnostics['phases'].get(phase)
+        if not phase_state:
+            return
+        phase_state['last_error'] = str(error)
+        _memory_diagnostics['updated_at'] = now
+
+def _diag_phase_end(phase, **counters):
+    now = time.time()
+    with _memory_diag_lock:
+        phase_state = _memory_diagnostics['phases'].get(phase)
+        if not phase_state:
+            return
+        if counters:
+            phase_state['counters'].update(counters)
+        phase_state['in_progress'] = False
+        phase_state['finished_at'] = now
+        started_at = float(phase_state.get('started_at') or now)
+        phase_state['duration_s'] = max(0.0, now - started_at)
+        _memory_diagnostics['updated_at'] = now
+
+def get_memory_diagnostics():
+    with _memory_diag_lock:
+        return copy.deepcopy(_memory_diagnostics)
+
+def _iter_library_files(library_path):
+    """Yield supported files under a library path without building a full list in memory."""
+    for root, _, filenames in os.walk(library_path):
+        for filename in filenames:
+            try:
+                extension = filename.rsplit('.', 1)[-1].lower()
+            except Exception:
+                extension = ''
+            if extension in ALLOWED_EXTENSIONS:
+                yield os.path.join(root, filename)
 
 def add_library_complete(app, watcher, path):
     """Add a library to settings, database, and watchdog"""
@@ -132,25 +234,96 @@ def add_files_to_library(library, files):
         # Commit every 100 files to avoid excessive memory use
         if (n + 1) % 100 == 0:
             db.session.commit()
+            db.session.expunge_all()
 
     # Final commit
     db.session.commit()
+    db.session.expunge_all()
 
 def scan_library_path(library_path):
+    phase = 'scan_library_path'
+    _diag_phase_start(phase, library_path=library_path)
     library_id = get_library_id(library_path)
     logger.info(f'Scanning library path {library_path} ...')
+    if library_id is None:
+        _diag_phase_end(phase, reason='library_not_found')
+        logger.warning(f'Library path {library_path} is not registered in database.')
+        return
     if not os.path.isdir(library_path):
+        _diag_phase_end(phase, reason='path_missing', library_id=library_id)
         logger.warning(f'Library path {library_path} does not exists.')
         return
-    _, files = titles_lib.getDirsAndFiles(library_path)
 
-    filepaths_in_library = get_library_file_paths(library_id)
-    new_files = [f for f in files if f not in filepaths_in_library]
-    missing_files = [f for f in filepaths_in_library if f not in files]
-    add_files_to_library(library_id, new_files)
-    for filepath in missing_files:
-        delete_file_by_filepath(filepath)
-    set_library_scan_time(library_id)
+    total_seen = 0
+    added = 0
+    missing_count = 0
+    _diag_sample_identity_map(phase)
+    try:
+        existing_filepaths = set(iter_library_file_paths(library_id))
+        pending_new_files = []
+        for filepath in _iter_library_files(library_path):
+            total_seen += 1
+            if filepath in existing_filepaths:
+                existing_filepaths.discard(filepath)
+                continue
+            pending_new_files.append(filepath)
+            if len(pending_new_files) >= _SCAN_ADD_BATCH_SIZE:
+                add_files_to_library(library_id, pending_new_files)
+                added += len(pending_new_files)
+                pending_new_files.clear()
+                db.session.expunge_all()
+                _diag_sample_identity_map(phase)
+
+        if pending_new_files:
+            add_files_to_library(library_id, pending_new_files)
+            added += len(pending_new_files)
+            pending_new_files.clear()
+            _diag_sample_identity_map(phase)
+
+        missing_count = len(existing_filepaths)
+        for n, filepath in enumerate(existing_filepaths, start=1):
+            delete_file_by_filepath(filepath)
+            if n % _SCAN_DELETE_PROGRESS_INTERVAL == 0:
+                logger.info(f"Removed {n}/{missing_count} missing files from DB for {library_path}.")
+                db.session.expunge_all()
+                _diag_sample_identity_map(phase)
+
+        logger.info(
+            "Finished scan for %s: %s filesystem files, %s new DB entries, %s removed missing DB entries.",
+            library_path,
+            total_seen,
+            added,
+            missing_count
+        )
+        set_library_scan_time(library_id)
+    except Exception as e:
+        _diag_phase_error(phase, e)
+        raise
+    finally:
+        _diag_phase_end(
+            phase,
+            library_path=library_path,
+            library_id=library_id,
+            files_seen=total_seen,
+            files_added=added,
+            files_removed=missing_count
+        )
+
+def _get_identification_file_ids_batch(library_id, include_filename_retry, include_orphaned, last_id, batch_size):
+    orphaned_condition = ~db.session.query(app_files.c.file_id).filter(app_files.c.file_id == Files.id).exists()
+    query = db.session.query(Files.id).filter(
+        Files.library_id == library_id,
+        Files.id > last_id
+    )
+    if include_filename_retry:
+        predicates = [Files.identified.is_(False), Files.identification_type == 'filename']
+    else:
+        predicates = [Files.identified.is_(False)]
+    if include_orphaned:
+        predicates.append(orphaned_condition)
+    query = query.filter(or_(*predicates))
+    rows = query.order_by(Files.id).limit(batch_size).all()
+    return [row.id for row in rows]
 
 def get_files_to_identify(library_id):
     non_identified_files = get_all_non_identified_files_from_library(library_id)
@@ -160,154 +333,254 @@ def get_files_to_identify(library_id):
     return non_identified_files
 
 def identify_library_files(library):
+    phase = 'identify_library_files'
     if isinstance(library, int) or library.isdigit():
         library_id = library
         library_path = get_library_path(library_id)
     else:
         library_path = library
         library_id = get_library_id(library_path)
-    files_to_identify = get_files_to_identify(library_id)
-    nb_to_identify = len(files_to_identify)
-    for n, file in enumerate(files_to_identify):
-        try:
-            file_id = file.id
-            filepath = file.filepath
-            filename = file.filename
+    _diag_phase_start(phase, library_path=library_path, library_id=library_id)
+    if library_id is None:
+        _diag_phase_end(phase, reason='library_not_found')
+        logger.warning(f'Library path {library_path} is not registered in database.')
+        return
+    include_filename_retry = bool(titles_lib.Keys.keys_loaded)
+    include_orphaned = True
+    nb_to_identify = count_file_ids_for_identification(
+        library_id,
+        include_filename_retry=include_filename_retry,
+        include_orphaned=include_orphaned
+    )
+    if nb_to_identify <= 0:
+        _diag_phase_end(
+            phase,
+            library_path=library_path,
+            library_id=library_id,
+            include_filename_retry=include_filename_retry,
+            total_candidates=0
+        )
+        return
 
-            if not os.path.exists(filepath):
-                logger.warning(f'Identifying file ({n+1}/{nb_to_identify}): {filename} no longer exists, deleting from database.')
-                Files.query.filter_by(id=file_id).delete(synchronize_session=False)
-                continue
+    logger.info(
+        "Identifying %s file(s) for library %s (include_filename_retry=%s).",
+        nb_to_identify,
+        library_path,
+        include_filename_retry
+    )
+    title_id_db_cache = {}
+    last_id = 0
+    processed = 0
+    _diag_sample_identity_map(phase)
 
-            logger.info(f'Identifying file ({n+1}/{nb_to_identify}): {filename}')
-            identification, success, file_contents, error = titles_lib.identify_file(filepath)
-            if success and file_contents and not error:
-                # find all unique Titles ID to add to the Titles db
-                title_ids = list(dict.fromkeys([c['title_id'] for c in file_contents]))
+    try:
+        while True:
+            batch_ids = _get_identification_file_ids_batch(
+            library_id,
+            include_filename_retry=include_filename_retry,
+            include_orphaned=include_orphaned,
+            last_id=last_id,
+            batch_size=_IDENTIFY_QUERY_BATCH_SIZE
+        )
+            if not batch_ids:
+                break
+            last_id = batch_ids[-1]
 
-                for title_id in title_ids:
-                    add_title_id_in_db(title_id)
+            for file_id in batch_ids:
+                file = db.session.get(Files, file_id)
+                if file is None:
+                    continue
+                filename = file.filename or file.filepath or str(file.id)
+                filepath = file.filepath
+                file_deleted = False
 
-                nb_content = 0
-                for file_content in file_contents:
-                    logger.info(f'Identifying file ({n+1}/{nb_to_identify}) - Found content Title ID: {file_content["title_id"]} App ID : {file_content["app_id"]} Title Type: {file_content["type"]} Version: {file_content["version"]}')
-                    # now add the content to Apps
-                    title_id_in_db = get_title_id_db_id(file_content["title_id"])
-                    
-                    # Check if app already exists
-                    existing_app = get_app_by_id_and_version(
-                        file_content["app_id"],
-                        file_content["version"]
-                    )
-                    
-                    if existing_app:
-                        # Add file to existing app using many-to-many relationship
-                        add_file_to_app(file_content["app_id"], file_content["version"], file_id)
-                    else:
-                        # Create new app entry and add file using many-to-many relationship
-                        new_app = Apps(
-                            app_id=file_content["app_id"],
-                            app_version=file_content["version"],
-                            app_type=file_content["type"],
-                            owned=True,
-                            title_id=title_id_in_db
+                try:
+                    if not filepath or not os.path.exists(filepath):
+                        logger.warning(
+                            f'Identifying file ({processed + 1}/{nb_to_identify}): {filename} no longer exists, deleting from database.'
                         )
-                        db.session.add(new_app)
-                        db.session.flush()  # Flush to get the app ID
-                        
-                        # Add the file to the new app
-                        file_obj = get_file_from_db(file_id)
-                        if file_obj:
-                            new_app.files.append(file_obj)
-                    
-                    nb_content += 1
+                        db.session.delete(file)
+                        file_deleted = True
+                        continue
 
-                if nb_content > 1:
-                    file.multicontent = True
-                file.nb_content = nb_content
-                file.identified = True
-            else:
-                logger.warning(f"Error identifying file {filename}: {error}")
-                file.identification_error = error
-                file.identified = False
+                    logger.info(f'Identifying file ({processed + 1}/{nb_to_identify}): {filename}')
+                    identification, success, file_contents, error = titles_lib.identify_file(filepath)
+                    if success and file_contents and not error:
+                        title_ids = list(dict.fromkeys([c['title_id'] for c in file_contents if c.get('title_id')]))
+                        for title_id in title_ids:
+                            title_db_id = title_id_db_cache.get(title_id)
+                            if title_db_id is None:
+                                title_obj = Titles.query.filter_by(title_id=title_id).first()
+                                if not title_obj:
+                                    title_obj = Titles(title_id=title_id)
+                                    db.session.add(title_obj)
+                                    db.session.flush()
+                                title_db_id = title_obj.id
+                                title_id_db_cache[title_id] = title_db_id
 
-            file.identification_type = identification
+                        nb_content = 0
+                        for file_content in file_contents:
+                            logger.info(
+                                "Identifying file (%s/%s) - Found content Title ID: %s App ID : %s Title Type: %s Version: %s",
+                                processed + 1,
+                                nb_to_identify,
+                                file_content.get("title_id"),
+                                file_content.get("app_id"),
+                                file_content.get("type"),
+                                file_content.get("version")
+                            )
+                            title_id_in_db = title_id_db_cache.get(file_content.get("title_id"))
+                            if title_id_in_db is None:
+                                continue
 
-        except Exception as e:
-            logger.warning(f"Error identifying file {filename}: {e}")
-            file.identification_error = str(e)
-            file.identified = False
+                            app_id = file_content.get("app_id")
+                            app_version = str(file_content.get("version") or "0")
+                            existing_app = Apps.query.filter_by(
+                                app_id=app_id,
+                                app_version=app_version
+                            ).first()
 
-        # and finally update the File with identification info
-        file.identification_attempts += 1
-        file.last_attempt = datetime.datetime.now()
+                            if existing_app:
+                                if file not in existing_app.files:
+                                    existing_app.files.append(file)
+                                existing_app.owned = True
+                            else:
+                                new_app = Apps(
+                                    app_id=app_id,
+                                    app_version=app_version,
+                                    app_type=file_content.get("type"),
+                                    owned=True,
+                                    title_id=title_id_in_db
+                                )
+                                new_app.files.append(file)
+                                db.session.add(new_app)
 
-        # Commit every 100 files to avoid excessive memory use
-        if (n + 1) % 100 == 0:
-            db.session.commit()
+                            nb_content += 1
 
-    # Final commit
-    db.session.commit()
+                        file.multicontent = nb_content > 1
+                        file.nb_content = nb_content
+                        file.identified = True
+                        file.identification_error = None
+                    else:
+                        logger.warning(f"Error identifying file {filename}: {error}")
+                        file.identification_error = error
+                        file.identified = False
+
+                    file.identification_type = identification
+                except Exception as e:
+                    logger.warning(f"Error identifying file {filename}: {e}")
+                    file.identification_error = str(e)
+                    file.identified = False
+                finally:
+                    if not file_deleted:
+                        file.identification_attempts = (file.identification_attempts or 0) + 1
+                        file.last_attempt = datetime.datetime.now()
+                    processed += 1
+
+                    if processed % _IDENTIFY_COMMIT_INTERVAL == 0:
+                        db.session.commit()
+                        db.session.expunge_all()
+                        _diag_sample_identity_map(phase)
+                        if processed % (_IDENTIFY_COMMIT_INTERVAL * 10) == 0:
+                            gc.collect()
+                            _diag_note_gc(phase)
+
+        db.session.commit()
+        db.session.expunge_all()
+        _diag_sample_identity_map(phase)
+        gc.collect()
+        _diag_note_gc(phase)
+    except Exception as e:
+        _diag_phase_error(phase, e)
+        raise
+    finally:
+        _diag_phase_end(
+            phase,
+            library_path=library_path,
+            library_id=library_id,
+            include_filename_retry=include_filename_retry,
+            include_orphaned=include_orphaned,
+            total_candidates=nb_to_identify,
+            processed=processed
+        )
 
 def add_missing_apps_to_db():
+    phase = 'add_missing_apps_to_db'
+    _diag_phase_start(phase)
     logger.info('Adding missing apps to database...')
-    titles = get_all_titles()
     apps_added = 0
-    
-    for n, title in enumerate(titles):
-        title_id = title.title_id
-        if not title_id:
-            logger.warning(f'Skipping title with None title_id: {title}')
-            continue
-        title_db_id = get_title_id_db_id(title_id)
-        
-        # Add base game if not present at all (any base version)
-        existing_bases = [
-            a for a in get_all_title_apps(title_id)
-            if a.get('app_type') == APP_TYPE_BASE
-        ]
+    processed = 0
+    last_title_pk = 0
+    _diag_sample_identity_map(phase)
 
-        if not existing_bases:
-            new_base_app = Apps(
-                app_id=title_id,
-                app_version="0",
-                app_type=APP_TYPE_BASE,
-                owned=False,
-                title_id=title_db_id
+    try:
+        while True:
+            title_rows = (
+                db.session.query(Titles.id, Titles.title_id)
+                .filter(Titles.id > last_title_pk)
+                .order_by(Titles.id)
+                .limit(_IDENTIFY_QUERY_BATCH_SIZE)
+                .all()
             )
-            db.session.add(new_base_app)
-            apps_added += 1
-            logger.debug(f'Added missing base app: {title_id}')
-        
-        # Add missing update versions
-        title_versions = titles_lib.get_all_existing_versions(title_id)
-        for version_info in title_versions:
-            version = str(version_info['version'])
-            update_app_id = title_id[:-3] + '800'  # Convert base ID to update ID
-            
-            existing_update = get_app_by_id_and_version(update_app_id, version)
-            
-            if not existing_update:
-                new_update_app = Apps(
-                    app_id=update_app_id,
-                    app_version=version,
-                    app_type=APP_TYPE_UPD,
-                    owned=False,
-                    title_id=title_db_id
-                )
-                db.session.add(new_update_app)
-                apps_added += 1
-                logger.debug(f'Added missing update app: {update_app_id} v{version}')
-        
-        # Add missing DLC
-        title_dlc_ids = titles_lib.get_all_existing_dlc(title_id)
-        for dlc_app_id in title_dlc_ids:
-            dlc_versions = titles_lib.get_all_app_existing_versions(dlc_app_id)
-            if dlc_versions:
-                for dlc_version in dlc_versions:
-                    existing_dlc = get_app_by_id_and_version(dlc_app_id, str(dlc_version))
-                    
-                    if not existing_dlc:
+            if not title_rows:
+                break
+            last_title_pk = title_rows[-1].id
+
+            for row in title_rows:
+                title_id = row.title_id
+                title_db_id = row.id
+                processed += 1
+                if not title_id:
+                    logger.warning(f'Skipping title with None title_id: {row}')
+                    continue
+
+                # Add base game if not present at all (any base version).
+                existing_bases = [
+                    a for a in get_all_title_apps(title_id)
+                    if a.get('app_type') == APP_TYPE_BASE
+                ]
+
+                if not existing_bases:
+                    new_base_app = Apps(
+                        app_id=title_id,
+                        app_version="0",
+                        app_type=APP_TYPE_BASE,
+                        owned=False,
+                        title_id=title_db_id
+                    )
+                    db.session.add(new_base_app)
+                    apps_added += 1
+                    logger.debug(f'Added missing base app: {title_id}')
+
+                # Add missing update versions.
+                title_versions = titles_lib.get_all_existing_versions(title_id)
+                for version_info in title_versions:
+                    version = str(version_info['version'])
+                    update_app_id = title_id[:-3] + '800'
+                    existing_update = get_app_by_id_and_version(update_app_id, version)
+
+                    if not existing_update:
+                        new_update_app = Apps(
+                            app_id=update_app_id,
+                            app_version=version,
+                            app_type=APP_TYPE_UPD,
+                            owned=False,
+                            title_id=title_db_id
+                        )
+                        db.session.add(new_update_app)
+                        apps_added += 1
+                        logger.debug(f'Added missing update app: {update_app_id} v{version}')
+
+                # Add missing DLC.
+                title_dlc_ids = titles_lib.get_all_existing_dlc(title_id)
+                for dlc_app_id in title_dlc_ids:
+                    dlc_versions = titles_lib.get_all_app_existing_versions(dlc_app_id)
+                    if not dlc_versions:
+                        continue
+                    for dlc_version in dlc_versions:
+                        existing_dlc = get_app_by_id_and_version(dlc_app_id, str(dlc_version))
+                        if existing_dlc:
+                            continue
                         new_dlc_app = Apps(
                             app_id=dlc_app_id,
                             app_version=str(dlc_version),
@@ -318,15 +591,27 @@ def add_missing_apps_to_db():
                         db.session.add(new_dlc_app)
                         apps_added += 1
                         logger.debug(f'Added missing DLC app: {dlc_app_id} v{dlc_version}')
-        
-        # Commit every 100 titles to avoid excessive memory use
-        if (n + 1) % 100 == 0:
-            db.session.commit()
-            logger.info(f'Processed {n + 1}/{len(titles)} titles, added {apps_added} missing apps so far')
-    
-    # Final commit
-    db.session.commit()
-    logger.info(f'Finished adding missing apps to database. Total apps added: {apps_added}')
+
+                if processed % _IDENTIFY_COMMIT_INTERVAL == 0:
+                    db.session.commit()
+                    db.session.expunge_all()
+                    _diag_sample_identity_map(phase)
+                    logger.info(f'Processed {processed} titles, added {apps_added} missing apps so far')
+                    if processed % (_IDENTIFY_COMMIT_INTERVAL * 10) == 0:
+                        gc.collect()
+                        _diag_note_gc(phase)
+
+        db.session.commit()
+        db.session.expunge_all()
+        _diag_sample_identity_map(phase)
+        gc.collect()
+        _diag_note_gc(phase)
+        logger.info(f'Finished adding missing apps to database. Total apps added: {apps_added}')
+    except Exception as e:
+        _diag_phase_error(phase, e)
+        raise
+    finally:
+        _diag_phase_end(phase, processed=processed, apps_added=apps_added)
 
 def process_library_identification(app):
     logger.info(f"Starting library identification process for all libraries...")
@@ -344,70 +629,82 @@ def process_library_identification(app):
     logger.info(f"Library identification process for all libraries completed.")
 
 def update_titles():
+    phase = 'update_titles'
+    _diag_phase_start(phase)
+    _diag_sample_identity_map(phase)
     # Remove titles that no longer have any owned apps
     titles_removed = remove_titles_without_owned_apps()
     if titles_removed > 0:
             logger.info(f"Removed {titles_removed} titles with no owned apps.")
 
-    titles = get_all_titles()
-    for n, title in enumerate(titles):
-        have_base = False
-        up_to_date = False
-        complete = False
+    last_title_pk = 0
+    processed = 0
+    try:
+        while True:
+            title_batch = (
+                Titles.query
+                .filter(Titles.id > last_title_pk)
+                .order_by(Titles.id)
+                .limit(_IDENTIFY_QUERY_BATCH_SIZE)
+                .all()
+            )
+            if not title_batch:
+                break
+            last_title_pk = title_batch[-1].id
 
-        title_id = title.title_id
-        title_apps = get_all_title_apps(title_id)
+            for title in title_batch:
+                title_id = title.title_id
+                title_apps = get_all_title_apps(title_id)
 
-        # check have_base - look for owned base apps
-        owned_base_apps = [app for app in title_apps if app.get('app_type') == APP_TYPE_BASE and app.get('owned')]
-        have_base = len(owned_base_apps) > 0
+                # check have_base - look for owned base apps
+                owned_base_apps = [app for app in title_apps if app.get('app_type') == APP_TYPE_BASE and app.get('owned')]
+                have_base = len(owned_base_apps) > 0
 
-        # check up_to_date - find highest owned update version
-        owned_update_apps = [app for app in title_apps if app.get('app_type') == APP_TYPE_UPD and app.get('owned')]
-        available_update_apps = [app for app in title_apps if app.get('app_type') == APP_TYPE_UPD]
-        
-        if not available_update_apps:
-            # No updates available, consider up to date
-            up_to_date = True
-        elif not owned_update_apps:
-            # Updates available but none owned
-            up_to_date = False
-        else:
-            # Find highest available version and highest owned version
-            highest_available_version = max(int(app['app_version']) for app in available_update_apps)
-            highest_owned_version = max(int(app['app_version']) for app in owned_update_apps)
-            up_to_date = highest_owned_version >= highest_available_version
+                # check up_to_date - find highest owned update version
+                owned_update_apps = [app for app in title_apps if app.get('app_type') == APP_TYPE_UPD and app.get('owned')]
+                available_update_apps = [app for app in title_apps if app.get('app_type') == APP_TYPE_UPD]
 
-        # check complete - latest version of all available DLC are owned
-        available_dlc_apps = [app for app in title_apps if app.get('app_type') == APP_TYPE_DLC]
-        
-        if not available_dlc_apps:
-            # No DLC available, consider complete
-            complete = True
-        else:
-            # Group DLC by app_id and find latest version for each
-            dlc_by_id = {}
-            for app in available_dlc_apps:
-                app_id = app['app_id']
-                version = int(app['app_version'])
-                if app_id not in dlc_by_id or version > dlc_by_id[app_id]['version']:
-                    dlc_by_id[app_id] = {
-                        'version': version,
-                        'owned': app.get('owned', False)
-                    }
-            
-            # Check if latest version of each DLC is owned
-            complete = all(dlc_info['owned'] for dlc_info in dlc_by_id.values())
+                if not available_update_apps:
+                    up_to_date = True
+                elif not owned_update_apps:
+                    up_to_date = False
+                else:
+                    highest_available_version = max(int(app['app_version']) for app in available_update_apps)
+                    highest_owned_version = max(int(app['app_version']) for app in owned_update_apps)
+                    up_to_date = highest_owned_version >= highest_available_version
 
-        title.have_base = have_base
-        title.up_to_date = up_to_date
-        title.complete = complete
+                # check complete - latest version of all available DLC are owned
+                available_dlc_apps = [app for app in title_apps if app.get('app_type') == APP_TYPE_DLC]
+                if not available_dlc_apps:
+                    complete = True
+                else:
+                    dlc_by_id = {}
+                    for app in available_dlc_apps:
+                        app_id = app['app_id']
+                        version = int(app['app_version'])
+                        if app_id not in dlc_by_id or version > dlc_by_id[app_id]['version']:
+                            dlc_by_id[app_id] = {
+                                'version': version,
+                                'owned': app.get('owned', False)
+                            }
+                    complete = all(dlc_info['owned'] for dlc_info in dlc_by_id.values())
 
-        # Commit every 100 titles to avoid excessive memory use
-        if (n + 1) % 100 == 0:
+                title.have_base = have_base
+                title.up_to_date = up_to_date
+                title.complete = complete
+                processed += 1
+
             db.session.commit()
+            db.session.expunge_all()
+            _diag_sample_identity_map(phase)
 
-    db.session.commit()
+        gc.collect()
+        _diag_note_gc(phase)
+    except Exception as e:
+        _diag_phase_error(phase, e)
+        raise
+    finally:
+        _diag_phase_end(phase, processed=processed, titles_removed=titles_removed)
 
 def get_library_status(title_id):
     title = get_title(title_id)
@@ -428,12 +725,13 @@ def get_library_status(title_id):
     }
     return library_status
 
-def compute_apps_hash():
+def compute_apps_hash(apps=None):
     """
     Computes a hash of all Apps table content to detect changes in library state.
     """
     hash_md5 = hashlib.md5()
-    apps = get_all_apps()
+    if apps is None:
+        apps = get_all_apps()
     
     # Sort apps with safe handling of None values
     for app in sorted(apps, key=lambda x: (x['app_id'] or '', x['app_version'] or '')):
@@ -495,10 +793,13 @@ def load_library_from_disk():
         return None
 
 def generate_library():
+    phase = 'generate_library'
     """Generate the game library from Apps table, using cached version if unchanged"""
     if is_library_unchanged():
         saved_library = load_library_from_disk()
         if saved_library:
+            _diag_phase_start(phase, cached=True)
+            _diag_phase_end(phase, cached=True, items=len(saved_library.get('library') or []))
             return saved_library['library']
 
     # If the schema changed, regenerate and overwrite the cache.
@@ -508,132 +809,149 @@ def generate_library():
             cache_path.unlink(missing_ok=True)
     except Exception:
         pass
-    
-    logger.info(f'Generating library ...')
-    titles_lib.load_titledb()
-    titles = get_all_apps()
-    logger.info(f'Found {len(titles)} apps in database')
+
+    logger.info('Generating library ...')
+    _diag_phase_start(phase, cached=False)
+    _diag_sample_identity_map(phase)
     games_info = []
-    processed_dlc_apps = set()  # Track processed DLC app_ids to avoid duplicates
+    apps_snapshot = []
+    processed_dlc_apps = set()  # Track processed DLC app_ids to avoid duplicates.
+    try:
+        with titles_lib.titledb_session():
+            apps_snapshot = get_all_apps()
+            logger.info(f'Found {len(apps_snapshot)} apps in database')
 
-    for title in titles:
-        has_none_value = any(value is None for value in title.values())
-        if has_none_value:
-            logger.warning(f'File contains None value, it will be skipped: {title}')
-            continue
-        if title['app_type'] == APP_TYPE_UPD:
-            continue
+            apps_by_title = {}
+            for app_entry in apps_snapshot:
+                title_id = app_entry.get('title_id')
+                if title_id:
+                    apps_by_title.setdefault(title_id, []).append(app_entry)
 
-            
-        # Get title info from titledb
-        info_from_titledb = titles_lib.get_game_info(title['app_id'])
-        # Note: get_game_info now returns a default dict instead of None, so this check is mostly for safety
-        if info_from_titledb is None:
-            logger.warning(f'Info not found for game: {title}')
-            continue
-        title.update(info_from_titledb)
+            title_state = {
+                row.title_id: {
+                    'have_base': bool(row.have_base),
+                    'up_to_date': bool(row.up_to_date),
+                    'complete': bool(row.complete),
+                }
+                for row in db.session.query(Titles.title_id, Titles.have_base, Titles.up_to_date, Titles.complete).all()
+                if row.title_id
+            }
+            titledb_info_cache = {}
 
-        # Normalize genre/category fields for UI filtering/sorting.
-        title['genre'] = title.get('category') or ''
-        if title.get('category') is None:
-            title['category'] = ''
-        
-        if title['app_type'] == APP_TYPE_BASE:
-            # Get title status from Titles table (already calculated by update_titles)
-            title_obj = get_title(title['title_id'])
-            if title_obj:
-                title['has_base'] = title_obj.have_base
-                # Only mark as up to date if the base itself is owned and up_to_date
-                title['has_latest_version'] = (
-                    title_obj.have_base and title_obj.up_to_date
-                )
-                title['has_all_dlcs'] = title_obj.complete
-            else:
-                title['has_base'] = False
-                title['has_latest_version'] = False
-                title['has_all_dlcs'] = False
-            
-            # Get version info from Apps table and add release dates from versions_db
-            title_apps = get_all_title_apps(title['title_id'])
-            update_apps = [app for app in title_apps if app.get('app_type') == APP_TYPE_UPD]
-            
-            # Get release date information from external source
-            available_versions = titles_lib.get_all_existing_versions(title['title_id'])
-            version_release_dates = {v['version']: v['release_date'] for v in available_versions}
-            
-            version_list = []
-            for update_app in update_apps:
-                app_version = int(update_app['app_version'])
-                version_list.append({
-                    'version': app_version,
-                    'owned': update_app.get('owned', False),
-                    'size': update_app.get('size', 0) or 0,
-                    'release_date': version_release_dates.get(app_version, 'Unknown')
-                })
-            
-            title['version'] = sorted(version_list, key=lambda x: x['version'])
-            title['title_id_name'] = title['name']
-            
-        elif title['app_type'] == APP_TYPE_DLC:
-            # Skip if we've already processed this DLC app_id
-            if title['app_id'] in processed_dlc_apps:
-                continue
-            processed_dlc_apps.add(title['app_id'])
-            
-            # Get all versions for this DLC app_id
-            title_apps = get_all_title_apps(title['title_id'])
-            dlc_apps = [app for app in title_apps if app.get('app_type') == APP_TYPE_DLC and app['app_id'] == title['app_id']]
-            
-            # Create version list for this DLC
-            version_list = []
-            for dlc_app in dlc_apps:
-                app_version = int(dlc_app['app_version'])
-                version_list.append({
-                    'version': app_version,
-                    'owned': dlc_app.get('owned', False),
-                    'release_date': 'Unknown'  # DLC release dates not available in versions_db
-                })
-            
-            title['version'] = sorted(version_list, key=lambda x: x['version'])
+            def _titledb_info(title_id):
+                key = str(title_id or '').strip().upper()
+                if not key:
+                    return None
+                if key not in titledb_info_cache:
+                    titledb_info_cache[key] = titles_lib.get_game_info(key)
+                return titledb_info_cache.get(key)
 
-            # Card-level ownership: owned if any version is owned.
-            title['owned'] = any(app.get('owned') for app in dlc_apps)
-            
-            # Check if this DLC has latest version
-            if dlc_apps:
-                highest_version = max(int(app['app_version']) for app in dlc_apps)
-                owned_versions = [int(app['app_version']) for app in dlc_apps if app.get('owned')]
-                # Only true if at least one version is OWNED and the highest owned >= highest available
-                title['has_latest_version'] = (
-                    len(owned_versions) > 0 and max(owned_versions) >= highest_version
-                )
-            else:
-                title['has_latest_version'] = True
-            
-            # Get title name for DLC
-            titleid_info = titles_lib.get_game_info(title['title_id'])
-            title['title_id_name'] = titleid_info['name'] if titleid_info else 'Unrecognized'
-            
-        games_info.append(title)
-    
-    library_data = {
-        'version': LIBRARY_CACHE_VERSION,
-        'hash': compute_apps_hash(),
-        'library': sorted(games_info, key=lambda x: (
-            "title_id_name" not in x, 
-            x.get("title_id_name", "Unrecognized") or "Unrecognized", 
-            x.get('app_id', "") or ""
-        ))
-    }
+            for app_entry in apps_snapshot:
+                title = dict(app_entry)
+                has_none_value = any(value is None for value in title.values())
+                if has_none_value:
+                    logger.warning(f'File contains None value, it will be skipped: {title}')
+                    continue
+                if title['app_type'] == APP_TYPE_UPD:
+                    continue
 
-    save_library_to_disk(library_data)
+                info_from_titledb = _titledb_info(title.get('app_id'))
+                if info_from_titledb is None:
+                    logger.warning(f'Info not found for game: {title}')
+                    continue
+                title.update(info_from_titledb)
 
-    titles_lib.identification_in_progress_count -= 1
-    titles_lib.unload_titledb()
+                title['genre'] = title.get('category') or ''
+                if title.get('category') is None:
+                    title['category'] = ''
 
-    logger.info(f'Generating library done.')
+                if title['app_type'] == APP_TYPE_BASE:
+                    current_state = title_state.get(title.get('title_id')) or {}
+                    title['has_base'] = bool(current_state.get('have_base'))
+                    title['has_latest_version'] = (
+                        bool(current_state.get('have_base')) and bool(current_state.get('up_to_date'))
+                    )
+                    title['has_all_dlcs'] = bool(current_state.get('complete'))
 
-    return library_data['library']
+                    title_apps = apps_by_title.get(title.get('title_id'), [])
+                    update_apps = [app for app in title_apps if app.get('app_type') == APP_TYPE_UPD]
+
+                    available_versions = titles_lib.get_all_existing_versions(title.get('title_id'))
+                    version_release_dates = {v['version']: v['release_date'] for v in available_versions}
+
+                    version_list = []
+                    for update_app in update_apps:
+                        app_version = int(update_app['app_version'])
+                        version_list.append({
+                            'version': app_version,
+                            'owned': update_app.get('owned', False),
+                            'size': update_app.get('size', 0) or 0,
+                            'release_date': version_release_dates.get(app_version, 'Unknown')
+                        })
+
+                    title['version'] = sorted(version_list, key=lambda x: x['version'])
+                    title['title_id_name'] = title['name']
+
+                elif title['app_type'] == APP_TYPE_DLC:
+                    if title['app_id'] in processed_dlc_apps:
+                        continue
+                    processed_dlc_apps.add(title['app_id'])
+
+                    title_apps = apps_by_title.get(title.get('title_id'), [])
+                    dlc_apps = [app for app in title_apps if app.get('app_type') == APP_TYPE_DLC and app['app_id'] == title['app_id']]
+
+                    version_list = []
+                    for dlc_app in dlc_apps:
+                        app_version = int(dlc_app['app_version'])
+                        version_list.append({
+                            'version': app_version,
+                            'owned': dlc_app.get('owned', False),
+                            'release_date': 'Unknown'
+                        })
+
+                    title['version'] = sorted(version_list, key=lambda x: x['version'])
+                    title['owned'] = any(app.get('owned') for app in dlc_apps)
+
+                    if dlc_apps:
+                        highest_version = max(int(app['app_version']) for app in dlc_apps)
+                        owned_versions = [int(app['app_version']) for app in dlc_apps if app.get('owned')]
+                        title['has_latest_version'] = (
+                            len(owned_versions) > 0 and max(owned_versions) >= highest_version
+                        )
+                    else:
+                        title['has_latest_version'] = True
+
+                    titleid_info = _titledb_info(title.get('title_id'))
+                    title['title_id_name'] = titleid_info['name'] if titleid_info else 'Unrecognized'
+
+                games_info.append(title)
+
+        library_data = {
+            'version': LIBRARY_CACHE_VERSION,
+            'hash': compute_apps_hash(apps_snapshot),
+            'library': sorted(games_info, key=lambda x: (
+                "title_id_name" not in x,
+                x.get("title_id_name", "Unrecognized") or "Unrecognized",
+                x.get('app_id', "") or ""
+            ))
+        }
+
+        save_library_to_disk(library_data)
+        gc.collect()
+        _diag_note_gc(phase)
+        _diag_sample_identity_map(phase)
+        logger.info('Generating library done.')
+        return library_data['library']
+    except Exception as e:
+        _diag_phase_error(phase, e)
+        raise
+    finally:
+        _diag_phase_end(
+            phase,
+            cached=False,
+            apps_snapshot=len(apps_snapshot),
+            generated_items=len(games_info),
+        )
 
 def _sanitize_component(value, fallback='Unknown'):
     value = str(value or '').strip()
@@ -970,105 +1288,116 @@ def organize_library(dry_run=False, verbose=False, detail_limit=200):
                 continue
         return planned
 
-    titles_lib.load_titledb()
-    title_name_cache = {}
-    app_name_cache = {}
-    active_template = _get_active_template()
+    with titles_lib.titledb_session():
+        title_name_cache = {}
+        app_name_cache = {}
+        active_template = _get_active_template()
+        last_file_id = 0
 
-    files = Files.query.filter_by(identified=True).all()
-    for file_entry in files:
-        if not file_entry.filepath or not os.path.exists(file_entry.filepath):
-            results['skipped'] += 1
-            add_detail('Skip missing file path.')
-            continue
-        library_path = get_library_path(file_entry.library_id)
-        if not library_path:
-            results['skipped'] += 1
-            add_detail(f"Skip missing library for {file_entry.filepath}.")
-            continue
-        primary_app = _choose_primary_app(list(file_entry.apps))
-        if not primary_app:
-            results['skipped'] += 1
-            add_detail(f"Skip no app mapping for {file_entry.filepath}.")
-            continue
+        while True:
+            files = (
+                Files.query
+                .filter(Files.identified.is_(True), Files.id > last_file_id)
+                .order_by(Files.id)
+                .limit(_ORGANIZE_BATCH_SIZE)
+                .all()
+            )
+            if not files:
+                break
+            last_file_id = files[-1].id
 
-        title_id = primary_app.title.title_id if primary_app.title else None
-        if title_id not in title_name_cache:
-            info = titles_lib.get_game_info(title_id) if title_id else None
-            title_name_cache[title_id] = info['name'] if info else title_id or primary_app.app_id
+            for file_entry in files:
+                if not file_entry.filepath or not os.path.exists(file_entry.filepath):
+                    results['skipped'] += 1
+                    add_detail('Skip missing file path.')
+                    continue
+                library_path = get_library_path(file_entry.library_id)
+                if not library_path:
+                    results['skipped'] += 1
+                    add_detail(f"Skip missing library for {file_entry.filepath}.")
+                    continue
+                primary_app = _choose_primary_app(list(file_entry.apps))
+                if not primary_app:
+                    results['skipped'] += 1
+                    add_detail(f"Skip no app mapping for {file_entry.filepath}.")
+                    continue
 
-        title_name = title_name_cache.get(title_id)
-        dlc_name = None
-        if primary_app.app_type == APP_TYPE_DLC:
-            if primary_app.app_id not in app_name_cache:
-                info = titles_lib.get_game_info(primary_app.app_id)
-                app_name_cache[primary_app.app_id] = info['name'] if info else primary_app.app_id
-            dlc_name = app_name_cache.get(primary_app.app_id)
+                title_id = primary_app.title.title_id if primary_app.title else None
+                if title_id not in title_name_cache:
+                    info = titles_lib.get_game_info(title_id) if title_id else None
+                    title_name_cache[title_id] = info['name'] if info else title_id or primary_app.app_id
 
-        dest_dir, dest_filename = _build_destination(
-            library_path,
-            file_entry,
-            primary_app,
-            title_name,
-            dlc_name,
-            active_template=active_template,
-        )
-        dest_path = os.path.join(dest_dir, dest_filename)
-        if os.path.normpath(dest_path) == os.path.normpath(file_entry.filepath):
-            results['skipped'] += 1
-            add_detail(f"Skip already organized: {file_entry.filepath}.")
-            continue
-        if os.path.exists(dest_path):
-            old_path = file_entry.filepath
-            signature_match = False
-            old_signature = _get_file_signature(old_path)
-            dest_signature = _get_file_signature(dest_path)
-            if old_signature and dest_signature:
-                signature_match = bool(old_signature.intersection(dest_signature))
-            try:
-                old_size = os.path.getsize(old_path) if os.path.exists(old_path) else None
-                dest_size = os.path.getsize(dest_path)
-            except OSError:
-                old_size = None
-                dest_size = None
+                title_name = title_name_cache.get(title_id)
+                dlc_name = None
+                if primary_app.app_type == APP_TYPE_DLC:
+                    if primary_app.app_id not in app_name_cache:
+                        info = titles_lib.get_game_info(primary_app.app_id)
+                        app_name_cache[primary_app.app_id] = info['name'] if info else primary_app.app_id
+                    dlc_name = app_name_cache.get(primary_app.app_id)
 
-            if signature_match:
-                existing_entry = Files.query.filter_by(filepath=dest_path).first()
-                if existing_entry:
-                    for app in list(file_entry.apps):
-                        if existing_entry not in app.files:
-                            app.files.append(existing_entry)
-                        if file_entry in app.files:
-                            app.files.remove(file_entry)
-                        app.owned = len(app.files) > 0
-                    db.session.delete(file_entry)
-                    db.session.commit()
+                dest_dir, dest_filename = _build_destination(
+                    library_path,
+                    file_entry,
+                    primary_app,
+                    title_name,
+                    dlc_name,
+                    active_template=active_template,
+                )
+                dest_path = os.path.join(dest_dir, dest_filename)
+                if os.path.normpath(dest_path) == os.path.normpath(file_entry.filepath):
+                    results['skipped'] += 1
+                    add_detail(f"Skip already organized: {file_entry.filepath}.")
+                    continue
+                if os.path.exists(dest_path):
+                    old_path = file_entry.filepath
+                    signature_match = False
+                    old_signature = _get_file_signature(old_path)
+                    dest_signature = _get_file_signature(dest_path)
+                    if old_signature and dest_signature:
+                        signature_match = bool(old_signature.intersection(dest_signature))
+                    try:
+                        old_size = os.path.getsize(old_path) if os.path.exists(old_path) else None
+                        dest_size = os.path.getsize(dest_path)
+                    except OSError:
+                        old_size = None
+                        dest_size = None
+
+                    if signature_match:
+                        existing_entry = Files.query.filter_by(filepath=dest_path).first()
+                        if existing_entry:
+                            for app in list(file_entry.apps):
+                                if existing_entry not in app.files:
+                                    app.files.append(existing_entry)
+                                if file_entry in app.files:
+                                    app.files.remove(file_entry)
+                                app.owned = len(app.files) > 0
+                            db.session.delete(file_entry)
+                            db.session.commit()
+                        else:
+                            update_file_path(library_path, old_path, dest_path)
+                        if os.path.exists(old_path) and os.path.normpath(old_path) != os.path.normpath(dest_path):
+                            os.remove(old_path)
+                        results['skipped'] += 1
+                        add_detail(f"Skip duplicate; kept existing: {dest_path}.")
+                        continue
+                dest_path = _ensure_unique_path(dest_path)
+
+                if not dry_run:
+                    try:
+                        os.makedirs(dest_dir, exist_ok=True)
+                        old_path = file_entry.filepath
+                        shutil.move(old_path, dest_path)
+                        update_file_path(library_path, old_path, dest_path)
+                        results['moved'] += 1
+                        add_detail(f"Moved: {old_path} -> {dest_path}.")
+                    except Exception as e:
+                        logger.error(f"Failed to move {file_entry.filepath}: {e}")
+                        results['errors'].append(str(e))
+                        add_detail(f"Error moving {file_entry.filepath}: {e}.")
                 else:
-                    update_file_path(library_path, old_path, dest_path)
-                if os.path.exists(old_path) and os.path.normpath(old_path) != os.path.normpath(dest_path):
-                    os.remove(old_path)
-                results['skipped'] += 1
-                add_detail(f"Skip duplicate; kept existing: {dest_path}.")
-                continue
-        dest_path = _ensure_unique_path(dest_path)
-
-        if not dry_run:
-            try:
-                os.makedirs(dest_dir, exist_ok=True)
-                old_path = file_entry.filepath
-                shutil.move(old_path, dest_path)
-                update_file_path(library_path, old_path, dest_path)
-                results['moved'] += 1
-                add_detail(f"Moved: {old_path} -> {dest_path}.")
-            except Exception as e:
-                logger.error(f"Failed to move {file_entry.filepath}: {e}")
-                results['errors'].append(str(e))
-                add_detail(f"Error moving {file_entry.filepath}: {e}.")
-        else:
-            results['moved'] += 1
-            add_detail(f"Plan move: {file_entry.filepath} -> {dest_path}.")
-
-    titles_lib.unload_titledb()
+                    results['moved'] += 1
+                    add_detail(f"Plan move: {file_entry.filepath} -> {dest_path}.")
+            db.session.expunge_all()
 
     # Cleanup: delete empty folders created or left behind after organizing.
     try:
@@ -1118,117 +1447,115 @@ def organize_files(filepaths, dry_run=False, verbose=False, detail_limit=200):
     if not filepaths:
         return results
 
-    titles_lib.load_titledb()
-    title_name_cache = {}
-    app_name_cache = {}
-    active_template = _get_active_template()
+    with titles_lib.titledb_session():
+        title_name_cache = {}
+        app_name_cache = {}
+        active_template = _get_active_template()
 
-    unique_paths = list(dict.fromkeys(filepaths))
-    files = Files.query.filter(Files.filepath.in_(unique_paths)).all()
-    file_lookup = {file.filepath: file for file in files}
+        unique_paths = list(dict.fromkeys(filepaths))
+        files = Files.query.filter(Files.filepath.in_(unique_paths)).all()
+        file_lookup = {file.filepath: file for file in files}
 
-    for filepath in unique_paths:
-        file_entry = file_lookup.get(filepath)
-        if not file_entry:
-            results['skipped'] += 1
-            add_detail(f"Skip missing file record: {filepath}.")
-            continue
-        if not file_entry.filepath or not os.path.exists(file_entry.filepath):
-            results['skipped'] += 1
-            add_detail('Skip missing file path.')
-            continue
-        if not file_entry.identified:
-            results['skipped'] += 1
-            add_detail(f"Skip not identified: {file_entry.filepath}.")
-            continue
-        library_path = get_library_path(file_entry.library_id)
-        if not library_path:
-            results['skipped'] += 1
-            add_detail(f"Skip missing library for {file_entry.filepath}.")
-            continue
-        primary_app = _choose_primary_app(list(file_entry.apps))
-        if not primary_app:
-            results['skipped'] += 1
-            add_detail(f"Skip no app mapping for {file_entry.filepath}.")
-            continue
-
-        title_id = primary_app.title.title_id if primary_app.title else None
-        if title_id not in title_name_cache:
-            info = titles_lib.get_game_info(title_id) if title_id else None
-            title_name_cache[title_id] = info['name'] if info else title_id or primary_app.app_id
-
-        title_name = title_name_cache.get(title_id)
-        dlc_name = None
-        if primary_app.app_type == APP_TYPE_DLC:
-            if primary_app.app_id not in app_name_cache:
-                info = titles_lib.get_game_info(primary_app.app_id)
-                app_name_cache[primary_app.app_id] = info['name'] if info else primary_app.app_id
-            dlc_name = app_name_cache.get(primary_app.app_id)
-
-        dest_dir, dest_filename = _build_destination(
-            library_path,
-            file_entry,
-            primary_app,
-            title_name,
-            dlc_name,
-            active_template=active_template,
-        )
-        dest_path = os.path.join(dest_dir, dest_filename)
-        if os.path.normpath(dest_path) == os.path.normpath(file_entry.filepath):
-            results['skipped'] += 1
-            add_detail(f"Skip already organized: {file_entry.filepath}.")
-            continue
-        if os.path.exists(dest_path):
-            old_path = file_entry.filepath
-            signature_match = False
-            old_signature = _get_file_signature(old_path)
-            dest_signature = _get_file_signature(dest_path)
-            if old_signature and dest_signature:
-                signature_match = bool(old_signature.intersection(dest_signature))
-            try:
-                old_size = os.path.getsize(old_path) if os.path.exists(old_path) else None
-                dest_size = os.path.getsize(dest_path)
-            except OSError:
-                old_size = None
-                dest_size = None
-
-            if signature_match:
-                existing_entry = Files.query.filter_by(filepath=dest_path).first()
-                if existing_entry:
-                    for app in list(file_entry.apps):
-                        if existing_entry not in app.files:
-                            app.files.append(existing_entry)
-                        if file_entry in app.files:
-                            app.files.remove(file_entry)
-                        app.owned = len(app.files) > 0
-                    db.session.delete(file_entry)
-                    db.session.commit()
-                else:
-                    update_file_path(library_path, old_path, dest_path)
-                if os.path.exists(old_path) and os.path.normpath(old_path) != os.path.normpath(dest_path):
-                    os.remove(old_path)
+        for filepath in unique_paths:
+            file_entry = file_lookup.get(filepath)
+            if not file_entry:
                 results['skipped'] += 1
-                add_detail(f"Skip duplicate; kept existing: {dest_path}.")
+                add_detail(f"Skip missing file record: {filepath}.")
                 continue
-        dest_path = _ensure_unique_path(dest_path)
+            if not file_entry.filepath or not os.path.exists(file_entry.filepath):
+                results['skipped'] += 1
+                add_detail('Skip missing file path.')
+                continue
+            if not file_entry.identified:
+                results['skipped'] += 1
+                add_detail(f"Skip not identified: {file_entry.filepath}.")
+                continue
+            library_path = get_library_path(file_entry.library_id)
+            if not library_path:
+                results['skipped'] += 1
+                add_detail(f"Skip missing library for {file_entry.filepath}.")
+                continue
+            primary_app = _choose_primary_app(list(file_entry.apps))
+            if not primary_app:
+                results['skipped'] += 1
+                add_detail(f"Skip no app mapping for {file_entry.filepath}.")
+                continue
 
-        if not dry_run:
-            try:
-                os.makedirs(dest_dir, exist_ok=True)
+            title_id = primary_app.title.title_id if primary_app.title else None
+            if title_id not in title_name_cache:
+                info = titles_lib.get_game_info(title_id) if title_id else None
+                title_name_cache[title_id] = info['name'] if info else title_id or primary_app.app_id
+
+            title_name = title_name_cache.get(title_id)
+            dlc_name = None
+            if primary_app.app_type == APP_TYPE_DLC:
+                if primary_app.app_id not in app_name_cache:
+                    info = titles_lib.get_game_info(primary_app.app_id)
+                    app_name_cache[primary_app.app_id] = info['name'] if info else primary_app.app_id
+                dlc_name = app_name_cache.get(primary_app.app_id)
+
+            dest_dir, dest_filename = _build_destination(
+                library_path,
+                file_entry,
+                primary_app,
+                title_name,
+                dlc_name,
+                active_template=active_template,
+            )
+            dest_path = os.path.join(dest_dir, dest_filename)
+            if os.path.normpath(dest_path) == os.path.normpath(file_entry.filepath):
+                results['skipped'] += 1
+                add_detail(f"Skip already organized: {file_entry.filepath}.")
+                continue
+            if os.path.exists(dest_path):
                 old_path = file_entry.filepath
-                shutil.move(old_path, dest_path)
-                update_file_path(library_path, old_path, dest_path)
-                results['moved'] += 1
-                add_detail(f"Moved: {old_path} -> {dest_path}.")
-            except Exception as e:
-                logger.error(f"Failed to move {file_entry.filepath}: {e}")
-                results['errors'].append(str(e))
-                add_detail(f"Error moving {file_entry.filepath}: {e}.")
-        else:
-            results['moved'] += 1
-            add_detail(f"Plan move: {file_entry.filepath} -> {dest_path}.")
+                signature_match = False
+                old_signature = _get_file_signature(old_path)
+                dest_signature = _get_file_signature(dest_path)
+                if old_signature and dest_signature:
+                    signature_match = bool(old_signature.intersection(dest_signature))
+                try:
+                    old_size = os.path.getsize(old_path) if os.path.exists(old_path) else None
+                    dest_size = os.path.getsize(dest_path)
+                except OSError:
+                    old_size = None
+                    dest_size = None
 
-    titles_lib.unload_titledb()
+                if signature_match:
+                    existing_entry = Files.query.filter_by(filepath=dest_path).first()
+                    if existing_entry:
+                        for app in list(file_entry.apps):
+                            if existing_entry not in app.files:
+                                app.files.append(existing_entry)
+                            if file_entry in app.files:
+                                app.files.remove(file_entry)
+                            app.owned = len(app.files) > 0
+                        db.session.delete(file_entry)
+                        db.session.commit()
+                    else:
+                        update_file_path(library_path, old_path, dest_path)
+                    if os.path.exists(old_path) and os.path.normpath(old_path) != os.path.normpath(dest_path):
+                        os.remove(old_path)
+                    results['skipped'] += 1
+                    add_detail(f"Skip duplicate; kept existing: {dest_path}.")
+                    continue
+            dest_path = _ensure_unique_path(dest_path)
+
+            if not dry_run:
+                try:
+                    os.makedirs(dest_dir, exist_ok=True)
+                    old_path = file_entry.filepath
+                    shutil.move(old_path, dest_path)
+                    update_file_path(library_path, old_path, dest_path)
+                    results['moved'] += 1
+                    add_detail(f"Moved: {old_path} -> {dest_path}.")
+                except Exception as e:
+                    logger.error(f"Failed to move {file_entry.filepath}: {e}")
+                    results['errors'].append(str(e))
+                    add_detail(f"Error moving {file_entry.filepath}: {e}.")
+            else:
+                results['moved'] += 1
+                add_detail(f"Plan move: {file_entry.filepath} -> {dest_path}.")
     if results['errors']:
         results['success'] = False
     return results
