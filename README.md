@@ -125,7 +125,7 @@ The `Game info` modal uses TitleDB metadata (not Nintendo website scraping):
 Ownfoil will download the TitleDB descriptions/screenshot dataset on demand to `./data/titledb/US.en.json` (Docker path: `/app/data/titledb/US.en.json`).
 
 Conversion details:
-- Uses the bundled `nsz` tool from the `./nsz` directory (with progress output).
+- Uses the installed Python `nsz` package (with progress output).
 - Uses the same `keys.txt` uploaded in the `Settings` page.
 - Shows live status, per-file progress, and the current filename.
 - Filters out files smaller than 50 MB from the manual conversion dropdown.

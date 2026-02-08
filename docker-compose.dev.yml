@@ -22,6 +22,5 @@ services:
       - ./data:/app/data
       # Mount source code for live development
       - ./app:/app
-      - ./nsz:/nsz
     ports:
       - "8465:8465"
