@@ -258,6 +258,15 @@ def init():
                     start_date=datetime.now().replace(microsecond=0) + timedelta(minutes=5)
                 )
                 return
+        if _is_conversion_running():
+            logger.info("Skipping scheduled library scan: conversion job is running. Rescheduling in 5 minutes.")
+            app.scheduler.add_job(
+                job_id=f'scan_library_rescheduled_{datetime.now().timestamp()}',
+                func=scan_library_job,
+                run_once=True,
+                start_date=datetime.now().replace(microsecond=0) + timedelta(minutes=5)
+            )
+            return
         logger.info("Starting scheduled library scan job...")
         global scan_in_progress
         with scan_lock:
@@ -305,6 +314,9 @@ def _get_maintenance_interval_minutes(settings):
 
 def run_library_maintenance():
     try:
+        if _is_conversion_running():
+            logger.info("Skipping scheduled library maintenance: conversion job is running.")
+            return
         current_settings = load_settings()
         library_cfg = current_settings.get('library', {})
         if not library_cfg.get('auto_maintenance', False):
@@ -379,6 +391,16 @@ shop_sections_cache = {
 shop_sections_cache_lock = threading.Lock()
 shop_sections_refresh_lock = threading.Lock()
 shop_sections_refresh_running = False
+
+
+def _is_conversion_running():
+    with conversion_jobs_lock:
+        for job in conversion_jobs.values():
+            kind = str(job.get('kind') or '')
+            status = str(job.get('status') or '')
+            if kind.startswith('convert') and status == 'running':
+                return True
+    return False
 
 def _read_cache_ttl(env_key, default_value):
     raw = os.environ.get(env_key)
@@ -1286,6 +1308,21 @@ def _job_finish(job_id, results):
             'deleted': results.get('deleted', 0),
             'moved': results.get('moved', 0)
         }
+        progress = job.setdefault('progress', {})
+        kind = str(job.get('kind') or '')
+        total = int(progress.get('total') or 0)
+        if kind == 'convert-single':
+            total = max(total, 1)
+            progress['total'] = total
+            progress['done'] = total
+        else:
+            if total > 0:
+                progress['done'] = total
+            else:
+                estimated_total = int(job['summary'].get('converted', 0) or 0) + int(job['summary'].get('skipped', 0) or 0)
+                if estimated_total > 0:
+                    progress['total'] = estimated_total
+                    progress['done'] = estimated_total
         job['updated_at'] = time.time()
         if len(conversion_jobs) > conversion_job_limit:
             oldest = sorted(conversion_jobs.values(), key=lambda item: item['created_at'])[:len(conversion_jobs) - conversion_job_limit]
@@ -2553,9 +2590,9 @@ def manage_convert_job():
                 timeout_seconds=timeout_seconds,
                 min_size_bytes=200 * 1024 * 1024
             )
+            _job_finish(job_id, results)
             if results.get('success') and not dry_run:
                 post_library_change()
-            _job_finish(job_id, results)
 
     thread = threading.Thread(target=_run_job, daemon=True)
     thread.start()
@@ -2592,9 +2629,9 @@ def manage_convert_single_job():
                 cancel_cb=lambda: _job_is_cancelled(job_id),
                 timeout_seconds=timeout_seconds
             )
+            _job_finish(job_id, results)
             if results.get('success') and not dry_run:
                 post_library_change()
-            _job_finish(job_id, results)
 
     thread = threading.Thread(target=_run_job, daemon=True)
     thread.start()
@@ -3620,6 +3657,9 @@ def shop_banner_api(title_id):
 
 @debounce(10)
 def post_library_change():
+    if _is_conversion_running():
+        logger.info("Skipping library rebuild: conversion job is running.")
+        return
     with library_rebuild_lock:
         if not library_rebuild_status['in_progress']:
             library_rebuild_status['started_at'] = time.time()
@@ -3662,10 +3702,14 @@ def post_library_change():
 @app.post('/api/library/scan')
 @access_required('admin')
 def scan_library_api():
-    data = request.json
-    path = data['path']
+    data = request.json or {}
+    path = data.get('path')
     success = True
     errors = []
+
+    if _is_conversion_running():
+        logger.info('Skipping scan_library_api call: conversion job is running.')
+        return jsonify({'success': False, 'errors': ['Conversion in progress. Try again after conversion finishes.']})
 
     global scan_in_progress
     with scan_lock:
