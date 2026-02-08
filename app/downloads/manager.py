@@ -388,6 +388,7 @@ def _check_completed(torrent_cfg, scan_cb=None, post_cb=None):
         username=torrent_cfg.get("username"),
         password=torrent_cfg.get("password"),
         category=torrent_cfg.get("category"),
+        download_path=torrent_cfg.get("download_path"),
     )
     if not completed_items:
         logger.info("No completed torrents detected for category/tag.")
@@ -425,24 +426,17 @@ def _check_completed(torrent_cfg, scan_cb=None, post_cb=None):
                         if not ok:
                             logger.warning("Failed to remove torrent %s: %s", torrent_hash, message)
                 newly_completed = True
+        unmatched_count = 0
         for item in completed_items:
             torrent_hash = item.get("hash")
             if torrent_hash and torrent_hash in matched_hashes:
                 continue
-            moved_path = _move_completed(item)
-            if moved_path:
-                moved_paths.append(moved_path)
-                if torrent_hash:
-                    ok, message = remove_torrent(
-                        client_type=torrent_cfg.get("type"),
-                        url=torrent_cfg.get("url"),
-                        username=torrent_cfg.get("username"),
-                        password=torrent_cfg.get("password"),
-                        torrent_hash=torrent_hash,
-                    )
-                    if not ok:
-                        logger.warning("Failed to remove torrent %s: %s", torrent_hash, message)
-                newly_completed = True
+            unmatched_count += 1
+        if unmatched_count:
+            logger.info(
+                "Ignored %s completed torrent(s) not tracked by Ownfoil pending state.",
+                unmatched_count
+            )
 
     if newly_completed and scan_cb:
         logger.info("New downloads completed. Scanning library.")
