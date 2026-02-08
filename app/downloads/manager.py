@@ -24,6 +24,13 @@ _state = {
     "completed": set(),
 }
 
+def _get_prowlarr_timeout_seconds(prowlarr_cfg):
+    try:
+        timeout_seconds = int((prowlarr_cfg or {}).get("timeout_seconds") or 15)
+    except (TypeError, ValueError):
+        timeout_seconds = 15
+    return max(5, min(timeout_seconds, 180))
+
 
 def get_downloads_state():
     with _state_lock:
@@ -100,7 +107,8 @@ def _process_downloads(downloads, scan_cb=None, post_cb=None):
         _check_completed(torrent_cfg, scan_cb=scan_cb, post_cb=post_cb)
         return
 
-    client = ProwlarrClient(prowlarr_cfg["url"], prowlarr_cfg["api_key"])
+    timeout_seconds = _get_prowlarr_timeout_seconds(prowlarr_cfg)
+    client = ProwlarrClient(prowlarr_cfg["url"], prowlarr_cfg["api_key"], timeout_seconds=timeout_seconds)
     indexer_ids = prowlarr_cfg.get("indexer_ids") or []
     categories = prowlarr_cfg.get("categories") or []
     required_terms = downloads.get("required_terms") or []
@@ -146,7 +154,8 @@ def manual_search_update(title_id, version):
         "title_name": title_name,
         "version": int(version)
     }
-    client = ProwlarrClient(prowlarr_cfg["url"], prowlarr_cfg["api_key"])
+    timeout_seconds = _get_prowlarr_timeout_seconds(prowlarr_cfg)
+    client = ProwlarrClient(prowlarr_cfg["url"], prowlarr_cfg["api_key"], timeout_seconds=timeout_seconds)
     ok, message = _search_and_queue(
         client=client,
         update=update,
@@ -183,7 +192,8 @@ def search_update_options(title_id, version, limit=20):
         "version": int(version)
     }
     query_candidates = _build_queries(update)
-    client = ProwlarrClient(prowlarr_cfg["url"], prowlarr_cfg["api_key"])
+    timeout_seconds = _get_prowlarr_timeout_seconds(prowlarr_cfg)
+    client = ProwlarrClient(prowlarr_cfg["url"], prowlarr_cfg["api_key"], timeout_seconds=timeout_seconds)
     results = []
     categories = prowlarr_cfg.get("categories") or []
     for query in query_candidates:

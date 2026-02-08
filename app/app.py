@@ -1763,7 +1763,12 @@ def request_prowlarr_search_api():
         full_query = f"{prefix} {full_query}".strip()
 
     try:
-        client = ProwlarrClient(prowlarr_cfg['url'], prowlarr_cfg['api_key'])
+        try:
+            timeout_seconds = int(prowlarr_cfg.get('timeout_seconds') or 15)
+        except (TypeError, ValueError):
+            timeout_seconds = 15
+        timeout_seconds = max(5, min(timeout_seconds, 180))
+        client = ProwlarrClient(prowlarr_cfg['url'], prowlarr_cfg['api_key'], timeout_seconds=timeout_seconds)
         results = client.search(
             full_query,
             indexer_ids=prowlarr_cfg.get('indexer_ids') or [],
@@ -2250,7 +2255,12 @@ def test_downloads_prowlarr_api():
     url = data.get('url', '')
     api_key = data.get('api_key', '')
     try:
-        client = ProwlarrClient(url, api_key)
+        timeout_seconds = int(data.get('timeout_seconds') or 15)
+    except (TypeError, ValueError):
+        timeout_seconds = 15
+    timeout_seconds = max(5, min(timeout_seconds, 180))
+    try:
+        client = ProwlarrClient(url, api_key, timeout_seconds=timeout_seconds)
         status = client.system_status()
         indexer_ids = data.get('indexer_ids') or []
         warning = None
@@ -2328,6 +2338,11 @@ def downloads_search():
     if not prowlarr_cfg.get('url') or not prowlarr_cfg.get('api_key'):
         return jsonify({'success': False, 'message': 'Prowlarr is not configured.'})
     try:
+        try:
+            timeout_seconds = int(prowlarr_cfg.get('timeout_seconds') or 15)
+        except (TypeError, ValueError):
+            timeout_seconds = 15
+        timeout_seconds = max(5, min(timeout_seconds, 180))
         full_query = query
         if apply_settings:
             prefix = (downloads.get('search_prefix') or '').strip()
@@ -2336,7 +2351,7 @@ def downloads_search():
                 full_query = f"{prefix} {full_query}".strip()
             if suffix and not full_query.lower().endswith(suffix.lower()):
                 full_query = f"{full_query} {suffix}".strip()
-        client = ProwlarrClient(prowlarr_cfg['url'], prowlarr_cfg['api_key'])
+        client = ProwlarrClient(prowlarr_cfg['url'], prowlarr_cfg['api_key'], timeout_seconds=timeout_seconds)
         results = client.search(
             full_query,
             indexer_ids=prowlarr_cfg.get('indexer_ids') or [],

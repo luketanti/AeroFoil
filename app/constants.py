@@ -91,7 +91,8 @@ DEFAULT_SETTINGS = {
             "url": "",
             "api_key": "",
             "indexer_ids": [],
-            "categories": []
+            "categories": [],
+            "timeout_seconds": 15
         },
         "torrent_client": {
             "type": "qbittorrent",

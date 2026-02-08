@@ -462,6 +462,11 @@
                             </div>
                         </div>
                         <div class="mb-3">
+                            <label for="prowlarrTimeoutInput" class="form-label">Prowlarr timeout (seconds)</label>
+                            <input type="number" min="5" max="180" class="form-control" id="prowlarrTimeoutInput" value="15">
+                            <div class="form-text">Increase this if searches sometimes time out. Range: 5-180 seconds.</div>
+                        </div>
+                        <div class="mb-3">
                             <label for="prowlarrIndexerIdsInput" class="form-label">Indexer IDs (comma separated)</label>
                             <input type="text" class="form-control" id="prowlarrIndexerIdsInput" placeholder="1,2,3">
                         </div>
@@ -1139,6 +1144,12 @@
     function submitDownloadSettings() {
         $('#submitDownloadSettingsBtn').prop('disabled', true);
         const categoriesParsed = parseProwlarrCategories(getInputVal("prowlarrCategoriesInput"));
+        let prowlarrTimeout = parseInt(getInputVal("prowlarrTimeoutInput"), 10);
+        if (isNaN(prowlarrTimeout)) {
+            prowlarrTimeout = 15;
+        }
+        prowlarrTimeout = Math.max(5, Math.min(180, prowlarrTimeout));
+        setInputVal("prowlarrTimeoutInput", prowlarrTimeout);
         if (categoriesParsed.invalid.length) {
             alert('Prowlarr categories must be numeric IDs only. Invalid values: ' + categoriesParsed.invalid.join(', '));
             $('#submitDownloadSettingsBtn').prop('disabled', false);
@@ -1156,7 +1167,8 @@
                 url: getInputVal("prowlarrUrlInput"),
                 api_key: getInputVal("prowlarrApiKeyInput"),
                 indexer_ids: parseIndexerIds(getInputVal("prowlarrIndexerIdsInput")),
-                categories: categoriesParsed.values
+                categories: categoriesParsed.values,
+                timeout_seconds: prowlarrTimeout
             },
             torrent_client: {
                 type: getInputVal("torrentClientTypeSelect"),
@@ -1212,10 +1224,17 @@
     function testProwlarrSettings() {
         $('#testProwlarrBtn').prop('disabled', true);
         $('#prowlarrTestResult').text('Testing...').removeClass('text-danger text-success').addClass('text-muted');
+        let prowlarrTimeout = parseInt(getInputVal("prowlarrTimeoutInput"), 10);
+        if (isNaN(prowlarrTimeout)) {
+            prowlarrTimeout = 15;
+        }
+        prowlarrTimeout = Math.max(5, Math.min(180, prowlarrTimeout));
+        setInputVal("prowlarrTimeoutInput", prowlarrTimeout);
         data = {
             url: getInputVal("prowlarrUrlInput"),
             api_key: getInputVal("prowlarrApiKeyInput"),
-            indexer_ids: parseIndexerIds(getInputVal("prowlarrIndexerIdsInput"))
+            indexer_ids: parseIndexerIds(getInputVal("prowlarrIndexerIdsInput")),
+            timeout_seconds: prowlarrTimeout
         };
         $.ajax({
             url: "/api/settings/downloads/test-prowlarr",
@@ -1428,6 +1447,7 @@
             setInputVal("prowlarrApiKeyInput", prowlarrSettings['api_key'] || '');
             setInputVal("prowlarrIndexerIdsInput", (prowlarrSettings['indexer_ids'] || []).join(', '));
             setInputVal("prowlarrCategoriesInput", (prowlarrSettings['categories'] || []).join(', '));
+            setInputVal("prowlarrTimeoutInput", prowlarrSettings['timeout_seconds'] || 15);
 
             torrentSettings = downloadsSettings['torrent_client'] || {};
             setInputVal("torrentClientTypeSelect", torrentSettings['type'] || 'qbittorrent');

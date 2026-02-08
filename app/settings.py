@@ -163,6 +163,11 @@ def load_settings(force_reload=False):
             merged = defaults.copy()
             merged.update(settings.get('downloads', {}))
             settings['downloads'] = merged
+        # Keep nested downloads settings backward-compatible when new keys are added.
+        prowlarr_defaults = (DEFAULT_SETTINGS.get('downloads', {}) or {}).get('prowlarr', {})
+        merged_prowlarr = prowlarr_defaults.copy()
+        merged_prowlarr.update((settings['downloads'].get('prowlarr') or {}))
+        settings['downloads']['prowlarr'] = merged_prowlarr
 
         if 'titles' not in settings:
             settings['titles'] = DEFAULT_SETTINGS.get('titles', {})
