@@ -1915,6 +1915,19 @@ def admin_delete_request_api():
         return api_error(str(e), 500)
 
 
+def _apply_download_search_char_replacements(text, downloads_settings):
+    out = str(text or '')
+    for rule in (downloads_settings or {}).get('search_char_replacements') or []:
+        if not isinstance(rule, dict):
+            continue
+        from_text = str(rule.get('from') or '')
+        to_text = str(rule.get('to') or '')
+        if not from_text:
+            continue
+        out = out.replace(from_text, to_text)
+    return out
+
+
 @app.get('/api/requests/search')
 @access_required('admin')
 def request_prowlarr_search_api():
@@ -1939,7 +1952,7 @@ def request_prowlarr_search_api():
         finally:
             titles.release_titledb()
 
-    base_query = resolved_name or title_id
+    base_query = _apply_download_search_char_replacements(resolved_name or title_id, downloads)
     prefix = (downloads.get('search_prefix') or '').strip()
     full_query = base_query
     if prefix and not full_query.lower().startswith(prefix.lower()):
@@ -2524,7 +2537,7 @@ def downloads_search():
         except (TypeError, ValueError):
             timeout_seconds = 15
         timeout_seconds = max(5, min(timeout_seconds, 180))
-        full_query = query
+        full_query = _apply_download_search_char_replacements(query, downloads)
         if apply_settings:
             prefix = (downloads.get('search_prefix') or '').strip()
             suffix = (downloads.get('search_suffix') or '').strip()

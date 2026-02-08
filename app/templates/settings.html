@@ -447,6 +447,13 @@
                                 <input type="text" class="form-control" id="downloadsSearchSuffixInput">
                             </div>
                         </div>
+                        <div class="row g-3 mt-1">
+                            <div class="col-12">
+                                <label for="downloadsSearchCharReplacementsInput" class="form-label">Search character replacements</label>
+                                <textarea class="form-control" id="downloadsSearchCharReplacementsInput" rows="4" placeholder="™=&gt;&#10;®=&gt;&#10;’=&gt;'"></textarea>
+                                <div class="form-text">One rule per line in the form <code>from=&gt;to</code>. Leave <code>to</code> empty to remove the character.</div>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- Prowlarr tab -->
@@ -1086,6 +1093,47 @@
         return value.split(',').map(item => item.trim()).filter(Boolean);
     }
 
+    function parseSearchCharReplacements(value) {
+        if (!value) {
+            return [];
+        }
+        const rules = [];
+        const seen = new Set();
+        value.split('\n').forEach(line => {
+            const raw = (line || '').trim();
+            if (!raw) {
+                return;
+            }
+            let fromText = raw;
+            let toText = '';
+            if (raw.includes('=>')) {
+                const parts = raw.split('=>');
+                fromText = (parts.shift() || '').trim();
+                toText = parts.join('=>').trim();
+            } else if (raw.includes('=')) {
+                const parts = raw.split('=');
+                fromText = (parts.shift() || '').trim();
+                toText = parts.join('=').trim();
+            }
+            if (!fromText || seen.has(fromText)) {
+                return;
+            }
+            rules.push({ from: fromText, to: toText });
+            seen.add(fromText);
+        });
+        return rules;
+    }
+
+    function formatSearchCharReplacements(rules) {
+        if (!Array.isArray(rules) || !rules.length) {
+            return '';
+        }
+        return rules
+            .map(rule => `${rule?.from || ''}=>${rule?.to || ''}`)
+            .filter(line => !line.startsWith('=>'))
+            .join('\n');
+    }
+
     function parseIndexerIds(value) {
         if (!value) {
             return [];
@@ -1163,6 +1211,7 @@
             blacklist_terms: splitTerms(getInputVal("downloadsBlacklistTermsInput")),
             search_prefix: getInputVal("downloadsSearchPrefixInput"),
             search_suffix: getInputVal("downloadsSearchSuffixInput"),
+            search_char_replacements: parseSearchCharReplacements(getInputVal("downloadsSearchCharReplacementsInput")),
             prowlarr: {
                 url: getInputVal("prowlarrUrlInput"),
                 api_key: getInputVal("prowlarrApiKeyInput"),
@@ -1439,6 +1488,10 @@
             setInputVal("downloadsBlacklistTermsInput", (downloadsSettings['blacklist_terms'] || []).join(', '));
             setInputVal("downloadsSearchPrefixInput", downloadsSettings['search_prefix'] || '');
             setInputVal("downloadsSearchSuffixInput", downloadsSettings['search_suffix'] || '');
+            setInputVal(
+                "downloadsSearchCharReplacementsInput",
+                formatSearchCharReplacements(downloadsSettings['search_char_replacements'] || [])
+            );
             $("#downloadsEnabledCheck").prop("checked", !!downloadsSettings['enabled']);
             setInputVal("downloadsCategoryInput", downloadsSettings['torrent_client']?.['category'] || 'ownfoil');
 

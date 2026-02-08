@@ -85,6 +85,12 @@ DEFAULT_SETTINGS = {
         "blacklist_terms": [],
         "search_prefix": "Nintendo Switch",
         "search_suffix": "update",
+        "search_char_replacements": [
+            {"from": "™", "to": ""},
+            {"from": "®", "to": ""},
+            {"from": "©", "to": ""},
+            {"from": "é", "to": "e"},
+        ],
         "prowlarr": {
             "url": "",
             "api_key": "",

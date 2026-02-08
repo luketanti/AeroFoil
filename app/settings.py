@@ -89,6 +89,32 @@ def _normalize_library_naming_templates(raw_templates):
         'templates': normalized,
     }
 
+
+def _normalize_download_search_char_replacements(raw_rules):
+    default_rules = (
+        DEFAULT_SETTINGS.get('downloads', {})
+        .get('search_char_replacements', [])
+    )
+    rules_source = raw_rules if isinstance(raw_rules, list) else default_rules
+    normalized = []
+    seen_from = set()
+    for entry in rules_source:
+        if isinstance(entry, dict):
+            from_text = str(entry.get('from') or '')
+            to_text = str(entry.get('to') or '')
+        elif isinstance(entry, str):
+            from_text = entry
+            to_text = ''
+        else:
+            continue
+        if not from_text:
+            continue
+        if from_text in seen_from:
+            continue
+        normalized.append({'from': from_text, 'to': to_text})
+        seen_from.add(from_text)
+    return normalized
+
 def _read_env_bool(key):
     raw = os.environ.get(key)
     if raw is None:
@@ -209,6 +235,9 @@ def load_settings(force_reload=False):
         merged_prowlarr = prowlarr_defaults.copy()
         merged_prowlarr.update((settings['downloads'].get('prowlarr') or {}))
         settings['downloads']['prowlarr'] = merged_prowlarr
+        settings['downloads']['search_char_replacements'] = _normalize_download_search_char_replacements(
+            settings['downloads'].get('search_char_replacements')
+        )
 
         if 'titles' not in settings:
             settings['titles'] = DEFAULT_SETTINGS.get('titles', {})
@@ -252,6 +281,10 @@ def load_settings(force_reload=False):
     settings.setdefault('titles', {})
     settings['titles']['manual_overrides'] = _normalize_titles_manual_overrides(
         settings['titles'].get('manual_overrides')
+    )
+    settings.setdefault('downloads', {})
+    settings['downloads']['search_char_replacements'] = _normalize_download_search_char_replacements(
+        settings['downloads'].get('search_char_replacements')
     )
     
     # Update cache
@@ -396,6 +429,10 @@ def set_shop_settings(data):
 def set_download_settings(data):
     settings = load_settings(force_reload=True)
     settings.setdefault('downloads', {})
+    if data and 'search_char_replacements' in data:
+        data['search_char_replacements'] = _normalize_download_search_char_replacements(
+            data.get('search_char_replacements')
+        )
     settings['downloads'].update(data)
     with open(CONFIG_FILE, 'w') as yaml_file:
         yaml.dump(settings, yaml_file)

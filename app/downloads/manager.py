@@ -327,9 +327,24 @@ def _search_and_queue(client, update, downloads, indexer_ids, categories, requir
 
 def _build_queries(update):
     title_name = update.get("title_name") or update["title_id"]
+    downloads = load_settings().get("downloads", {})
+
+    def _apply_char_replacements(text):
+        out = str(text or "")
+        for rule in downloads.get("search_char_replacements") or []:
+            if not isinstance(rule, dict):
+                continue
+            from_text = str(rule.get("from") or "")
+            to_text = str(rule.get("to") or "")
+            if not from_text:
+                continue
+            out = out.replace(from_text, to_text)
+        return out
+
     def _normalize_query(text):
         if not text:
             return ""
+        text = _apply_char_replacements(text)
         try:
             normalized = unicodedata.normalize('NFKD', text)
             normalized = normalized.encode('ascii', 'ignore').decode('ascii')
@@ -338,7 +353,6 @@ def _build_queries(update):
         normalized = re.sub(r"[^A-Za-z0-9\s]+", " ", normalized)
         return re.sub(r"\s+", " ", normalized).strip()
     title_name = _normalize_query(title_name)
-    downloads = load_settings().get("downloads", {})
     prefix = _normalize_query(downloads.get("search_prefix") or "")
     suffix = _normalize_query(downloads.get("search_suffix") or "")
     base = f"{prefix} {title_name}".strip() if prefix else title_name
