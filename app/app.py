@@ -22,7 +22,7 @@ from datetime import timedelta, datetime
 flask.cli.show_server_banner = lambda *args: None
 from app.constants import *
 from app.settings import *
-from app.downloads import ProwlarrClient, test_torrent_client, run_downloads_job, manual_search_update, queue_download_url, search_update_options, check_completed_downloads, get_downloads_state
+from app.downloads import ProwlarrClient, test_torrent_client, run_downloads_job, manual_search_update, queue_download_url, search_update_options, check_completed_downloads, get_downloads_state, get_active_downloads
 from app.library import organize_library, delete_older_updates
 from app.db import *
 from app.shop import *
@@ -1599,6 +1599,14 @@ def manage_page():
         title='Manage',
         admin_account_created=admin_account_created())
 
+@app.route('/downloads')
+@access_required('admin')
+def downloads_page():
+    return render_template(
+        'downloads.html',
+        title='Downloads',
+        admin_account_created=admin_account_created())
+
 @app.route('/upload')
 @access_required('admin')
 def upload_page():
@@ -2501,6 +2509,27 @@ def manage_delete_updates():
 def manage_check_downloads():
     ok, message = check_completed_downloads(scan_cb=scan_library, post_cb=post_library_change)
     return jsonify({'success': ok, 'message': message})
+
+
+@app.post('/api/downloads/check-completed')
+@access_required('admin')
+def downloads_check_completed():
+    ok, message = check_completed_downloads(scan_cb=scan_library, post_cb=post_library_change)
+    return jsonify({'success': ok, 'message': message})
+
+
+@app.get('/api/downloads/queue')
+@access_required('admin')
+def downloads_queue_state():
+    state = get_downloads_state()
+    return jsonify({'success': True, 'state': state})
+
+
+@app.get('/api/downloads/active')
+@access_required('admin')
+def downloads_active():
+    ok, message, items = get_active_downloads()
+    return jsonify({'success': ok, 'message': message, 'items': items})
 
 
 @app.get('/api/manage/downloads-queue')

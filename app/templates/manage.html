@@ -77,33 +77,6 @@
                             <div class="card-body">
                                 <div class="d-flex align-items-center justify-content-between mb-3">
                                     <div>
-                                        <h5 class="card-title mb-1">Downloads</h5>
-                                        <div class="text-muted small">Keep transfers organized without enabling downloads.</div>
-                                    </div>
-                                </div>
-                                <div class="vstack gap-3">
-                                    <div class="border rounded p-3">
-                                        <div class="fw-semibold">Completed downloads</div>
-                                        <div class="text-muted small mb-2">Move and organize completed torrents without enabling downloads.</div>
-                                        <div class="d-flex flex-wrap gap-3 align-items-center">
-                                            <button type="button" id="checkDownloadsBtn" class="btn btn-outline-primary ms-auto"
-                                                onClick='checkCompletedDownloads()'>Check completed downloads</button>
-                                        </div>
-                                    </div>
-                                    <div class="border rounded p-3">
-                                        <div class="fw-semibold">Download queue</div>
-                                        <div class="text-muted small mb-2">Pending downloads queued for auto-move.</div>
-                                        <div class="small text-muted" id="downloadsQueueStatus">Loading...</div>
-                                        <pre id="downloadsQueueList" class="mb-0" style="max-height: 200px; overflow: auto;"></pre>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="card mb-3">
-                            <div class="card-body">
-                                <div class="d-flex align-items-center justify-content-between mb-3">
-                                    <div>
                                         <h5 class="card-title mb-1">Conversion</h5>
                                         <div class="text-muted small">Convert NSP/XCI to NSZ using your configured tool.</div>
                                     </div>
@@ -270,48 +243,6 @@
             complete: function () {
                 $('#scanLibraryBtn').prop('disabled', false);
             }
-        });
-    }
-
-    function checkCompletedDownloads() {
-        $('#checkDownloadsBtn').prop('disabled', true);
-        $.ajax({
-            url: "/api/manage/check-downloads",
-            type: 'POST',
-            success: function (result) {
-                if (result['success']) {
-                    showManageAlert(result['message'] || 'Checked completed downloads.', 'success');
-                } else {
-                    showManageAlert(result['message'] || 'Check failed.', 'danger');
-                }
-            },
-            complete: function () {
-                $('#checkDownloadsBtn').prop('disabled', false);
-            }
-        });
-    }
-
-    function loadDownloadsQueue() {
-        $.getJSON("/api/manage/downloads-queue", function (result) {
-            if (!result['success']) {
-                $('#downloadsQueueStatus').text('Failed to load queue.');
-                return;
-            }
-            const state = result['state'] || {};
-            const pending = state['pending'] || [];
-            const running = state['running'] ? 'running' : 'idle';
-            const lastRun = state['last_run'] ? new Date(state['last_run'] * 1000).toLocaleString() : 'never';
-            $('#downloadsQueueStatus').text(`Status: ${running}. Last check: ${lastRun}. Pending: ${pending.length}.`);
-            if (!pending.length) {
-                $('#downloadsQueueList').text('No queued downloads.');
-                return;
-            }
-            const lines = pending.map(item => {
-                const name = item['expected_name'] || item['title_id'] || 'Unknown';
-                const version = item['version'] != null ? `v${item['version']}` : '';
-                return `${name} ${version}`.trim();
-            });
-            $('#downloadsQueueList').text(lines.join('\n'));
         });
     }
 
@@ -691,9 +622,7 @@
         loadConvertibleFiles();
         loadJobHistory();
         loadHealthStatus();
-        loadDownloadsQueue();
         startJobHistoryPolling();
-        setInterval(loadDownloadsQueue, 5000);
         $('#convertLibrarySelect').on('change', loadConvertibleFiles);
         $('#convertVerbose').on('change', function () {
             showVerboseOutput = $(this).is(':checked');

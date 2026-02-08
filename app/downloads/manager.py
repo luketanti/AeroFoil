@@ -12,7 +12,7 @@ from app.library import _ensure_unique_path, enqueue_organize_paths, _sanitize_c
 from app import titles as titles_lib
 from app.settings import load_settings
 from app.downloads.prowlarr import ProwlarrClient, pick_best_result
-from app.downloads.torrent_client import add_torrent, list_completed, remove_torrent
+from app.downloads.torrent_client import add_torrent, list_active, list_completed, remove_torrent
 
 logger = logging.getLogger("downloads.manager")
 
@@ -90,6 +90,26 @@ def check_completed_downloads(scan_cb=None, post_cb=None):
         return False, "Torrent client is not configured."
     _check_completed(torrent_cfg, scan_cb=scan_cb, post_cb=post_cb)
     return True, "Checked completed downloads."
+
+
+def get_active_downloads():
+    settings = load_settings()
+    downloads = settings.get("downloads", {})
+    torrent_cfg = downloads.get("torrent_client", {})
+    if not torrent_cfg.get("url") or not torrent_cfg.get("type"):
+        return False, "Torrent client is not configured.", []
+    try:
+        items = list_active(
+            client_type=torrent_cfg.get("type"),
+            url=torrent_cfg.get("url"),
+            username=torrent_cfg.get("username"),
+            password=torrent_cfg.get("password"),
+            category=torrent_cfg.get("category"),
+            download_path=torrent_cfg.get("download_path"),
+        )
+        return True, None, items
+    except Exception as e:
+        return False, str(e), []
 
 
 def _process_downloads(downloads, scan_cb=None, post_cb=None):
