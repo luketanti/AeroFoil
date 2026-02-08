@@ -207,6 +207,18 @@
                                 <div id="manageJobHistory" class="small text-muted">No jobs yet.</div>
                             </div>
                         </div>
+                        <div class="card mb-3">
+                            <div class="card-body">
+                                <details id="manageDiagnosticsDetails">
+                                    <summary class="fw-semibold">Diagnostics</summary>
+                                    <div class="text-muted small mt-2 mb-2">Live memory and scan diagnostics.</div>
+                                    <div class="d-flex justify-content-end mb-2">
+                                        <button class="btn btn-outline-secondary btn-sm" type="button" id="copyDiagnosticsBtn" onClick="copyDiagnostics()">Copy</button>
+                                    </div>
+                                    <pre id="manageDiagnostics" class="mb-0 small" style="max-height: 280px; overflow: auto;">Loading diagnostics...</pre>
+                                </details>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -686,13 +698,214 @@
         });
     }
 
+    function formatDiagBytes(bytes) {
+        if (bytes == null || isNaN(bytes)) {
+            return 'n/a';
+        }
+        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        let size = Number(bytes);
+        let unitIndex = 0;
+        while (size >= 1024 && unitIndex < units.length - 1) {
+            size /= 1024;
+            unitIndex += 1;
+        }
+        return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[unitIndex]}`;
+    }
+
+    function formatDiagAge(seconds) {
+        if (seconds == null || isNaN(seconds)) {
+            return 'n/a';
+        }
+        const s = Math.max(0, Math.round(Number(seconds)));
+        if (s < 60) {
+            return `${s}s`;
+        }
+        const m = Math.floor(s / 60);
+        const r = s % 60;
+        return `${m}m ${r}s`;
+    }
+
+    function diagnosticsPhaseLine(name, phase) {
+        if (!phase) {
+            return `${name}: n/a`;
+        }
+        const inProgress = phase['in_progress'] ? 'running' : 'idle';
+        const peak = phase['identity_map_peak'] != null ? phase['identity_map_peak'] : 'n/a';
+        const last = phase['identity_map_last'] != null ? phase['identity_map_last'] : 'n/a';
+        const gcCount = phase['gc_collections'] != null ? phase['gc_collections'] : 'n/a';
+        const counters = phase['counters'] || {};
+        const bits = [];
+        if (counters['processed'] != null) {
+            bits.push(`processed=${counters['processed']}`);
+        }
+        if (counters['total_candidates'] != null) {
+            bits.push(`candidates=${counters['total_candidates']}`);
+        }
+        if (counters['files_seen'] != null) {
+            bits.push(`seen=${counters['files_seen']}`);
+        }
+        if (counters['files_added'] != null) {
+            bits.push(`added=${counters['files_added']}`);
+        }
+        if (counters['files_removed'] != null) {
+            bits.push(`removed=${counters['files_removed']}`);
+        }
+        if (counters['apps_added'] != null) {
+            bits.push(`apps_added=${counters['apps_added']}`);
+        }
+        if (counters['generated_items'] != null) {
+            bits.push(`items=${counters['generated_items']}`);
+        }
+        const extra = bits.length ? ` ${bits.join(' ')}` : '';
+        return `${name}: ${inProgress} idmap peak=${peak} last=${last} gc=${gcCount}${extra}`;
+    }
+
+    function copyDiagnostics() {
+        const text = $('#manageDiagnostics').text() || '';
+        if (!text.trim()) {
+            showManageAlert('No diagnostics text to copy yet.', 'warning');
+            return;
+        }
+        const btn = $('#copyDiagnosticsBtn');
+        const setCopiedState = function () {
+            const original = btn.text();
+            btn.text('Copied');
+            setTimeout(function () {
+                btn.text(original);
+            }, 1200);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function () {
+                setCopiedState();
+            }).catch(function () {
+                showManageAlert('Clipboard write failed.', 'danger');
+            });
+            return;
+        }
+        const ta = $('<textarea>').val(text).css({ position: 'fixed', top: '-1000px', left: '-1000px' });
+        $('body').append(ta);
+        ta.trigger('focus');
+        ta.trigger('select');
+        let ok = false;
+        try {
+            ok = document.execCommand('copy');
+        } catch (e) {
+            ok = false;
+        }
+        ta.remove();
+        if (ok) {
+            setCopiedState();
+        } else {
+            showManageAlert('Clipboard not available in this browser.', 'danger');
+        }
+    }
+
+    let diagnosticsTimer = null;
+    let diagnosticsRequest = null;
+    let diagnosticsRequestSeq = 0;
+    function loadDiagnostics() {
+        // Keep only one in-flight diagnostics request to avoid hung XHRs piling up.
+        if (diagnosticsRequest && diagnosticsRequest.readyState !== 4) {
+            diagnosticsRequest.abort();
+        }
+        const requestSeq = ++diagnosticsRequestSeq;
+        diagnosticsRequest = $.ajax({
+            url: "/api/manage/diagnostics/memory",
+            type: "GET",
+            dataType: "json",
+            timeout: 4500,
+            cache: false
+        }).done(function (result) {
+            if (requestSeq !== diagnosticsRequestSeq) {
+                return;
+            }
+            try {
+                if (!result['success']) {
+                    $('#manageDiagnostics').text('Failed to load diagnostics.');
+                    return;
+                }
+                const process = result['process'] || {};
+                const scan = result['scan'] || {};
+                const rebuild = scan['library_rebuild'] || {};
+                const titledb = result['titledb'] || {};
+                const titledbSizes = titledb['sizes'] || {};
+                const shop = result['shop_sections_cache'] || {};
+                const shopMem = shop['in_memory'] || {};
+                const shopDisk = shop['disk'] || {};
+                const sql = result['sqlalchemy'] || {};
+                const gcInfo = result['python_gc'] || {};
+                const libDiag = (scan['library_memory_diagnostics'] || {});
+                const phases = libDiag['phases'] || {};
+                const shopMemSummary = shopMem['summary'] || {};
+                const shopDiskSummary = shopDisk['summary'] || {};
+                const gcCounts = Array.isArray(gcInfo['counts']) ? gcInfo['counts'] : [];
+
+                const lines = [];
+                lines.push(`updated: ${new Date((result['timestamp'] || 0) * 1000).toLocaleString()}`);
+                lines.push(`process: rss=${formatDiagBytes(process['rss_bytes'])} vms=${formatDiagBytes(process['vms_bytes'])}`);
+                lines.push(`scan: in_progress=${!!scan['scan_in_progress']} rebuild=${!!rebuild['in_progress']}`);
+                lines.push(`sqlalchemy: identity_map=${sql['current_session_identity_map_size'] ?? 'n/a'} new=${sql['new_count'] ?? 'n/a'} dirty=${sql['dirty_count'] ?? 'n/a'}`);
+                lines.push(`python_gc: counts=${gcCounts.join(', ') || 'n/a'}`);
+                lines.push(`titledb: loaded=${!!titledb['loaded']} refcount=${titledb['refcount'] ?? 'n/a'} titles=${titledbSizes['titles_by_title_id'] ?? 'n/a'} versions=${titledbSizes['versions'] ?? 'n/a'}`);
+                lines.push(`shop cache mem: present=${!!shopMem['present']} age=${formatDiagAge(shopMem['age_s'])} size=${formatDiagBytes(shopMemSummary['size_bytes'])}`);
+                lines.push(`shop cache disk: present=${!!shopDisk['present']} age=${formatDiagAge(shopDisk['age_s'])} size=${formatDiagBytes(shopDiskSummary['size_bytes'])}`);
+                lines.push('');
+                lines.push('phases:');
+                lines.push(diagnosticsPhaseLine('scan_library_path', phases['scan_library_path']));
+                lines.push(diagnosticsPhaseLine('identify_library_files', phases['identify_library_files']));
+                lines.push(diagnosticsPhaseLine('add_missing_apps_to_db', phases['add_missing_apps_to_db']));
+                lines.push(diagnosticsPhaseLine('update_titles', phases['update_titles']));
+                lines.push(diagnosticsPhaseLine('generate_library', phases['generate_library']));
+                $('#manageDiagnostics').text(lines.join('\n'));
+            } catch (error) {
+                $('#manageDiagnostics').text('Diagnostics parse error.');
+            }
+        }).fail(function (_jqXhr, textStatus) {
+            if (requestSeq !== diagnosticsRequestSeq) {
+                return;
+            }
+            if (textStatus === 'abort') {
+                return;
+            }
+            if (textStatus === 'timeout') {
+                $('#manageDiagnostics').text('Diagnostics request timed out.');
+                return;
+            }
+            $('#manageDiagnostics').text('Diagnostics endpoint unavailable.');
+        }).always(function () {
+            if (requestSeq === diagnosticsRequestSeq) {
+                diagnosticsRequest = null;
+            }
+        });
+    }
+
+    function startDiagnosticsPolling() {
+        if (diagnosticsTimer) {
+            return;
+        }
+        diagnosticsTimer = setInterval(loadDiagnostics, 5000);
+    }
+
+    function stopDiagnosticsPolling() {
+        if (diagnosticsTimer) {
+            clearInterval(diagnosticsTimer);
+            diagnosticsTimer = null;
+        }
+        if (diagnosticsRequest && diagnosticsRequest.readyState !== 4) {
+            diagnosticsRequest.abort();
+        }
+        diagnosticsRequest = null;
+    }
+
     $(document).ready(function () {
         loadLibraries();
         loadConvertibleFiles();
         loadJobHistory();
         loadHealthStatus();
+        loadDiagnostics();
         loadDownloadsQueue();
         startJobHistoryPolling();
+        startDiagnosticsPolling();
         setInterval(loadDownloadsQueue, 5000);
         $('#convertLibrarySelect').on('change', loadConvertibleFiles);
         $('#convertVerbose').on('change', function () {
@@ -744,9 +957,12 @@
         document.addEventListener('visibilitychange', function () {
             if (document.hidden) {
                 stopJobHistoryPolling();
+                stopDiagnosticsPolling();
             } else {
                 loadJobHistory();
+                loadDiagnostics();
                 startJobHistoryPolling();
+                startDiagnosticsPolling();
             }
         });
     });
