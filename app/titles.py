@@ -4,6 +4,7 @@ import re
 import json
 import requests
 import threading
+import time
 from contextlib import contextmanager
 
 from app import titledb
@@ -95,6 +96,9 @@ _titles_images_by_title_id = None
 _versions_db = None
 _versions_txt_db = None
 _titledb_lock = threading.Lock()
+_missing_titledb_log_lock = threading.Lock()
+_missing_titledb_last_log = {}
+_MISSING_TITLE_LOG_TTL_S = 3600
 
 class CorruptedTitleDBFileError(Exception):
     def __init__(self, file_path, label, original_error):
@@ -671,7 +675,21 @@ def get_game_info(title_id):
             'screenshots': screenshots,
         })
     except Exception:
-        logger.error(f"Title ID not found in titledb: {title_id}")
+        normalized_title_id = str(title_id or '').strip().upper()
+        now = time.time()
+        should_log = False
+        with _missing_titledb_log_lock:
+            last_logged = float(_missing_titledb_last_log.get(normalized_title_id, 0.0))
+            if (now - last_logged) >= _MISSING_TITLE_LOG_TTL_S:
+                _missing_titledb_last_log[normalized_title_id] = now
+                should_log = True
+            if len(_missing_titledb_last_log) > 5000:
+                cutoff = now - (_MISSING_TITLE_LOG_TTL_S * 2)
+                stale_keys = [k for k, ts in _missing_titledb_last_log.items() if ts < cutoff]
+                for key in stale_keys:
+                    _missing_titledb_last_log.pop(key, None)
+        if should_log:
+            logger.warning("Title ID not found in titledb: %s", normalized_title_id or title_id)
         return _apply_manual_title_override(title_id, {
             'name': 'Unrecognized',
             'bannerUrl': '//placehold.it/400x200',
