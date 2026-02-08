@@ -1098,6 +1098,18 @@
         return { values: values, invalid: invalid };
     }
 
+    function updateTorrentClientFieldState() {
+        const clientType = getInputVal("torrentClientTypeSelect");
+        const usernameInput = $("#torrentClientUserInput");
+        const isDeluge = clientType === "deluge";
+        usernameInput.prop("disabled", isDeluge);
+        if (isDeluge) {
+            usernameInput.attr("placeholder", "Not required for Deluge");
+        } else {
+            usernameInput.attr("placeholder", "");
+        }
+    }
+
     function copyPublicKey() {
         const publicKeyInput = document.getElementById('shopPublicKeyInput');
         const publicKey = publicKeyInput.value;
@@ -1329,6 +1341,7 @@
         handleHashNavigation();
         
         fillLibraryTable();
+        $("#torrentClientTypeSelect").on("change", updateTorrentClientFieldState);
         $('#libraryTemplateBaseFolderInput, #libraryTemplateBaseFilenameInput, #libraryTemplateUpdateFolderInput, #libraryTemplateUpdateFilenameInput, #libraryTemplateDlcFolderInput, #libraryTemplateDlcFilenameInput, #libraryTemplateOtherFolderInput, #libraryTemplateOtherFilenameInput')
             .on('change', function () { submitLibrarySettings(); });
 
@@ -1422,6 +1435,7 @@
             setInputVal("torrentClientUserInput", torrentSettings['username'] || '');
             setInputVal("torrentClientPasswordInput", torrentSettings['password'] || '');
             setInputVal("torrentClientPathInput", torrentSettings['download_path'] || '');
+            updateTorrentClientFieldState();
         });
 
     });
