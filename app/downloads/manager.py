@@ -146,8 +146,7 @@ def manual_search_update(title_id, version):
         info = titles_lib.get_game_info(title_id) or {}
         title_name = info.get("name") or title_id
     finally:
-        titles_lib.identification_in_progress_count -= 1
-        titles_lib.unload_titledb()
+        titles_lib.release_titledb()
 
     update = {
         "title_id": title_id,
@@ -183,8 +182,7 @@ def search_update_options(title_id, version, limit=20):
         info = titles_lib.get_game_info(title_id) or {}
         title_name = info.get("name") or title_id
     finally:
-        titles_lib.identification_in_progress_count -= 1
-        titles_lib.unload_titledb()
+        titles_lib.release_titledb()
 
     update = {
         "title_id": title_id,
@@ -362,8 +360,7 @@ def _get_missing_updates():
             })
         return missing
     finally:
-        titles_lib.identification_in_progress_count -= 1
-        titles_lib.unload_titledb()
+        titles_lib.release_titledb()
 
 
 def _already_tracked(key):

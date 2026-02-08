@@ -201,10 +201,9 @@ def update_titledb_files(app_settings):
     
     region_titles_file = get_region_titles_file(app_settings)
     try:
-        region_titles_file_present = region_titles_file in os.listdir(TITLEDB_DIR)
+        current_files = set(os.listdir(TITLEDB_DIR))
     except FileNotFoundError:
-        # Directory doesn't exist yet
-        region_titles_file_present = False
+        current_files = set()
 
     try:
         r = _get_with_retry(TITLEDB_ARTEFACTS_URL, allow_redirects=False)
@@ -222,8 +221,15 @@ def update_titledb_files(app_settings):
         old_region_titles_files = [f for f in os.listdir(TITLEDB_DIR) if re.match(r"titles\.[A-Z]{2}\.[a-z]{2}\.json", f) and f not in files_to_update]
         files_to_update += old_region_titles_files
 
-    elif not region_titles_file_present:
-        files_to_update.append(region_titles_file)
+    required_core_files = list(TITLEDB_DEFAULT_FILES) + [region_titles_file]
+    missing_core_files = [file for file in required_core_files if file not in current_files]
+    if missing_core_files:
+        logger.warning(
+            "Missing required TitleDB file(s): %s. They will be downloaded.",
+            ", ".join(missing_core_files)
+        )
+        files_to_update.extend(missing_core_files)
+        need_descriptions = True
 
     # Ensure we have a local description index (used for game info descriptions).
     desc_url, desc_filename = _get_descriptions_url(app_settings)
@@ -231,7 +237,9 @@ def update_titledb_files(app_settings):
     descriptions_valid = _is_valid_json_file(descriptions_path)
     need_descriptions = True
 
-    if len(files_to_update):
+    if files_to_update:
+        # Keep deterministic order without duplicates.
+        files_to_update = list(dict.fromkeys(files_to_update))
         download_titledb_files(rzf, files_to_update)
 
     # Description index is not part of the nightly artefacts zip; download it directly.
