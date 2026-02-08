@@ -1,6 +1,7 @@
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import create_engine
 from sqlalchemy import event
+from sqlalchemy import func, or_
 from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.exc import NoResultFound
 from sqlalchemy.dialects.sqlite import insert  # Use postgresql if using PostgreSQL
@@ -381,21 +382,71 @@ def get_all_files_without_identification(identification):
     results = Files.query.filter(Files.identification_type != identification).all()
     return[to_dict(r)['filepath']  for r in results]
 
+def _derive_title_id_from_app(app_id, app_type):
+    app_id = str(app_id or '').upper()
+    app_type = str(app_type or '').upper()
+    if len(app_id) != 16:
+        return None
+    try:
+        if app_type == APP_TYPE_BASE:
+            return app_id
+        if app_type == APP_TYPE_UPD:
+            return f"{app_id[:-3]}000"
+        if app_type == APP_TYPE_DLC:
+            base = app_id[:-3]
+            return (hex(int(base, base=16) - 1)[2:].rjust(len(base), '0') + '000').upper()
+    except Exception:
+        return None
+    return None
+
 def get_all_apps():
-    apps_list = [
-        {
-            "id": app.id,
-            "title_db_id": app.title.id,
-            "title_id": app.title.title_id,  # Access the actual title_id from Titles
-            "app_id": app.app_id,
-            "app_version": app.app_version,
-            "app_type": app.app_type,
-            "owned": app.owned,
-            "size": sum((f.size or 0) for f in (getattr(app, 'files', None) or [])),
-        }
-        for app in Apps.query.options(db.joinedload(Apps.title), db.joinedload(Apps.files)).all()  # Optimized with joinedload
-    ]
-    return apps_list
+    size_subquery = (
+        db.session.query(
+            app_files.c.app_id.label('app_pk'),
+            func.coalesce(func.sum(Files.size), 0).label('size'),
+        )
+        .outerjoin(Files, Files.id == app_files.c.file_id)
+        .group_by(app_files.c.app_id)
+        .subquery()
+    )
+    rows = (
+        db.session.query(
+            Apps.id.label('id'),
+            Apps.title_id.label('title_fk_id'),
+            Titles.id.label('title_db_id'),
+            Titles.title_id.label('title_id'),
+            Apps.app_id.label('app_id'),
+            Apps.app_version.label('app_version'),
+            Apps.app_type.label('app_type'),
+            Apps.owned.label('owned'),
+            func.coalesce(size_subquery.c.size, 0).label('size'),
+        )
+        .outerjoin(Titles, Apps.title_id == Titles.id)
+        .outerjoin(size_subquery, size_subquery.c.app_pk == Apps.id)
+        .all()
+    )
+    out = []
+    missing_title_refs = 0
+    for row in rows:
+        title_id = row.title_id or _derive_title_id_from_app(row.app_id, row.app_type)
+        if row.title_id is None:
+            missing_title_refs += 1
+        out.append({
+            "id": row.id,
+            "title_db_id": row.title_db_id if row.title_db_id is not None else row.title_fk_id,
+            "title_id": title_id,
+            "app_id": row.app_id,
+            "app_version": row.app_version,
+            "app_type": row.app_type,
+            "owned": row.owned,
+            "size": int(row.size or 0),
+        })
+    if missing_title_refs:
+        logger.warning(
+            "Detected %s app rows without matching titles rows; using fallback title_id derivation.",
+            missing_title_refs
+        )
+    return out
 
 def get_all_non_identified_files_from_library(library_id):
     return Files.query.filter_by(identified=False, library_id=library_id).all()
@@ -449,7 +500,51 @@ def get_library_id(library_path):
     return library_id
 
 def get_library_file_paths(library_id):
-    return [file.filepath for file in Files.query.filter_by(library_id=library_id).all()]
+    return list(iter_library_file_paths(library_id))
+
+def iter_library_file_paths(library_id, batch_size=2000):
+    try:
+        batch_size = max(1, int(batch_size))
+    except Exception:
+        batch_size = 2000
+    query = (
+        db.session.query(Files.filepath)
+        .filter_by(library_id=library_id)
+        .yield_per(batch_size)
+    )
+    for filepath, in query:
+        yield filepath
+
+def _files_to_identify_query(library_id, include_filename_retry=False, include_orphaned=False):
+    query = db.session.query(Files.id).filter(Files.library_id == library_id)
+    predicates = [Files.identified.is_(False)]
+    if include_filename_retry:
+        predicates.append(Files.identification_type == 'filename')
+    if include_orphaned:
+        orphaned = ~db.session.query(app_files.c.file_id).filter(app_files.c.file_id == Files.id).exists()
+        predicates.append(orphaned)
+    query = query.filter(or_(*predicates))
+    return query.order_by(Files.id)
+
+def iter_file_ids_for_identification(library_id, include_filename_retry=False, include_orphaned=False, batch_size=1000):
+    try:
+        batch_size = max(1, int(batch_size))
+    except Exception:
+        batch_size = 1000
+    query = _files_to_identify_query(
+        library_id,
+        include_filename_retry=include_filename_retry,
+        include_orphaned=include_orphaned
+    ).yield_per(batch_size)
+    for file_id, in query:
+        yield file_id
+
+def count_file_ids_for_identification(library_id, include_filename_retry=False, include_orphaned=False):
+    return _files_to_identify_query(
+        library_id,
+        include_filename_retry=include_filename_retry,
+        include_orphaned=include_orphaned
+    ).count()
 
 def set_library_scan_time(library_id, scan_time=None):
     library = get_library(library_id)
@@ -475,21 +570,42 @@ def add_title_id_in_db(title_id):
         db.session.commit()
 
 def get_all_title_apps(title_id):
-    title = (
-        Titles.query
-        .options(joinedload(Titles.apps).joinedload(Apps.files))
-        .filter_by(title_id=title_id)
-        .first()
+    size_subquery = (
+        db.session.query(
+            app_files.c.app_id.label('app_pk'),
+            func.coalesce(func.sum(Files.size), 0).label('size'),
+        )
+        .outerjoin(Files, Files.id == app_files.c.file_id)
+        .group_by(app_files.c.app_id)
+        .subquery()
     )
-    if not title:
-        return []
-
-    out = []
-    for a in title.apps:
-        d = to_dict(a)
-        d['size'] = sum((f.size or 0) for f in (getattr(a, 'files', None) or []))
-        out.append(d)
-    return out
+    rows = (
+        db.session.query(
+            Apps.id.label('id'),
+            Apps.title_id.label('title_id'),
+            Apps.app_id.label('app_id'),
+            Apps.app_version.label('app_version'),
+            Apps.app_type.label('app_type'),
+            Apps.owned.label('owned'),
+            func.coalesce(size_subquery.c.size, 0).label('size'),
+        )
+        .join(Titles, Apps.title_id == Titles.id)
+        .outerjoin(size_subquery, size_subquery.c.app_pk == Apps.id)
+        .filter(Titles.title_id == title_id)
+        .all()
+    )
+    return [
+        {
+            'id': row.id,
+            'title_id': row.title_id,
+            'app_id': row.app_id,
+            'app_version': row.app_version,
+            'app_type': row.app_type,
+            'owned': row.owned,
+            'size': int(row.size or 0),
+        }
+        for row in rows
+    ]
 
 def get_app_by_id_and_version(app_id, app_version):
     """Get app entry for a specific app_id and version (unique due to constraint)"""
@@ -626,36 +742,50 @@ def delete_file_by_filepath(filepath):
 
 def remove_missing_files_from_db():
     try:
-        # Query all entries in the Files table
-        files = Files.query.all()
-        
-        # List to keep track of IDs to be deleted
-        ids_to_delete = []
-        
-        for file_entry in files:
-            # Check if the file exists on disk
-            if not os.path.exists(file_entry.filepath):
-                # If the file does not exist, mark this entry for deletion
-                ids_to_delete.append(file_entry.id)
-                logger.debug(f"File not found, marking file for deletion: {file_entry.filepath}")
-        
-        # Update Apps table before deleting files
+        batch_size = 500
+        last_id = 0
+        total_deleted = 0
         total_apps_updated = 0
-        if ids_to_delete:
-            # Remove file_ids from Apps table and update owned status
-            for file_id in ids_to_delete:
-                apps_updated = remove_file_from_apps(file_id)
-                total_apps_updated += apps_updated
-            
-            # Delete all marked entries from the Files table
-            Files.query.filter(Files.id.in_(ids_to_delete)).delete(synchronize_session=False)
-            
+
+        while True:
+            rows = (
+                db.session.query(Files.id, Files.filepath)
+                .filter(Files.id > last_id)
+                .order_by(Files.id)
+                .limit(batch_size)
+                .all()
+            )
+            if not rows:
+                break
+            last_id = rows[-1].id
+
+            ids_to_delete = []
+            for row in rows:
+                if not row.filepath or not os.path.exists(row.filepath):
+                    ids_to_delete.append(row.id)
+                    logger.debug(f"File not found, marking file for deletion: {row.filepath}")
+
+            if not ids_to_delete:
+                db.session.expunge_all()
+                continue
+
+            files_to_delete = Files.query.filter(Files.id.in_(ids_to_delete)).all()
+            for file_obj in files_to_delete:
+                for app in list(file_obj.apps):
+                    if file_obj in app.files:
+                        app.files.remove(file_obj)
+                    app.owned = len(app.files) > 0
+                    total_apps_updated += 1
+                db.session.delete(file_obj)
+
+            total_deleted += len(files_to_delete)
             db.session.commit()
-            
-            logger.info(f"Deleted {len(ids_to_delete)} files from the database.")
+            db.session.expunge_all()
+
+        if total_deleted > 0:
+            logger.info(f"Deleted {total_deleted} files from the database.")
             if total_apps_updated > 0:
                 logger.info(f"Updated {total_apps_updated} app entries to remove missing file references.")
-
         else:
             logger.debug("No files were deleted. All files are present on disk.")
     
