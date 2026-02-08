@@ -1385,6 +1385,7 @@
             const button = $(this);
             const downloadUrl = button.data('download-url');
             const title = button.data('title');
+            const titleId = button.data('title-id');
             const updateOnly = button.data('update-only') === true || button.data('update-only') === 'true';
             const expectedVersion = button.data('expected-version');
             if (!downloadUrl) {
@@ -1398,6 +1399,7 @@
                 data: JSON.stringify({
                     download_url: downloadUrl,
                     title: title,
+                    title_id: titleId,
                     update_only: updateOnly,
                     expected_version: expectedVersion
                 }),
@@ -1808,6 +1810,7 @@
                                 <button class="btn btn-sm btn-warning queue-torrent-btn"
                                     data-download-url="${item.download_url}"
                                     data-title="${item.title || ''}"
+                                    data-title-id="${titleId || ''}"
                                     data-update-only="true"
                                     data-expected-version="${version}">
                                     Queue update
@@ -1864,6 +1867,7 @@
                             <button class="btn btn-sm btn-warning queue-torrent-btn"
                                 data-download-url="${item.download_url}"
                                 data-title="${item.title || ''}"
+                                data-title-id="${titleId || ''}"
                                 data-update-only="true"
                                 data-expected-version="${version}">
                                 Queue update

@@ -2470,6 +2470,7 @@ def downloads_queue():
     data = request.json or {}
     download_url = data.get('download_url')
     expected_name = data.get('title')
+    title_id = data.get('title_id')
     update_only = bool(data.get('update_only', False))
     expected_version = data.get('expected_version')
     if not download_url:
@@ -2478,7 +2479,8 @@ def downloads_queue():
         download_url,
         expected_name=expected_name,
         update_only=update_only,
-        expected_version=expected_version
+        expected_version=expected_version,
+        title_id=title_id
     )
     return jsonify({'success': ok, 'message': message})
 
