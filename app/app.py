@@ -9,8 +9,7 @@ if PROJECT_DIR not in sys.path:
 from flask import Flask, render_template, request, redirect, url_for, jsonify, send_from_directory, Response, has_app_context, has_request_context, g
 from flask_login import LoginManager
 from werkzeug.utils import secure_filename
-from sqlalchemy import func
-from sqlalchemy.orm import joinedload
+from sqlalchemy import func, and_, or_, case
 from app.scheduler import init_scheduler
 from functools import wraps
 from app.file_watcher import Watcher
@@ -392,6 +391,25 @@ shop_sections_cache = {
 shop_sections_cache_lock = threading.Lock()
 shop_sections_refresh_lock = threading.Lock()
 shop_sections_refresh_running = False
+shop_root_cache_lock = threading.Lock()
+shop_root_cache = {
+    'state_token': None,
+    'files': None,
+    'encrypted': {},
+}
+_SHOP_ROOT_ENCRYPTED_CACHE_LIMIT = 8
+titles_metadata_cache_lock = threading.Lock()
+titles_metadata_cache = {
+    'state_token': None,
+    'genres': [],
+    'title_name_map': {},
+    'genre_title_ids': {},
+    'unrecognized_title_ids': set(),
+}
+request_settings_sync_lock = threading.Lock()
+request_settings_last_sync_ts = 0.0
+missing_files_sweep_lock = threading.Lock()
+missing_files_last_run_ts = 0.0
 
 
 def _is_conversion_running():
@@ -418,6 +436,178 @@ def _read_cache_ttl(env_key, default_value):
     except ValueError:
         return default_value
 
+def _invalidate_shop_root_cache():
+    with shop_root_cache_lock:
+        shop_root_cache['state_token'] = None
+        shop_root_cache['files'] = None
+        shop_root_cache['encrypted'] = {}
+
+def _get_cached_shop_files():
+    state_token = get_library_cache_state_token()
+    with shop_root_cache_lock:
+        if (
+            shop_root_cache.get('state_token') == state_token
+            and isinstance(shop_root_cache.get('files'), list)
+        ):
+            return list(shop_root_cache['files'])
+
+    rows = db.session.query(Files.id, Files.filename, Files.size).all()
+    files_payload = [
+        {
+            "url": f"/api/get_game/{row.id}#{row.filename}",
+            "size": int(row.size or 0),
+        }
+        for row in rows
+    ]
+
+    with shop_root_cache_lock:
+        shop_root_cache['state_token'] = state_token
+        shop_root_cache['files'] = files_payload
+        shop_root_cache['encrypted'] = {}
+    return list(files_payload)
+
+def _get_cached_encrypted_shop_payload(shop_payload, public_key, verified_host):
+    state_token = get_library_cache_state_token()
+    motd = str(shop_payload.get("success") or "")
+    referrer = str(shop_payload.get("referrer") or verified_host or "")
+    cache_key = (state_token, motd, str(public_key or ''), referrer)
+
+    with shop_root_cache_lock:
+        encrypted_cache = shop_root_cache.setdefault('encrypted', {})
+        cached = encrypted_cache.get(cache_key)
+        if isinstance(cached, (bytes, bytearray)):
+            return bytes(cached)
+
+    payload = encrypt_shop(shop_payload, public_key_pem=public_key, compression_level=6)
+    with shop_root_cache_lock:
+        encrypted_cache = shop_root_cache.setdefault('encrypted', {})
+        encrypted_cache[cache_key] = payload
+        if len(encrypted_cache) > _SHOP_ROOT_ENCRYPTED_CACHE_LIMIT:
+            ordered_keys = list(encrypted_cache.keys())[-_SHOP_ROOT_ENCRYPTED_CACHE_LIMIT:]
+            shop_root_cache['encrypted'] = {k: encrypted_cache[k] for k in ordered_keys}
+    return payload
+
+def _is_titledb_unrecognized(info):
+    try:
+        name_value = str((info or {}).get('name') or '').strip().lower()
+        id_value = str((info or {}).get('id') or '').strip().lower()
+        return name_value == 'unrecognized' or 'not found in titledb' in id_value
+    except Exception:
+        return True
+
+def _split_genres_value(raw):
+    parts = []
+    for segment in str(raw or '').split(','):
+        cleaned = re.sub(r'^[\s\[\]\'"`]+|[\s\[\]\'"`]+$', '', str(segment or '').strip()).strip()
+        if cleaned:
+            parts.append(cleaned)
+    seen = set()
+    out = []
+    for part in parts:
+        key = part.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(part)
+    return out
+
+def _build_titles_metadata_cache():
+    title_ids = [row.title_id for row in db.session.query(Titles.title_id).all() if row.title_id]
+    genres_map = {}
+    genre_title_ids = {}
+    title_name_map = {}
+    unrecognized_title_ids = set()
+
+    with titles.titledb_session():
+        for tid in title_ids:
+            normalized_tid = str(tid or '').strip().upper()
+            if not normalized_tid:
+                continue
+            info = titles.get_game_info(normalized_tid) or {}
+            name = str(info.get('name') or '').strip()
+            title_name_map[normalized_tid] = name.lower()
+            if _is_titledb_unrecognized(info):
+                unrecognized_title_ids.add(normalized_tid)
+            for genre in _split_genres_value(info.get('category') or ''):
+                lowered = genre.lower()
+                if lowered not in genres_map:
+                    genres_map[lowered] = genre
+                genre_title_ids.setdefault(lowered, set()).add(normalized_tid)
+
+    genres = sorted(genres_map.values(), key=lambda item: str(item).lower())
+    return {
+        'genres': genres,
+        'title_name_map': title_name_map,
+        'genre_title_ids': genre_title_ids,
+        'unrecognized_title_ids': unrecognized_title_ids,
+    }
+
+def _get_cached_titles_metadata():
+    state_token = get_library_cache_state_token()
+    with titles_metadata_cache_lock:
+        if titles_metadata_cache.get('state_token') == state_token:
+            return {
+                'genres': list(titles_metadata_cache.get('genres') or []),
+                'title_name_map': dict(titles_metadata_cache.get('title_name_map') or {}),
+                'genre_title_ids': {
+                    str(k): set(v or set())
+                    for k, v in (titles_metadata_cache.get('genre_title_ids') or {}).items()
+                },
+                'unrecognized_title_ids': set(titles_metadata_cache.get('unrecognized_title_ids') or set()),
+            }
+
+    fresh = _build_titles_metadata_cache()
+    with titles_metadata_cache_lock:
+        titles_metadata_cache['state_token'] = state_token
+        titles_metadata_cache['genres'] = list(fresh.get('genres') or [])
+        titles_metadata_cache['title_name_map'] = dict(fresh.get('title_name_map') or {})
+        titles_metadata_cache['genre_title_ids'] = {
+            str(k): set(v or set())
+            for k, v in (fresh.get('genre_title_ids') or {}).items()
+        }
+        titles_metadata_cache['unrecognized_title_ids'] = set(fresh.get('unrecognized_title_ids') or set())
+    return fresh
+
+def _get_cached_library_genres():
+    metadata = _get_cached_titles_metadata()
+    return list(metadata.get('genres') or [])
+
+def _get_discovery_sections(limit=12):
+    try:
+        limit = max(1, int(limit))
+    except Exception:
+        limit = 12
+
+    now = time.time()
+    payload = None
+    with shop_sections_cache_lock:
+        cache_enabled = SHOP_SECTIONS_CACHE_TTL_S is None or SHOP_SECTIONS_CACHE_TTL_S > 0
+        cache_valid = True
+        if SHOP_SECTIONS_CACHE_TTL_S is not None:
+            cache_valid = (now - float(shop_sections_cache.get('timestamp') or 0)) <= SHOP_SECTIONS_CACHE_TTL_S
+        cache_hit = (
+            cache_enabled
+            and shop_sections_cache['payload'] is not None
+            and cache_valid
+        )
+        if cache_hit:
+            payload = shop_sections_cache['payload']
+
+    if payload is None:
+        payload = _build_shop_sections_payload(max(limit, 50))
+        if SHOP_SECTIONS_CACHE_TTL_S is None or SHOP_SECTIONS_CACHE_TTL_S > 0:
+            _store_shop_sections_cache(payload, max(limit, 50), now, persist_disk=True)
+
+    sections = payload.get('sections') if isinstance(payload, dict) else []
+    newest = []
+    recommended = []
+    for section in sections or []:
+        if section.get('id') == 'new':
+            newest = list(section.get('items') or [])[:limit]
+        elif section.get('id') == 'recommended':
+            recommended = list(section.get('items') or [])[:limit]
+    return newest, recommended
+
 # ===== CACHE TTLs (seconds) =====
 # Make these short if you want the Web UI caches to free memory frequently.
 # Set to 0 to disable in-memory caching entirely.
@@ -426,6 +616,8 @@ SHOP_SECTIONS_CACHE_TTL_S = _read_cache_ttl('SHOP_SECTIONS_CACHE_TTL_S', None)
 SHOP_SECTIONS_ALL_ITEMS_CAP = _read_cache_ttl('SHOP_SECTIONS_ALL_ITEMS_CAP', 300)
 SHOP_SECTIONS_MAX_IN_MEMORY_BYTES = _read_cache_ttl('SHOP_SECTIONS_MAX_IN_MEMORY_BYTES', 4 * 1024 * 1024)
 MEDIA_INDEX_TTL_S = _read_cache_ttl('MEDIA_INDEX_TTL_S', None)
+REQUEST_SETTINGS_SYNC_INTERVAL_S = _read_cache_ttl('REQUEST_SETTINGS_SYNC_INTERVAL_S', 5)
+MISSING_FILES_SWEEP_INTERVAL_S = _read_cache_ttl('MISSING_FILES_SWEEP_INTERVAL_S', 21600)
 # ===============================
 
 def _load_shop_sections_cache_from_disk():
@@ -545,65 +737,101 @@ def _build_shop_sections_payload(limit):
     except (TypeError, ValueError):
         limit = 50
     limit = max(1, limit)
+    ranked_files = (
+        db.session.query(
+            app_files.c.app_id.label('app_pk'),
+            Files.id.label('file_id'),
+            Files.filename.label('filename'),
+            func.coalesce(Files.size, 0).label('size'),
+            func.coalesce(Files.download_count, 0).label('download_count'),
+            func.row_number().over(
+                partition_by=app_files.c.app_id,
+                order_by=(Files.size.desc(), Files.id.desc())
+            ).label('row_rank')
+        )
+        .join(Files, Files.id == app_files.c.file_id)
+        .subquery()
+    )
+    best_files = (
+        db.session.query(
+            ranked_files.c.app_pk,
+            ranked_files.c.file_id,
+            ranked_files.c.filename,
+            ranked_files.c.size,
+            ranked_files.c.download_count,
+        )
+        .filter(ranked_files.c.row_rank == 1)
+        .subquery()
+    )
+    rows = (
+        db.session.query(
+            Apps.id.label('app_pk'),
+            Apps.app_id.label('app_id'),
+            Apps.app_version.label('app_version'),
+            Apps.app_type.label('app_type'),
+            Titles.title_id.label('title_id'),
+            best_files.c.file_id.label('file_id'),
+            best_files.c.filename.label('filename'),
+            best_files.c.size.label('size'),
+            best_files.c.download_count.label('download_count'),
+        )
+        .outerjoin(Titles, Apps.title_id == Titles.id)
+        .outerjoin(best_files, best_files.c.app_pk == Apps.id)
+        .filter(Apps.owned.is_(True))
+        .filter(best_files.c.file_id.isnot(None))
+        .all()
+    )
+
+    def _safe_int(value, default=0):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    info_cache = {}
+
     with titles.titledb_session():
-        apps = Apps.query.options(
-            joinedload(Apps.files),
-            joinedload(Apps.title)
-        ).filter_by(owned=True).all()
-        info_cache = {}
-
-        def _safe_int(value, default=0):
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                return default
-
-        def _get_info(title_id):
-            key = (title_id or '').upper()
+        def _get_info(lookup_id):
+            key = (lookup_id or '').strip().upper()
             if not key:
-                return None
+                return {}
             if key not in info_cache:
-                info_cache[key] = titles.get_game_info(key)
+                info_cache[key] = titles.get_game_info(key) or {}
             return info_cache[key]
 
-        def _select_file(app):
-            if not app.files:
+        def _build_item(row):
+            title_id = (row.title_id or '').strip().upper() or None
+            app_id = str(row.app_id or '').strip().upper()
+            if not app_id:
                 return None
-            return max(app.files, key=lambda f: f.size or 0)
 
-        def _build_item(app):
-            file_obj = _select_file(app)
-            if not file_obj:
-                return None
-            title_id = app.title.title_id if app.title else None
-            base_info = _get_info(title_id)
-            app_info = None
-            if app.app_type == APP_TYPE_DLC:
-                app_info = _get_info(app.app_id)
-            name = (app_info or base_info or {}).get('name') or app.app_id
+            base_info = _get_info(title_id) if title_id else {}
+            app_info = base_info
+            if row.app_type == APP_TYPE_DLC:
+                app_info = _get_info(app_id) or base_info
+
+            name = (app_info or {}).get('name') or app_id
             title_name = (base_info or {}).get('name') or name
-            icon_url = f'/api/shop/icon/{title_id}' if title_id else ''
             return {
                 'name': name,
                 'title_name': title_name,
                 'title_id': title_id,
-                'app_id': app.app_id,
-                'app_version': app.app_version,
-                'app_type': app.app_type,
+                'app_id': app_id,
+                'app_version': row.app_version,
+                'app_type': row.app_type,
                 'category': (base_info or {}).get('category', ''),
-                'icon_url': icon_url,
-                'url': f'/api/get_game/{file_obj.id}#{file_obj.filename}',
-                'size': file_obj.size or 0,
-                'file_id': file_obj.id,
-                'filename': file_obj.filename,
-                'download_count': file_obj.download_count or 0
+                'icon_url': f'/api/shop/icon/{title_id}' if title_id else '',
+                'url': f"/api/get_game/{int(row.file_id)}#{row.filename}",
+                'size': int(row.size or 0),
+                'file_id': int(row.file_id),
+                'filename': row.filename,
+                'download_count': int(row.download_count or 0)
             }
 
-        base_apps = [app for app in apps if app.app_type == APP_TYPE_BASE]
-        update_apps = [app for app in apps if app.app_type == APP_TYPE_UPD]
-        dlc_apps = [app for app in apps if app.app_type == APP_TYPE_DLC]
-
-        base_items = [item for item in (_build_item(app) for app in base_apps) if item]
+        base_items = [
+            item for item in (_build_item(row) for row in rows if row.app_type == APP_TYPE_BASE)
+            if item
+        ]
         base_items.sort(key=lambda item: item['file_id'], reverse=True)
         new_items = base_items[:limit]
 
@@ -611,31 +839,43 @@ def _build_shop_sections_payload(limit):
         if not any(item['download_count'] for item in recommended_items):
             recommended_items = new_items[:limit]
 
-        latest_available_update_by_title = {}
-        for app in update_apps:
-            title_id = app.title.title_id if app.title else None
+        latest_update_by_title_id = {}
+        for row in rows:
+            if row.app_type != APP_TYPE_UPD:
+                continue
+            title_id = (row.title_id or '').strip().upper()
             if not title_id:
                 continue
-            version = _safe_int(app.app_version)
-            current_available = latest_available_update_by_title.get(title_id)
-            if not current_available or version > current_available['version']:
-                latest_available_update_by_title[title_id] = {'version': version, 'app': app}
+            version = _safe_int(row.app_version)
+            current = latest_update_by_title_id.get(title_id)
+            if not current or version > current['version']:
+                latest_update_by_title_id[title_id] = {'version': version, 'row': row}
 
-        update_items_full = []
-        for title_id, available in latest_available_update_by_title.items():
-            item = _build_item(available['app'])
-            if item:
-                update_items_full.append(item)
+        update_items_full = [
+            item
+            for item in (_build_item(entry['row']) for entry in latest_update_by_title_id.values())
+            if item
+        ]
         update_items_full.sort(key=lambda item: _safe_int(item['app_version']), reverse=True)
         update_items = update_items_full[:limit]
 
-        dlc_by_id = {}
-        for app in dlc_apps:
-            version = _safe_int(app.app_version)
-            current = dlc_by_id.get(app.app_id)
+        latest_dlc_by_app_id = {}
+        for row in rows:
+            if row.app_type != APP_TYPE_DLC:
+                continue
+            app_id = str(row.app_id or '').strip().upper()
+            if not app_id:
+                continue
+            version = _safe_int(row.app_version)
+            current = latest_dlc_by_app_id.get(app_id)
             if not current or version > current['version']:
-                dlc_by_id[app.app_id] = {'version': version, 'app': app}
-        dlc_items_full = [item for item in (_build_item(entry['app']) for entry in dlc_by_id.values()) if item]
+                latest_dlc_by_app_id[app_id] = {'version': version, 'row': row}
+
+        dlc_items_full = [
+            item
+            for item in (_build_item(entry['row']) for entry in latest_dlc_by_app_id.values())
+            if item
+        ]
         dlc_items_full.sort(key=lambda item: _safe_int(item['app_version']), reverse=True)
         dlc_items = dlc_items_full[:limit]
 
@@ -646,7 +886,7 @@ def _build_shop_sections_payload(limit):
 
         all_items = sorted(
             base_items + update_items_full + dlc_items_full,
-            key=lambda item: item['name'].lower()
+            key=lambda item: str(item.get('name') or '').lower()
         )
         if all_limit is not None:
             all_items = all_items[:all_limit]
@@ -780,6 +1020,48 @@ def reload_conf():
     global app_settings
     global watcher
     app_settings = load_settings()
+
+def _maybe_sync_request_settings():
+    global app_settings
+    global request_settings_last_sync_ts
+
+    interval = REQUEST_SETTINGS_SYNC_INTERVAL_S
+    if interval is None:
+        return
+
+    now = time.time()
+    if interval > 0 and (now - float(request_settings_last_sync_ts or 0.0)) < interval:
+        return
+
+    with request_settings_sync_lock:
+        now = time.time()
+        if interval > 0 and (now - float(request_settings_last_sync_ts or 0.0)) < interval:
+            return
+        app_settings = load_settings()
+        request_settings_last_sync_ts = now
+
+def _maybe_remove_missing_files_from_db(force=False):
+    global missing_files_last_run_ts
+    interval = MISSING_FILES_SWEEP_INTERVAL_S
+    if interval is None and not force:
+        return
+
+    now = time.time()
+    if (not force) and interval and interval > 0:
+        if (now - float(missing_files_last_run_ts or 0.0)) < float(interval):
+            return
+
+    if not missing_files_sweep_lock.acquire(blocking=False):
+        return
+    try:
+        now = time.time()
+        if (not force) and interval and interval > 0:
+            if (now - float(missing_files_last_run_ts or 0.0)) < float(interval):
+                return
+        remove_missing_files_from_db()
+        missing_files_last_run_ts = time.time()
+    finally:
+        missing_files_sweep_lock.release()
 
 def on_library_change(events):
     # TODO refactor: group modified and created together
@@ -1444,7 +1726,7 @@ def _job_is_cancelled(job_id):
 def tinfoil_access(f):
     @wraps(f)
     def _tinfoil_access(*args, **kwargs):
-        reload_conf()
+        _maybe_sync_request_settings()
         hauth_success = None
         auth_success = None
         request.verified_host = None
@@ -1638,7 +1920,7 @@ def index():
             # enforce client side host verification
             shop["referrer"] = f"https://{request.verified_host}"
             
-        shop["files"] = gen_shop_files(db)
+        shop["files"] = _get_cached_shop_files()
 
         if _is_cyberfoil_request():
             _log_access(
@@ -1650,7 +1932,12 @@ def index():
             )
 
         if app_settings['shop']['encrypt']:
-            return Response(encrypt_shop(shop, app_settings['shop'].get('public_key')), mimetype='application/octet-stream')
+            encrypted = _get_cached_encrypted_shop_payload(
+                shop,
+                public_key=app_settings['shop'].get('public_key'),
+                verified_host=request.verified_host
+            )
+            return Response(encrypted, mimetype='application/octet-stream')
 
         return jsonify(shop)
     
@@ -1782,22 +2069,40 @@ def list_requests_api():
     # Auto-close open requests whose titles are now in the library.
     # This keeps the requests list actionable without requiring manual admin cleanup.
     try:
-        open_ids = [r.id for r in (items or []) if getattr(r, 'status', None) == 'open' and getattr(r, 'title_id', None)]
-        if open_ids:
-            reqs = TitleRequests.query.filter(TitleRequests.id.in_(open_ids)).all()
-            changed = 0
-            for r in (reqs or []):
-                try:
-                    title_id = (r.title_id or '').strip().upper()
-                    if not title_id:
-                        continue
-                    if Titles.query.filter_by(title_id=title_id).first() is not None:
-                        r.status = 'closed'
-                        changed += 1
-                except Exception:
-                    continue
-            if changed:
-                db.session.commit()
+        open_requests = [
+            r for r in (items or [])
+            if getattr(r, 'status', None) == 'open' and getattr(r, 'title_id', None)
+        ]
+        if open_requests:
+            open_ids = [r.id for r in open_requests if r.id is not None]
+            open_title_ids = sorted({
+                str(getattr(r, 'title_id', '') or '').strip().upper()
+                for r in open_requests
+            })
+            open_title_ids = [tid for tid in open_title_ids if tid]
+            if open_ids and open_title_ids:
+                existing_title_ids = {
+                    row.title_id
+                    for row in (
+                        db.session.query(Titles.title_id)
+                        .filter(Titles.title_id.in_(open_title_ids))
+                        .all()
+                    )
+                    if row.title_id
+                }
+                if existing_title_ids:
+                    changed = (
+                        db.session.query(TitleRequests)
+                        .filter(TitleRequests.id.in_(open_ids))
+                        .filter(TitleRequests.status == 'open')
+                        .filter(TitleRequests.title_id.in_(existing_title_ids))
+                        .update({TitleRequests.status: 'closed'}, synchronize_session=False)
+                    )
+                    if changed:
+                        db.session.commit()
+                        for r in open_requests:
+                            if str(getattr(r, 'title_id', '') or '').strip().upper() in existing_title_ids:
+                                r.status = 'closed'
     except Exception:
         try:
             db.session.rollback()
@@ -1870,16 +2175,34 @@ def admin_mark_requests_seen_api():
         now = None
 
     try:
+        existing_ids = {
+            row.request_id
+            for row in (
+                db.session.query(TitleRequestViews.request_id)
+                .filter(TitleRequestViews.user_id == current_user.id)
+                .filter(TitleRequestViews.request_id.in_(ids))
+                .all()
+            )
+            if row.request_id is not None
+        }
+        ts = now or datetime.utcnow()
+        to_insert = [
+            {'user_id': current_user.id, 'request_id': req_id, 'viewed_at': ts}
+            for req_id in ids
+            if req_id not in existing_ids
+        ]
         marked = 0
-        for req_id in ids:
-            exists = TitleRequestViews.query.filter_by(user_id=current_user.id, request_id=req_id).first()
-            if exists is not None:
-                continue
-            view = TitleRequestViews(user_id=current_user.id, request_id=req_id)
-            if now is not None:
-                view.viewed_at = now
-            db.session.add(view)
-            marked += 1
+        if to_insert:
+            stmt = (
+                insert(TitleRequestViews)
+                .values(to_insert)
+                .on_conflict_do_nothing(index_elements=['user_id', 'request_id'])
+            )
+            result = db.session.execute(stmt)
+            try:
+                marked = int(result.rowcount or 0)
+            except Exception:
+                marked = len(to_insert)
         db.session.commit()
         return jsonify({'success': True, 'message': 'Marked seen.', 'marked': int(marked)})
     except Exception as e:
@@ -2273,11 +2596,30 @@ def refresh_media_cache_api():
         'removed_banners': removed_banners
     })
 
+def _get_media_prefetch_ids():
+    title_ids = {
+        str(row.title_id or '').strip().upper()
+        for row in db.session.query(Titles.title_id).all()
+        if row.title_id
+    }
+    app_ids = {
+        str(row.app_id or '').strip().upper()
+        for row in (
+            db.session.query(Apps.app_id)
+            .filter(Apps.owned.is_(True))
+            .distinct()
+            .all()
+        )
+        if row.app_id
+    }
+    all_ids = {value for value in (title_ids | app_ids) if value}
+    return sorted(all_ids)
+
 
 @app.post('/api/settings/media-cache/prefetch-icons')
 @access_required('admin')
 def prefetch_media_icons_api():
-    titles_library = generate_library()
+    prefetch_ids = _get_media_prefetch_ids()
     cache_dir = os.path.join(CACHE_DIR, 'icons')
     os.makedirs(cache_dir, exist_ok=True)
 
@@ -2290,8 +2632,7 @@ def prefetch_media_icons_api():
 
     titles.load_titledb()
     try:
-        for entry in titles_library:
-            title_id = (entry.get('title_id') or entry.get('id') or '').upper()
+        for title_id in prefetch_ids:
             if not title_id:
                 missing += 1
                 continue
@@ -2355,7 +2696,7 @@ def prefetch_media_icons_api():
 @app.post('/api/settings/media-cache/prefetch-banners')
 @access_required('admin')
 def prefetch_media_banners_api():
-    titles_library = generate_library()
+    prefetch_ids = _get_media_prefetch_ids()
     cache_dir = os.path.join(CACHE_DIR, 'banners')
     os.makedirs(cache_dir, exist_ok=True)
 
@@ -2368,8 +2709,7 @@ def prefetch_media_banners_api():
 
     titles.load_titledb()
     try:
-        for entry in titles_library:
-            title_id = (entry.get('title_id') or entry.get('id') or '').upper()
+        for title_id in prefetch_ids:
             if not title_id:
                 missing += 1
                 continue
@@ -3062,161 +3402,273 @@ def upload_library_files():
 @access_required('shop')
 def get_all_titles_api():
     start_ts = time.time()
-    titles_library = generate_library()
 
-    def _game_title(game):
-        return (game.get('title_id_name') or game.get('name') or game.get('title_id') or game.get('app_id') or '')
-
-    def _split_genres(raw):
-        parts = []
-        for s in str(raw or '').split(','):
-            # Normalize stray brackets/quotes from source data (e.g. "['Action']" -> "Action").
-            cleaned = re.sub(r'^[\s\[\]\'"`]+|[\s\[\]\'"`]+$', '', str(s or '').strip()).strip()
-            if cleaned:
-                parts.append(cleaned)
-        seen = set()
-        out = []
-        for p in parts:
-            key = p.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(p)
-        return out
-
-    def _build_genre_list(games):
-        seen = {}
-        for g in games or []:
-            for genre in _split_genres(g.get('genre') or g.get('category') or ''):
-                key = genre.lower()
-                if key not in seen:
-                    seen[key] = genre
-        return sorted(seen.values(), key=lambda s: str(s).lower())
-
-    def _lite_game(game):
-        if not isinstance(game, dict):
-            return game
-        slim = dict(game)
-        slim.pop('version', None)
-        slim.pop('description', None)
-        slim.pop('screenshots', None)
-        return slim
-
-    def _sort_games(games, sort_key):
-        if sort_key == 'title_desc':
-            return sorted(games, key=lambda g: _game_title(g).lower(), reverse=True)
-        if sort_key == 'newest':
-            return sorted(
-                games,
-                key=lambda g: int(g.get('title_db_id') or 0),
-                reverse=True
-            )
-        return sorted(games, key=lambda g: _game_title(g).lower())
-
-    def _is_unrecognized_game(game):
-        try:
-            name = str(game.get('name') or '').strip().lower()
-            title_name = str(game.get('title_id_name') or '').strip().lower()
-            meta_id = str(game.get('id') or '').strip().lower()
-            return (
-                name == 'unrecognized'
-                or title_name == 'unrecognized'
-                or 'not found in titledb' in meta_id
-            )
-        except Exception:
-            return False
-
-    def _filter_games(games, search=None, types=None, owned=None, updates=None, completion=None, genre=None, recognized=None):
-        out = games
-        if search:
-            q = str(search).strip().lower()
-            if q:
-                out = [
-                    g for g in out
-                    if q in str(g.get('app_id') or '').lower()
-                    or q in str(g.get('title_id') or '').lower()
-                    or q in str(g.get('name') or '').lower()
-                    or q in str(g.get('title_id_name') or '').lower()
-                ]
-        if types:
-            allowed = {t.strip().upper() for t in str(types).split(',') if t.strip()}
-            if allowed:
-                out = [g for g in out if str(g.get('app_type') or '').upper() in allowed]
-        if owned == 'owned':
-            out = [g for g in out if g.get('owned') is True]
-        elif owned == 'missing':
-            out = [g for g in out if g.get('owned') is False]
-        if updates == 'up_to_date':
-            out = [g for g in out if g.get('has_latest_version') is True]
-        elif updates == 'outdated':
-            out = [g for g in out if g.get('has_latest_version') is False]
-        if completion == 'complete':
-            out = [g for g in out if g.get('has_all_dlcs') is True]
-        elif completion == 'missing_dlc':
-            out = [g for g in out if g.get('has_all_dlcs') is False]
-        if genre:
-            wanted = str(genre).strip().lower()
-            if wanted:
-                out = [
-                    g for g in out
-                    if any(gr.lower() == wanted for gr in _split_genres(g.get('genre') or g.get('category') or ''))
-                ]
-        if recognized == 'unrecognized':
-            out = [g for g in out if _is_unrecognized_game(g)]
-        return out
-
-    # Query params
-    page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 50, type=int)
-    page = max(1, page)
-    per_page = max(1, min(per_page, 200))
+    page = max(1, request.args.get('page', 1, type=int))
+    per_page = max(1, min(request.args.get('per_page', 50, type=int), 200))
     lite = str(request.args.get('lite', '')).lower() in ('1', 'true', 'yes')
-    sort_key = str(request.args.get('sort') or 'title_asc').strip()
-    search = request.args.get('search')
+    sort_key = str(request.args.get('sort') or 'title_asc').strip().lower()
+    search = (request.args.get('search') or '').strip()
     types = request.args.get('types')
     owned = request.args.get('owned')
     updates = request.args.get('updates')
     completion = request.args.get('completion')
-    genre = request.args.get('genre')
-    recognized = request.args.get('recognized')
+    genre = (request.args.get('genre') or '').strip()
+    recognized = (request.args.get('recognized') or '').strip().lower()
+    app_version_num_expr = func.coalesce(Apps.app_version_num, 0)
+    titles_metadata = None
 
-    # Build discovery sections from the full list (unfiltered).
-    base_games = [g for g in titles_library if g.get('app_type') == 'BASE']
-    newest = sorted(base_games, key=lambda g: int(g.get('title_db_id') or 0), reverse=True)[:12]
-    day_key = time.strftime('%Y-%m-%d')
-    seed = f"ownfoil-reco-{day_key}"
-    def _hash32(s):
-        h = 0x811c9dc5
-        for ch in str(s):
-            h ^= ord(ch)
-            h = (h * 0x01000193) & 0xffffffff
-        return h
-    candidates = [g for g in base_games if g.get('owned') is True]
-    recommended = sorted(
-        candidates,
-        key=lambda g: _hash32(f"{seed}-{g.get('title_id') or g.get('app_id')}")
-    )[:12]
-
-    filtered = _filter_games(
-        titles_library,
-        search=search,
-        types=types,
-        owned=owned,
-        updates=updates,
-        completion=completion,
-        genre=genre,
-        recognized=recognized,
+    size_subquery = (
+        db.session.query(
+            app_files.c.app_id.label('app_pk'),
+            func.coalesce(func.sum(Files.size), 0).label('size'),
+        )
+        .outerjoin(Files, Files.id == app_files.c.file_id)
+        .group_by(app_files.c.app_id)
+        .subquery()
     )
-    filtered = _sort_games(filtered, sort_key)
-    total = len(filtered)
+    dlc_agg_subquery = (
+        db.session.query(
+            Apps.app_id.label('dlc_app_id'),
+            func.max(app_version_num_expr).label('max_version'),
+            func.max(
+                case(
+                    (Apps.owned.is_(True), app_version_num_expr),
+                    else_=0
+                )
+            ).label('max_owned_version')
+        )
+        .filter(Apps.app_type == APP_TYPE_DLC)
+        .group_by(Apps.app_id)
+        .subquery()
+    )
+
+    query = (
+        db.session.query(
+            Apps.id.label('app_pk'),
+            Apps.title_id.label('title_fk'),
+            Titles.id.label('title_db_id'),
+            Titles.title_id.label('title_id'),
+            Titles.have_base.label('have_base'),
+            Titles.up_to_date.label('up_to_date'),
+            Titles.complete.label('complete'),
+            Apps.app_id.label('app_id'),
+            Apps.app_version.label('app_version'),
+            Apps.app_type.label('app_type'),
+            Apps.owned.label('owned'),
+            func.coalesce(size_subquery.c.size, 0).label('size'),
+            func.coalesce(dlc_agg_subquery.c.max_version, 0).label('dlc_max_version'),
+            func.coalesce(dlc_agg_subquery.c.max_owned_version, 0).label('dlc_max_owned_version'),
+        )
+        .join(Titles, Apps.title_id == Titles.id)
+        .outerjoin(size_subquery, size_subquery.c.app_pk == Apps.id)
+        .outerjoin(dlc_agg_subquery, dlc_agg_subquery.c.dlc_app_id == Apps.app_id)
+        .filter(
+            or_(
+                Apps.app_type == APP_TYPE_BASE,
+                and_(
+                    Apps.app_type == APP_TYPE_DLC,
+                    app_version_num_expr == dlc_agg_subquery.c.max_version
+                )
+            )
+        )
+    )
+
+    if types:
+        allowed_types = {part.strip().upper() for part in str(types).split(',') if part.strip()}
+        if allowed_types:
+            query = query.filter(Apps.app_type.in_(allowed_types))
+    if owned == 'owned':
+        query = query.filter(Apps.owned.is_(True))
+    elif owned == 'missing':
+        query = query.filter(Apps.owned.is_(False))
+    if updates == 'up_to_date':
+        query = query.filter(
+            or_(
+                and_(Apps.app_type == APP_TYPE_BASE, Titles.have_base.is_(True), Titles.up_to_date.is_(True)),
+                and_(Apps.app_type == APP_TYPE_DLC, dlc_agg_subquery.c.max_owned_version >= dlc_agg_subquery.c.max_version),
+            )
+        )
+    elif updates == 'outdated':
+        query = query.filter(
+            or_(
+                and_(Apps.app_type == APP_TYPE_BASE, or_(Titles.have_base.is_(False), Titles.up_to_date.is_(False))),
+                and_(Apps.app_type == APP_TYPE_DLC, dlc_agg_subquery.c.max_owned_version < dlc_agg_subquery.c.max_version),
+            )
+        )
+    if completion == 'complete':
+        query = query.filter(and_(Apps.app_type == APP_TYPE_BASE, Titles.complete.is_(True)))
+    elif completion == 'missing_dlc':
+        query = query.filter(and_(Apps.app_type == APP_TYPE_BASE, Titles.complete.is_(False)))
+
+    if search:
+        search_lower = search.lower()
+        search_term = f"%{search_lower}%"
+        titles_metadata = _get_cached_titles_metadata()
+        title_ids_from_search = [
+            title_id
+            for title_id, lowered_name in (titles_metadata.get('title_name_map') or {}).items()
+            if search_lower in str(lowered_name or '')
+        ]
+        search_filters = [
+            func.lower(Apps.app_id).like(search_term),
+            func.lower(Titles.title_id).like(search_term),
+        ]
+        if title_ids_from_search:
+            search_filters.append(Titles.title_id.in_(title_ids_from_search))
+        query = query.filter(or_(*search_filters))
+
+    if genre or recognized in ('recognized', 'unrecognized'):
+        if titles_metadata is None:
+            titles_metadata = _get_cached_titles_metadata()
+        matched_title_ids = None
+        all_title_ids = set((titles_metadata.get('title_name_map') or {}).keys())
+        unrecognized_ids = set(titles_metadata.get('unrecognized_title_ids') or set())
+
+        if recognized == 'unrecognized':
+            matched_title_ids = set(unrecognized_ids)
+        elif recognized == 'recognized':
+            matched_title_ids = set(all_title_ids) - set(unrecognized_ids)
+
+        if genre:
+            wanted_genre = genre.lower()
+            genre_ids = set((titles_metadata.get('genre_title_ids') or {}).get(wanted_genre) or set())
+            if matched_title_ids is None:
+                matched_title_ids = genre_ids
+            else:
+                matched_title_ids &= genre_ids
+
+        if matched_title_ids is None:
+            matched_title_ids = set(all_title_ids)
+
+        if matched_title_ids:
+            query = query.filter(Titles.title_id.in_(matched_title_ids))
+        else:
+            query = query.filter(Titles.id == -1)
+
+    if sort_key == 'newest':
+        query = query.order_by(Titles.id.desc(), Apps.id.desc())
+    elif sort_key == 'title_desc':
+        query = query.order_by(Titles.title_id.desc(), Apps.app_id.desc())
+    else:
+        query = query.order_by(Titles.title_id.asc(), Apps.app_id.asc())
+
+    total = query.count()
     start = (page - 1) * per_page
-    end = start + per_page
-    page_games = filtered[start:end]
+    rows = query.offset(start).limit(per_page).all()
+
+    title_fk_ids = {row.title_fk for row in rows if row.title_fk is not None}
+    title_id_by_fk = {row.title_fk: row.title_id for row in rows if row.title_fk is not None and row.title_id}
+    dlc_app_ids = {row.app_id for row in rows if row.app_type == APP_TYPE_DLC and row.app_id}
+
+    update_rows = []
+    if title_fk_ids:
+        update_rows = (
+            db.session.query(
+                Apps.title_id.label('title_fk'),
+                Apps.app_version.label('app_version'),
+                Apps.owned.label('owned'),
+                func.coalesce(size_subquery.c.size, 0).label('size'),
+            )
+            .outerjoin(size_subquery, size_subquery.c.app_pk == Apps.id)
+            .filter(Apps.app_type == APP_TYPE_UPD, Apps.title_id.in_(title_fk_ids))
+            .all()
+        )
+    update_versions_by_title_fk = {}
+    for upd in update_rows:
+        update_versions_by_title_fk.setdefault(upd.title_fk, []).append({
+            'version': int(upd.app_version or 0),
+            'owned': bool(upd.owned),
+            'size': int(upd.size or 0),
+            'release_date': 'Unknown',
+        })
+
+    dlc_rows = []
+    if dlc_app_ids:
+        dlc_rows = (
+            db.session.query(
+                Apps.app_id.label('app_id'),
+                Apps.app_version.label('app_version'),
+                Apps.owned.label('owned'),
+            )
+            .filter(Apps.app_type == APP_TYPE_DLC, Apps.app_id.in_(dlc_app_ids))
+            .all()
+        )
+    dlc_versions_by_app_id = {}
+    for dlc in dlc_rows:
+        dlc_versions_by_app_id.setdefault(dlc.app_id, []).append({
+            'version': int(dlc.app_version or 0),
+            'owned': bool(dlc.owned),
+            'release_date': 'Unknown',
+        })
+
+    all_lookup_ids = set()
+    all_lookup_ids.update([tid for tid in title_id_by_fk.values() if tid])
+    all_lookup_ids.update([aid for aid in dlc_app_ids if aid])
+    info_cache = {}
+    release_dates_by_title = {}
+    with titles.titledb_session():
+        for lookup_id in all_lookup_ids:
+            info_cache[lookup_id] = titles.get_game_info(lookup_id) or {}
+        for title_fk, title_id in title_id_by_fk.items():
+            versions = titles.get_all_existing_versions(title_id) or []
+            release_dates_by_title[title_fk] = {
+                int(v.get('version') or 0): v.get('release_date') or 'Unknown'
+                for v in versions
+            }
+
+    for title_fk, versions in update_versions_by_title_fk.items():
+        release_dates = release_dates_by_title.get(title_fk) or {}
+        for version in versions:
+            version['release_date'] = release_dates.get(version['version'], 'Unknown')
+        versions.sort(key=lambda item: item['version'])
+    for app_id, versions in dlc_versions_by_app_id.items():
+        versions.sort(key=lambda item: item['version'])
+
+    games = []
+    for row in rows:
+        title_info = info_cache.get(row.title_id) or {}
+        app_info = title_info if row.app_type == APP_TYPE_BASE else (info_cache.get(row.app_id) or title_info)
+        game = {
+            'id': app_info.get('id') or row.app_id,
+            'name': app_info.get('name') or row.app_id,
+            'bannerUrl': app_info.get('bannerUrl'),
+            'iconUrl': app_info.get('iconUrl'),
+            'category': app_info.get('category') or '',
+            'genre': app_info.get('category') or '',
+            'nsuId': app_info.get('nsuId'),
+            'description': app_info.get('description'),
+            'screenshots': app_info.get('screenshots') or [],
+            'title_db_id': row.title_db_id,
+            'title_id': row.title_id,
+            'title_id_name': (title_info.get('name') or app_info.get('name') or row.title_id or row.app_id),
+            'app_id': row.app_id,
+            'app_version': row.app_version,
+            'app_type': row.app_type,
+            'owned': bool(row.owned),
+            'size': int(row.size or 0),
+        }
+        if row.app_type == APP_TYPE_BASE:
+            game['has_base'] = bool(row.have_base)
+            game['has_latest_version'] = bool(row.have_base) and bool(row.up_to_date)
+            game['has_all_dlcs'] = bool(row.complete)
+            game['version'] = list(update_versions_by_title_fk.get(row.title_fk, []))
+        elif row.app_type == APP_TYPE_DLC:
+            game['has_latest_version'] = int(row.dlc_max_owned_version or 0) >= int(row.dlc_max_version or 0)
+            game['version'] = list(dlc_versions_by_app_id.get(row.app_id, []))
+        games.append(game)
+
+    newest, recommended = _get_discovery_sections(limit=12)
 
     if lite:
-        page_games = [_lite_game(g) for g in page_games]
-        newest = [_lite_game(g) for g in newest]
-        recommended = [_lite_game(g) for g in recommended]
+        def _lite(entry):
+            slim = dict(entry)
+            slim.pop('version', None)
+            slim.pop('description', None)
+            slim.pop('screenshots', None)
+            return slim
+        games = [_lite(entry) for entry in games]
+        newest = [_lite(entry) for entry in newest]
+        recommended = [_lite(entry) for entry in recommended]
 
     if _is_cyberfoil_request():
         _log_access(
@@ -3228,11 +3680,11 @@ def get_all_titles_api():
         )
 
     return jsonify({
-        'total': total,
-        'page': page,
-        'per_page': per_page,
-        'games': page_games,
-        'genres': _build_genre_list(titles_library),
+        'total': int(total),
+        'page': int(page),
+        'per_page': int(per_page),
+        'games': games,
+        'genres': _get_cached_library_genres(),
         'discovery': {
             'newest': newest,
             'recommended': recommended,
@@ -3250,26 +3702,92 @@ def get_title_details_api():
     if not app_id and not title_id:
         return jsonify({'success': False, 'error': 'missing_identifier'}), 400
 
-    titles_library = generate_library()
+    query = (
+        db.session.query(
+            Apps.id.label('app_pk'),
+            Apps.title_id.label('title_fk'),
+            Titles.title_id.label('title_id'),
+            Titles.have_base.label('have_base'),
+            Titles.up_to_date.label('up_to_date'),
+            Titles.complete.label('complete'),
+            Apps.app_id.label('app_id'),
+            Apps.app_version.label('app_version'),
+            Apps.app_type.label('app_type'),
+            Apps.owned.label('owned'),
+        )
+        .join(Titles, Apps.title_id == Titles.id)
+    )
+    if app_id and app_type:
+        query = query.filter(Apps.app_id == app_id, Apps.app_type == app_type.upper())
+    elif app_id:
+        query = query.filter(Apps.app_id == app_id)
+    else:
+        query = query.filter(Titles.title_id == title_id.upper())
+    row = query.order_by(Apps.id.desc()).first()
 
-    def _match_game(game):
-        if not isinstance(game, dict):
-            return False
-        if app_id and app_type:
-            return (
-                str(game.get('app_id') or '').upper() == app_id.upper()
-                and str(game.get('app_type') or '').upper() == app_type.upper()
-            )
-        if app_id:
-            return str(game.get('app_id') or '').upper() == app_id.upper()
-        if title_id:
-            return str(game.get('title_id') or '').upper() == title_id.upper()
-        return False
-
-    game = next((g for g in titles_library if _match_game(g)), None)
-    if not game and title_id:
-        tid = title_id.upper()
-        game = next((g for g in titles_library if str(g.get('title_id') or '').upper() == tid), None)
+    game = None
+    if row:
+        with titles.titledb_session():
+            title_info = titles.get_game_info(row.title_id) or {}
+            app_info = title_info if row.app_type == APP_TYPE_BASE else (titles.get_game_info(row.app_id) or title_info)
+            game = {
+                'id': app_info.get('id') or row.app_id,
+                'name': app_info.get('name') or row.app_id,
+                'bannerUrl': app_info.get('bannerUrl'),
+                'iconUrl': app_info.get('iconUrl'),
+                'category': app_info.get('category') or '',
+                'genre': app_info.get('category') or '',
+                'nsuId': app_info.get('nsuId'),
+                'description': app_info.get('description'),
+                'screenshots': app_info.get('screenshots') or [],
+                'title_id': row.title_id,
+                'title_id_name': title_info.get('name') or app_info.get('name') or row.title_id,
+                'app_id': row.app_id,
+                'app_version': row.app_version,
+                'app_type': row.app_type,
+                'owned': bool(row.owned),
+            }
+            if row.app_type == APP_TYPE_BASE:
+                versions = []
+                for upd in (
+                    db.session.query(Apps.app_version, Apps.owned)
+                    .filter(Apps.title_id == row.title_fk, Apps.app_type == APP_TYPE_UPD)
+                    .all()
+                ):
+                    versions.append({
+                        'version': int(upd.app_version or 0),
+                        'owned': bool(upd.owned),
+                        'size': 0,
+                        'release_date': 'Unknown',
+                    })
+                release_dates = {
+                    int(v.get('version') or 0): v.get('release_date') or 'Unknown'
+                    for v in (titles.get_all_existing_versions(row.title_id) or [])
+                }
+                for version in versions:
+                    version['release_date'] = release_dates.get(version['version'], 'Unknown')
+                versions.sort(key=lambda item: item['version'])
+                game['version'] = versions
+                game['has_base'] = bool(row.have_base)
+                game['has_latest_version'] = bool(row.have_base) and bool(row.up_to_date)
+                game['has_all_dlcs'] = bool(row.complete)
+            elif row.app_type == APP_TYPE_DLC:
+                dlc_versions = []
+                for dlc in (
+                    db.session.query(Apps.app_version, Apps.owned)
+                    .filter(Apps.app_type == APP_TYPE_DLC, Apps.app_id == row.app_id)
+                    .all()
+                ):
+                    dlc_versions.append({
+                        'version': int(dlc.app_version or 0),
+                        'owned': bool(dlc.owned),
+                        'release_date': 'Unknown',
+                    })
+                dlc_versions.sort(key=lambda item: item['version'])
+                game['version'] = dlc_versions
+                latest_available = max([item['version'] for item in dlc_versions], default=0)
+                latest_owned = max([item['version'] for item in dlc_versions if item['owned']], default=0)
+                game['has_latest_version'] = latest_owned >= latest_available
 
     return jsonify({
         'success': bool(game),
@@ -3330,6 +3848,12 @@ def set_manual_title_info_api():
         shop_sections_cache['payload'] = None
         shop_sections_cache['timestamp'] = 0
         shop_sections_cache['limit'] = None
+    with titles_metadata_cache_lock:
+        titles_metadata_cache['state_token'] = None
+        titles_metadata_cache['genres'] = []
+        titles_metadata_cache['title_name_map'] = {}
+        titles_metadata_cache['genre_title_ids'] = {}
+        titles_metadata_cache['unrecognized_title_ids'] = set()
     return jsonify({'success': True, 'title_id': title_id})
 
 @app.get('/api/library/size')
@@ -3361,28 +3885,31 @@ def serve_game(id):
     user_agent = request.headers.get('User-Agent')
     username = _get_request_user()
 
-    try:
-        Files.query.filter_by(id=id).update({Files.download_count: Files.download_count + 1})
-        db.session.commit()
-    except Exception as e:
-        db.session.rollback()
-        logger.error(f"Failed to increment download count for file id {id}: {e}")
-    file_result = db.session.query(Files.filepath).filter_by(id=id).first()
-    if not file_result:
+    file_row = (
+        db.session.query(
+            Files.filepath.label('filepath'),
+            Files.filename.label('filename'),
+            Titles.title_id.label('title_id'),
+        )
+        .select_from(Files)
+        .outerjoin(app_files, app_files.c.file_id == Files.id)
+        .outerjoin(Apps, Apps.id == app_files.c.app_id)
+        .outerjoin(Titles, Titles.id == Apps.title_id)
+        .filter(Files.id == id)
+        .first()
+    )
+    if not file_row:
         return Response(status=404)
-    filepath = file_result[0]
-    filedir, filename = os.path.split(filepath)
 
-    title_id = None
     try:
-        file_obj = Files.query.filter_by(id=id).first()
-        if file_obj and getattr(file_obj, 'apps', None):
-            app_obj = file_obj.apps[0] if file_obj.apps else None
-            if app_obj and getattr(app_obj, 'title', None):
-                title_id = app_obj.title.title_id
+        queue_file_download_increment(id)
     except Exception as e:
-        logger.error(f"Failed to get title_id for file id {id}: {e}")
-        title_id = None
+        logger.error(f"Failed to queue download count increment for file id {id}: {e}")
+
+    filepath = file_row.filepath
+    filename = file_row.filename or os.path.basename(filepath)
+    filedir = os.path.dirname(filepath)
+    title_id = (file_row.title_id or '').strip().upper() or None
 
     transfer_id = uuid.uuid4().hex
     meta = {
@@ -3857,8 +4384,8 @@ def post_library_change():
             process_library_identification(app)
             add_missing_apps_to_db()
             update_titles() # Ensure titles are updated after identification
-            # remove missing files
-            remove_missing_files_from_db()
+            # Expensive filesystem sweep: run periodically, not on every rebuild.
+            _maybe_remove_missing_files_from_db(force=False)
             organize_pending_downloads()
             # Generate the library after organization tasks so cache/UI reflect final file layout.
             generate_library()
@@ -3866,6 +4393,13 @@ def post_library_change():
                 shop_sections_cache['payload'] = None
                 shop_sections_cache['timestamp'] = 0
                 shop_sections_cache['limit'] = None
+            _invalidate_shop_root_cache()
+            with titles_metadata_cache_lock:
+                titles_metadata_cache['state_token'] = None
+                titles_metadata_cache['genres'] = []
+                titles_metadata_cache['title_name_map'] = {}
+                titles_metadata_cache['genre_title_ids'] = {}
+                titles_metadata_cache['unrecognized_title_ids'] = set()
 
             # Media cache index can be repopulated on demand.
             with _media_cache_lock:
