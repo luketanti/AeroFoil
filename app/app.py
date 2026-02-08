@@ -2832,7 +2832,20 @@ def get_all_titles_api():
             )
         return sorted(games, key=lambda g: _game_title(g).lower())
 
-    def _filter_games(games, search=None, types=None, owned=None, updates=None, completion=None, genre=None):
+    def _is_unrecognized_game(game):
+        try:
+            name = str(game.get('name') or '').strip().lower()
+            title_name = str(game.get('title_id_name') or '').strip().lower()
+            meta_id = str(game.get('id') or '').strip().lower()
+            return (
+                name == 'unrecognized'
+                or title_name == 'unrecognized'
+                or 'not found in titledb' in meta_id
+            )
+        except Exception:
+            return False
+
+    def _filter_games(games, search=None, types=None, owned=None, updates=None, completion=None, genre=None, recognized=None):
         out = games
         if search:
             q = str(search).strip().lower()
@@ -2867,6 +2880,8 @@ def get_all_titles_api():
                     g for g in out
                     if any(gr.lower() == wanted for gr in _split_genres(g.get('genre') or g.get('category') or ''))
                 ]
+        if recognized == 'unrecognized':
+            out = [g for g in out if _is_unrecognized_game(g)]
         return out
 
     # Query params
@@ -2882,6 +2897,7 @@ def get_all_titles_api():
     updates = request.args.get('updates')
     completion = request.args.get('completion')
     genre = request.args.get('genre')
+    recognized = request.args.get('recognized')
 
     # Build discovery sections from the full list (unfiltered).
     base_games = [g for g in titles_library if g.get('app_type') == 'BASE']
@@ -2907,7 +2923,8 @@ def get_all_titles_api():
         owned=owned,
         updates=updates,
         completion=completion,
-        genre=genre
+        genre=genre,
+        recognized=recognized,
     )
     filtered = _sort_games(filtered, sort_key)
     total = len(filtered)

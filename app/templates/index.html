@@ -117,6 +117,15 @@
                                 Missing DLC
                             </label>
                         </li>
+                        <li>
+                            <hr class="dropdown-divider">
+                        </li>
+                        <li>
+                            <label class="form-check-label dropdown-item" for="filterCheckUnrecognized">
+                                <input class="form-check-input filterLabel" type="checkbox" value="" id="filterCheckUnrecognized">
+                                Unrecognized
+                            </label>
+                        </li>
                         <!-- <div class="text-center m-2">
                             <button id="btnApplyFilters" type="button" class="btn btn-primary" style="width: 85%;">Apply
                                 filters</button>
@@ -373,6 +382,9 @@
         if (activeCompletionFilters.size === 1) {
             params.set('completion', activeCompletionFilters.has('Complete') ? 'complete' : 'missing_dlc');
         }
+        if (activeRecognitionFilters.size === 1) {
+            params.set('recognized', activeRecognitionFilters.has('Unrecognized') ? 'unrecognized' : 'all');
+        }
         return params.toString();
     }
 
@@ -567,7 +579,8 @@
             activeTypeFilters.size === 0 &&
             activeOwnershipFilters.size === 0 &&
             activeUpdateFilters.size === 0 &&
-            activeCompletionFilters.size === 0
+            activeCompletionFilters.size === 0 &&
+            activeRecognitionFilters.size === 0
         );
     }
 
@@ -1129,7 +1142,8 @@
         const filters = {
             type: [],
             update: [],
-            completion: []
+            completion: [],
+            recognition: []
         };
         if ($('#filterCheckBase').is(':checked')) filters.type.push('BASE');
         if ($('#filterCheckDlc').is(':checked')) filters.type.push('DLC');
@@ -1137,6 +1151,7 @@
         if ($('#filterCheckMissingUpdate').is(':checked')) filters.update.push('Outdated');
         if ($('#filterCheckComplete').is(':checked')) filters.completion.push('Complete');
         if ($('#filterCheckMissingDlc').is(':checked')) filters.completion.push('Missing DLC');
+        if ($('#filterCheckUnrecognized').is(':checked')) filters.recognition.push('Unrecognized');
 
         localStorage.setItem('activeFilters', JSON.stringify(filters));
     }
@@ -1197,6 +1212,7 @@
             $('#filterCheckMissingUpdate').prop('checked', filters.update?.includes('Outdated') || false);
             $('#filterCheckComplete').prop('checked', filters.completion?.includes('Complete') || false);
             $('#filterCheckMissingDlc').prop('checked', filters.completion?.includes('Missing DLC') || false);
+            $('#filterCheckUnrecognized').prop('checked', filters.recognition?.includes('Unrecognized') || false);
 
             updateFilter();
         }
@@ -1877,6 +1893,7 @@
     const activeOwnershipFilters = new Set();
     const activeUpdateFilters = new Set();
     const activeCompletionFilters = new Set();
+    const activeRecognitionFilters = new Set();
 
     function updateFilter() {
         // $('#filterDropdownBtn').toggle();
@@ -1923,6 +1940,12 @@
         }
         else {
             activeCompletionFilters.delete('Missing DLC');
+        }
+        if ($('#filterCheckUnrecognized').is(":checked")) {
+            activeRecognitionFilters.add('Unrecognized');
+        }
+        else {
+            activeRecognitionFilters.delete('Unrecognized');
         }
     }
 
