@@ -49,6 +49,17 @@ def list_completed(client_type, url, username=None, password=None, category=None
     return []
 
 
+def list_active(client_type, url, username=None, password=None, category=None, download_path=None, timeout_seconds=15):
+    client_type = (client_type or "").lower()
+    if client_type == "qbittorrent":
+        return _list_active_qbittorrent(url, username, password, category, download_path, timeout_seconds)
+    if client_type == "transmission":
+        return _list_active_transmission(url, username, password, category, download_path, timeout_seconds)
+    if client_type == "deluge":
+        return _list_active_deluge(url, password, category, download_path, timeout_seconds)
+    return []
+
+
 def remove_torrent(client_type, url, torrent_hash, username=None, password=None, timeout_seconds=15):
     if not torrent_hash:
         return False, "Torrent hash is required."
@@ -417,6 +428,205 @@ def _is_path_within(path, base):
         return os.path.commonpath([path_abs, base_abs]) == base_abs
     except Exception:
         return False
+
+
+def _to_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _qb_is_active(item):
+    progress = _to_float(item.get("progress"), 0.0)
+    if progress < 1:
+        return True
+    if _to_int(item.get("dlspeed"), 0) > 0:
+        return True
+    return False
+
+
+def _list_active_qbittorrent(url, username, password, category, download_path, timeout_seconds):
+    base = url.rstrip("/")
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Ownfoil/Downloads"})
+    if username or password:
+        login_resp = session.post(
+            f"{base}/api/v2/auth/login",
+            data={"username": username or "", "password": password or ""},
+            timeout=timeout_seconds,
+        )
+        if login_resp.status_code != 200 or login_resp.text.strip() not in ("Ok.", ""):
+            return []
+
+    resp = session.get(
+        f"{base}/api/v2/torrents/info",
+        params={"tag": OWNFOIL_MANAGED_TAG, "sort": "dlspeed", "reverse": "true"},
+        timeout=timeout_seconds,
+    )
+    if resp.status_code != 200:
+        return []
+    items = resp.json() or []
+    active = []
+    for item in items:
+        tags = [tag.strip() for tag in (item.get("tags") or "").split(",") if tag.strip()]
+        if category and item.get("category") != category and category not in tags:
+            continue
+        content_path = item.get("content_path")
+        save_path = item.get("save_path")
+        if download_path and not _is_path_within(content_path or save_path, download_path):
+            continue
+        if not _qb_is_active(item):
+            continue
+        progress = _to_float(item.get("progress"), 0.0) * 100.0
+        seeders = _to_int(item.get("num_seeds"), 0)
+        leechers = _to_int(item.get("num_leechs"), 0)
+        active.append({
+            "hash": item.get("hash"),
+            "name": item.get("name") or "",
+            "status": item.get("state") or "",
+            "progress": max(0.0, min(progress, 100.0)),
+            "down_speed": _to_int(item.get("dlspeed"), 0),
+            "up_speed": _to_int(item.get("upspeed"), 0),
+            "peers": max(_to_int(item.get("num_complete"), 0), 0) + max(_to_int(item.get("num_incomplete"), 0), 0),
+            "seeders": seeders,
+            "leechers": leechers,
+            "eta": _to_int(item.get("eta"), -1),
+            "size": _to_int(item.get("size") or item.get("total_size"), 0),
+            "downloaded": _to_int(item.get("completed"), 0),
+        })
+    return active
+
+
+_TRANSMISSION_STATUS = {
+    0: "stopped",
+    1: "check_wait",
+    2: "checking",
+    3: "download_wait",
+    4: "downloading",
+    5: "seed_wait",
+    6: "seeding",
+}
+
+
+def _list_active_transmission(url, username, password, category, download_path, timeout_seconds):
+    base = url.rstrip("/")
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Ownfoil/Downloads"})
+    if username or password:
+        session.auth = (username or "", password or "")
+
+    payload = {
+        "method": "torrent-get",
+        "arguments": {
+            "fields": [
+                "id", "hashString", "name", "percentDone", "rateDownload", "rateUpload",
+                "peersConnected", "peersGettingFromUs", "peersSendingToUs", "eta", "status",
+                "labels", "downloadDir", "totalSize", "leftUntilDone"
+            ]
+        },
+    }
+    resp = session.post(f"{base}/transmission/rpc", json=payload, timeout=timeout_seconds)
+    if resp.status_code == 409:
+        session_id = resp.headers.get("X-Transmission-Session-Id")
+        if session_id:
+            session.headers.update({"X-Transmission-Session-Id": session_id})
+            resp = session.post(f"{base}/transmission/rpc", json=payload, timeout=timeout_seconds)
+    if resp.status_code != 200:
+        return []
+    torrents = resp.json().get("arguments", {}).get("torrents", []) or []
+    active = []
+    for torrent in torrents:
+        labels = torrent.get("labels") or []
+        if OWNFOIL_MANAGED_TAG not in labels:
+            continue
+        if category and category not in labels:
+            continue
+        download_dir = torrent.get("downloadDir")
+        name = torrent.get("name")
+        content_path = os.path.join(download_dir.rstrip("/\\"), name) if download_dir and name else None
+        if download_path and not _is_path_within(content_path or download_dir, download_path):
+            continue
+        progress_raw = _to_float(torrent.get("percentDone"), 0.0)
+        down_speed = _to_int(torrent.get("rateDownload"), 0)
+        if progress_raw >= 1.0 and down_speed <= 0:
+            continue
+        active.append({
+            "hash": torrent.get("hashString"),
+            "name": name or "",
+            "status": _TRANSMISSION_STATUS.get(_to_int(torrent.get("status"), -1), str(torrent.get("status") or "")),
+            "progress": max(0.0, min(progress_raw * 100.0, 100.0)),
+            "down_speed": down_speed,
+            "up_speed": _to_int(torrent.get("rateUpload"), 0),
+            "peers": _to_int(torrent.get("peersConnected"), 0),
+            "seeders": _to_int(torrent.get("peersGettingFromUs"), 0),
+            "leechers": _to_int(torrent.get("peersSendingToUs"), 0),
+            "eta": _to_int(torrent.get("eta"), -1),
+            "size": _to_int(torrent.get("totalSize"), 0),
+            "downloaded": max(_to_int(torrent.get("totalSize"), 0) - _to_int(torrent.get("leftUntilDone"), 0), 0),
+        })
+    return active
+
+
+def _list_active_deluge(url, password, category, download_path, timeout_seconds):
+    ok, logged_in = _deluge_login(url, password, timeout_seconds=timeout_seconds)
+    if not ok or not logged_in:
+        return []
+
+    fields = [
+        "hash", "name", "save_path", "download_location", "state", "label", "progress",
+        "download_payload_rate", "upload_payload_rate", "num_peers", "num_seeds", "eta",
+        "total_size", "total_done"
+    ]
+    ok, result = _deluge_json_rpc(
+        url,
+        password,
+        "core.get_torrents_status",
+        [{}, fields],
+        timeout_seconds=timeout_seconds
+    )
+    if not ok or not isinstance(result, dict):
+        return []
+    active = []
+    for torrent_hash, data in result.items():
+        if not isinstance(data, dict):
+            continue
+        label = data.get("label")
+        if not _is_deluge_managed_label(label):
+            continue
+        if category and _build_deluge_managed_label(category) != label:
+            continue
+        path = data.get("download_location") or data.get("save_path")
+        name = data.get("name")
+        content_path = os.path.join(path.rstrip("/\\"), name) if path and name else None
+        if download_path and not _is_path_within(content_path or path, download_path):
+            continue
+        progress = _to_float(data.get("progress"), 0.0)
+        down_speed = _to_int(data.get("download_payload_rate"), 0)
+        if progress >= 100.0 and down_speed <= 0:
+            continue
+        active.append({
+            "hash": torrent_hash,
+            "name": name or "",
+            "status": data.get("state") or "",
+            "progress": max(0.0, min(progress, 100.0)),
+            "down_speed": down_speed,
+            "up_speed": _to_int(data.get("upload_payload_rate"), 0),
+            "peers": _to_int(data.get("num_peers"), 0),
+            "seeders": _to_int(data.get("num_seeds"), 0),
+            "leechers": max(_to_int(data.get("num_peers"), 0) - _to_int(data.get("num_seeds"), 0), 0),
+            "eta": _to_int(data.get("eta"), -1),
+            "size": _to_int(data.get("total_size"), 0),
+            "downloaded": _to_int(data.get("total_done"), 0),
+        })
+    return active
 
 
 def _list_completed_qbittorrent(url, username, password, category, download_path, timeout_seconds):
