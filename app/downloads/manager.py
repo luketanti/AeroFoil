@@ -363,7 +363,7 @@ def _build_queries(update):
     prefix = _normalize_query(downloads.get("search_prefix") or "")
     suffix = _normalize_query(downloads.get("search_suffix") or "")
     base = f"{prefix} {title_name}".strip() if prefix else title_name
-    tail = f" {suffix}".strip() if suffix else ""
+    tail = f" {suffix}" if suffix else ""
     update["search_terms"] = title_name
     return [
         f"{base}{tail}".strip(),
