@@ -405,14 +405,18 @@ def load_titledb():
             except CorruptedTitleDBFileError as e:
                 _reset_titledb_state()
                 if attempt == 0:
-                    _recover_corrupted_titledb_file(app_settings, e.file_path, e.label)
+                    try:
+                        _recover_corrupted_titledb_file(app_settings, e.file_path, e.label)
+                    except Exception as recovery_error:
+                        logger.error(f"Failed to recover corrupted TitleDB files: {recovery_error}")
+                        return False
                     continue
                 logger.error(f"Failed to load TitleDB files after recovery attempt: {e}")
-                raise
+                return False
             except Exception as e:
                 _reset_titledb_state()
                 logger.error(f"Failed to load TitleDB files: {e}")
-                raise
+                return False
 
 def release_titledb():
     global identification_in_progress_count

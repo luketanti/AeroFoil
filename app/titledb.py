@@ -46,19 +46,41 @@ def is_titledb_update_available(rzf):
             logger.info(f'Titledb update available, current commit: {current_commit}, latest commit: {latest_remote_commit}')
             update_available = True
     
-    if update_available:
-        with open(local_commit_file, 'w') as f:
-            f.write(latest_remote_commit)
-    
-    return update_available
+    return update_available, latest_remote_commit
+
+
+def _write_latest_commit(latest_remote_commit):
+    local_commit_file = os.path.join(TITLEDB_DIR, '.latest')
+    with open(local_commit_file, 'w', encoding='utf-8') as f:
+        f.write(str(latest_remote_commit or ''))
+
+
+def _validate_downloaded_titledb_file(path, filename):
+    lower_name = str(filename or '').lower()
+    if lower_name.endswith('.json'):
+        return _is_valid_json_file(path)
+    if lower_name.endswith('.txt'):
+        return os.path.isfile(path) and os.path.getsize(path) > 0
+    return os.path.isfile(path)
 
 
 def download_titledb_files(rzf, files):
     for file in files:
         store_path = os.path.join(TITLEDB_DIR, file)
         rel_store_path = os.path.relpath(store_path, start=APP_DIR)
+        temp_path = f'{store_path}.tmp'
         logger.info(f'Downloading {file} from remote titledb to {rel_store_path}')
-        download_from_remote_zip(rzf, file, store_path)
+        try:
+            download_from_remote_zip(rzf, file, temp_path)
+            if not _validate_downloaded_titledb_file(temp_path, file):
+                raise ValueError(f'Downloaded TitleDB file is invalid: {file}')
+            os.replace(temp_path, store_path)
+        finally:
+            try:
+                if os.path.isfile(temp_path):
+                    os.remove(temp_path)
+            except Exception:
+                pass
 
 
 def _get_with_retry(url, max_retries=5, backoff_factor=2, headers=None, method="GET", allow_redirects=False):
@@ -215,7 +237,8 @@ def update_titledb_files(app_settings):
         logger.error(f'Failed to fetch TitleDB artefacts: {e}')
         raise
     
-    if is_titledb_update_available(rzf):
+    update_available, latest_remote_commit = is_titledb_update_available(rzf)
+    if update_available:
         files_to_update = TITLEDB_DEFAULT_FILES + [region_titles_file]
         need_descriptions = True
         old_region_titles_files = [f for f in os.listdir(TITLEDB_DIR) if re.match(r"titles\.[A-Z]{2}\.[a-z]{2}\.json", f) and f not in files_to_update]
@@ -251,6 +274,9 @@ def update_titledb_files(app_settings):
             _download_json_file(desc_url, store_path, conditional=descriptions_valid)
         except Exception as e:
             logger.warning(f'Failed to download {desc_filename}: {e}')
+
+    if update_available:
+        _write_latest_commit(latest_remote_commit)
 
 
 def update_titledb(app_settings):
