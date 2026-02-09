@@ -1303,15 +1303,57 @@ def _job_log(job_id, message):
     message = _fix_mojibake(str(message)).strip()
     if not message:
         return
+    if '\r' in message or '\n' in message:
+        # NSZ minimal mode writes carriage-return updates; keep only the last frame.
+        frames = [part.strip() for part in re.split(r'[\r\n]+', message) if part and part.strip()]
+        if frames:
+            message = frames[-1]
+        if not message:
+            return
     with conversion_jobs_lock:
         job = conversion_jobs.get(job_id)
         if not job:
             return
         percent_match = re.search(r'Compressed\s+([0-9.]+)%', message)
-        minimal_progress_match = re.search(r'^\s*(?:[^0-9]{1,4}\s*)?([0-9]{1,3}(?:\.[0-9]+)?)%\s*(.*)$', message)
+        minimal_spinner_match = re.fullmatch(r'([|/\\-])\s+([0-9]{1,3})%\s+(.+)', message)
+        minimal_done_match = re.fullmatch(r'100%\s+Done', message, re.IGNORECASE)
         numeric_match = re.fullmatch(r'\d{1,3}', message)
         convert_match = re.search(r'^\[CONVERT\]\s+(.+?)\s+->\s+(.+)$', message)
         verify_match = re.search(r'^\[VERIFY\]\s+(.+)$', message)
+
+        if minimal_done_match:
+            total = int(job['progress'].get('total') or 0)
+            done = int(job['progress'].get('done') or 0)
+            if total > 0:
+                job['progress']['done'] = max(done, total)
+            job['progress']['percent'] = 100.0
+            job['progress']['stage'] = 'done'
+            job['progress']['message'] = 'Conversion complete.'
+            job['updated_at'] = time.time()
+            return
+
+        if minimal_spinner_match:
+            percent_value = int(minimal_spinner_match.group(2))
+            status_hint = (minimal_spinner_match.group(3) or '').strip()
+            status_hint_lower = status_hint.lower()
+            stage = job['progress'].get('stage') or 'converting'
+            if 'verif' in status_hint_lower:
+                stage = 'verifying'
+            elif 'compress' in status_hint_lower or 'convert' in status_hint_lower:
+                stage = 'converting'
+            job['progress']['stage'] = stage
+            file_match = re.search(r'([^\s].*\.(?:nsp|nsz|xci|xcz|nca|ncz))', status_hint, re.IGNORECASE)
+            if file_match:
+                status_file = os.path.basename(file_match.group(1).strip())
+                if status_file:
+                    job['progress']['file'] = status_file
+            job['progress']['percent'] = float(percent_value)
+            label = 'Verifying' if stage == 'verifying' else 'Converting'
+            file_name = (job['progress'].get('file') or '').strip()
+            file_suffix = f" ({file_name})" if file_name else ''
+            job['progress']['message'] = f"{label}: {percent_value}%{file_suffix}"
+            job['updated_at'] = time.time()
+            return
 
         if numeric_match:
             try:
@@ -1323,33 +1365,6 @@ def _job_log(job_id, message):
                     file_name = (job['progress'].get('file') or '').strip()
                     file_suffix = f" ({file_name})" if file_name else ''
                     job['progress']['message'] = f"{label}: {percent_value}%{file_suffix}"
-                    job['updated_at'] = time.time()
-                    return
-            except ValueError:
-                pass
-        if minimal_progress_match:
-            try:
-                percent_value = float(minimal_progress_match.group(1))
-                if 0 <= percent_value <= 100:
-                    status_hint = (minimal_progress_match.group(2) or '').strip()
-                    status_hint_lower = status_hint.lower()
-                    stage = job['progress'].get('stage') or 'converting'
-                    if 'verif' in status_hint_lower:
-                        stage = 'verifying'
-                    elif 'compress' in status_hint_lower or 'convert' in status_hint_lower:
-                        stage = 'converting'
-                    job['progress']['stage'] = stage
-                    file_match = re.search(r'([^\s].*\.(?:nsp|nsz|xci|xcz|nca|ncz))', status_hint, re.IGNORECASE)
-                    if file_match:
-                        status_file = os.path.basename(file_match.group(1).strip())
-                        if status_file:
-                            job['progress']['file'] = status_file
-                    job['progress']['percent'] = percent_value
-                    label = 'Verifying' if stage == 'verifying' else 'Converting'
-                    file_name = (job['progress'].get('file') or '').strip()
-                    file_suffix = f" ({file_name})" if file_name else ''
-                    suffix = f" - {status_hint}" if status_hint else ''
-                    job['progress']['message'] = f"{label}: {percent_value:.0f}%{file_suffix}{suffix}"
                     job['updated_at'] = time.time()
                     return
             except ValueError:
@@ -1431,18 +1446,39 @@ def _job_finish(job_id, results):
         progress = job.setdefault('progress', {})
         kind = str(job.get('kind') or '')
         total = int(progress.get('total') or 0)
+        done = int(progress.get('done') or 0)
         if kind == 'convert-single':
             total = max(total, 1)
             progress['total'] = total
-            progress['done'] = total
+            progress['done'] = max(done, total)
         else:
             if total > 0:
-                progress['done'] = total
+                progress['done'] = max(done, total)
             else:
                 estimated_total = int(job['summary'].get('converted', 0) or 0) + int(job['summary'].get('skipped', 0) or 0)
                 if estimated_total > 0:
                     progress['total'] = estimated_total
-                    progress['done'] = estimated_total
+                    progress['done'] = max(done, estimated_total)
+        status = job.get('status')
+        terminal_message = None
+        if status == 'success':
+            progress['percent'] = 100.0
+            progress['stage'] = 'done'
+            progress['message'] = 'Conversion complete.'
+            progress['file'] = ''
+            terminal_message = 'Conversion complete.'
+        elif status == 'cancelled':
+            progress['stage'] = 'cancelled'
+            progress['message'] = 'Conversion cancelled.'
+            terminal_message = 'Conversion cancelled.'
+        else:
+            progress['stage'] = 'failed'
+            progress['message'] = 'Conversion failed.'
+            terminal_message = 'Conversion failed.'
+        if terminal_message:
+            logs = job.setdefault('logs', [])
+            if not logs or logs[-1] != terminal_message:
+                logs.append(terminal_message)
         job['updated_at'] = time.time()
         if len(conversion_jobs) > conversion_job_limit:
             oldest = sorted(conversion_jobs.values(), key=lambda item: item['created_at'])[:len(conversion_jobs) - conversion_job_limit]
@@ -2737,20 +2773,32 @@ def manage_convert_job():
 
     def _run_job():
         with app.app_context():
-            results = convert_to_nsz(
-                command_template=command,
-                delete_original=delete_original,
-                dry_run=dry_run,
-                verbose=verbose,
-                log_cb=lambda msg: _job_log(job_id, msg),
-                progress_cb=lambda done, total: _job_progress(job_id, done, total),
-                stream_output=True,
-                threads=threads,
-                library_id=library_id,
-                cancel_cb=lambda: _job_is_cancelled(job_id),
-                timeout_seconds=timeout_seconds,
-                min_size_bytes=200 * 1024 * 1024
-            )
+            try:
+                results = convert_to_nsz(
+                    command_template=command,
+                    delete_original=delete_original,
+                    dry_run=dry_run,
+                    verbose=verbose,
+                    log_cb=lambda msg: _job_log(job_id, msg),
+                    progress_cb=lambda done, total: _job_progress(job_id, done, total),
+                    stream_output=True,
+                    threads=threads,
+                    library_id=library_id,
+                    cancel_cb=lambda: _job_is_cancelled(job_id),
+                    timeout_seconds=timeout_seconds,
+                    min_size_bytes=200 * 1024 * 1024
+                )
+            except Exception as e:
+                logger.exception("Conversion job %s crashed", job_id)
+                results = {
+                    'success': False,
+                    'converted': 0,
+                    'skipped': 0,
+                    'deleted': 0,
+                    'moved': 0,
+                    'errors': [str(e)],
+                    'details': []
+                }
             _job_finish(job_id, results)
             if results.get('success') and not dry_run:
                 post_library_change()
@@ -2777,19 +2825,31 @@ def manage_convert_single_job():
 
     def _run_job():
         with app.app_context():
-            results = convert_single_to_nsz(
-                file_id=int(file_id),
-                command_template=command,
-                delete_original=delete_original,
-                dry_run=dry_run,
-                verbose=verbose,
-                log_cb=lambda msg: _job_log(job_id, msg),
-                progress_cb=lambda done, total: _job_progress(job_id, done, total),
-                stream_output=True,
-                threads=threads,
-                cancel_cb=lambda: _job_is_cancelled(job_id),
-                timeout_seconds=timeout_seconds
-            )
+            try:
+                results = convert_single_to_nsz(
+                    file_id=int(file_id),
+                    command_template=command,
+                    delete_original=delete_original,
+                    dry_run=dry_run,
+                    verbose=verbose,
+                    log_cb=lambda msg: _job_log(job_id, msg),
+                    progress_cb=lambda done, total: _job_progress(job_id, done, total),
+                    stream_output=True,
+                    threads=threads,
+                    cancel_cb=lambda: _job_is_cancelled(job_id),
+                    timeout_seconds=timeout_seconds
+                )
+            except Exception as e:
+                logger.exception("Single conversion job %s crashed", job_id)
+                results = {
+                    'success': False,
+                    'converted': 0,
+                    'skipped': 0,
+                    'deleted': 0,
+                    'moved': 0,
+                    'errors': [str(e)],
+                    'details': []
+                }
             _job_finish(job_id, results)
             if results.get('success') and not dry_run:
                 post_library_change()

@@ -505,6 +505,7 @@
             if (job['status'] !== 'running') {
                 clearInterval(jobPollTimer);
                 jobPollTimer = null;
+                activeJobId = null;
                 $('#cancelJobBtn').prop('disabled', true);
                 localStorage.removeItem('ownfoilJobPolling');
                 if (job['status'] === 'success') {
