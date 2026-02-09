@@ -1757,7 +1757,9 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
                 if os.path.exists(old_path):
                     os.remove(old_path)
                 library_path = get_library_path(file_entry.library_id)
-                update_file_path(library_path, old_path, output_file)
+                file_entry.filepath = output_file
+                file_entry.filename = os.path.basename(output_file)
+                file_entry.folder = _compute_relative_folder(library_path, output_file)
                 file_entry.extension = 'nsz'
                 file_entry.compressed = True
                 file_entry.size = os.path.getsize(output_file)
@@ -1804,6 +1806,7 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
             if progress_cb:
                 progress_cb(processed, total_files)
         except Exception as e:
+            db.session.rollback()
             logger.error(f"Failed to convert {file_entry.filepath}: {e}")
             results['errors'].append(str(e))
             add_detail(f"Error converting {file_entry.filepath}: {e}.")
@@ -1929,7 +1932,9 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
             if os.path.exists(old_path):
                 os.remove(old_path)
             library_path = get_library_path(file_entry.library_id)
-            update_file_path(library_path, old_path, output_file)
+            file_entry.filepath = output_file
+            file_entry.filename = os.path.basename(output_file)
+            file_entry.folder = _compute_relative_folder(library_path, output_file)
             file_entry.extension = 'nsz'
             file_entry.compressed = True
             file_entry.size = os.path.getsize(output_file)
@@ -1978,6 +1983,7 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
         if progress_cb:
             progress_cb(1, 1)
     except Exception as e:
+        db.session.rollback()
         logger.error(f"Failed to convert {file_entry.filepath}: {e}")
         results['success'] = False
         results['errors'].append(str(e))
