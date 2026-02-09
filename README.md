@@ -124,6 +124,10 @@ The `Game info` modal uses TitleDB metadata (not Nintendo website scraping):
 
 Ownfoil will download the TitleDB descriptions/screenshot dataset on demand to `./data/titledb/US.en.json` (Docker path: `/app/data/titledb/US.en.json`).
 
+> [!NOTE]
+> On first boot, game titles may temporarily appear as `Unrecognized` while TitleDB is being downloaded in the background.
+> Once the download finishes, refresh the page and names/metadata will appear.
+
 Conversion details:
 - Uses the installed Python `nsz` package (with progress output).
 - Uses the same `keys.txt` uploaded in the `Settings` page.

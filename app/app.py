@@ -221,6 +221,13 @@ def init():
         interval=timedelta(minutes=5)
     )
 
+    # Fast completion monitor: only does work while Ownfoil has pending downloads.
+    app.scheduler.add_job(
+        job_id='downloads_pending_monitor_job',
+        func=downloads_pending_job,
+        interval=timedelta(seconds=30),
+        log_level='debug'
+    )
     maintenance_interval_minutes = _get_maintenance_interval_minutes(app_settings)
     app.scheduler.add_job(
         job_id=LIBRARY_MAINTENANCE_JOB_ID,
