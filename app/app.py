@@ -211,6 +211,12 @@ def init():
     def downloads_job():
         run_downloads_job(scan_cb=scan_library, post_cb=post_library_change)
 
+    def downloads_pending_job():
+        state = get_downloads_state()
+        if not (state.get('pending') or []):
+            return
+        check_completed_downloads(scan_cb=scan_library, post_cb=post_library_change)
+
     def maintenance_job():
         run_library_maintenance()
 
@@ -219,6 +225,13 @@ def init():
         job_id='downloads_update_job',
         func=downloads_job,
         interval=timedelta(minutes=5)
+    )
+
+    # Fast completion monitor: only does work while Ownfoil has pending downloads.
+    app.scheduler.add_job(
+        job_id='downloads_pending_monitor_job',
+        func=downloads_pending_job,
+        interval=timedelta(seconds=10)
     )
 
     maintenance_interval_minutes = _get_maintenance_interval_minutes(app_settings)

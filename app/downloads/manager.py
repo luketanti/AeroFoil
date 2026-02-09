@@ -24,6 +24,13 @@ _state = {
     "completed": set(),
 }
 
+def _normalize_torrent_hash(value):
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    return normalized or None
+
+
 def _get_prowlarr_timeout_seconds(prowlarr_cfg):
     try:
         timeout_seconds = int((prowlarr_cfg or {}).get("timeout_seconds") or 15)
@@ -415,7 +422,7 @@ def _track_pending(key, update, torrent_hash, expected_name=None):
         _state["pending"][key] = {
             "title_id": update["title_id"],
             "version": update["version"],
-            "hash": torrent_hash,
+            "hash": _normalize_torrent_hash(torrent_hash),
             "expected_name": expected_name or update.get("title_name"),
         }
 
@@ -435,12 +442,17 @@ def _check_completed(torrent_cfg, scan_cb=None, post_cb=None):
     newly_completed = False
     moved_paths = []
     matched_hashes = set()
+    completed_by_hash = {}
+    for item in completed_items:
+        item_hash = _normalize_torrent_hash(item.get("hash"))
+        if item_hash and item_hash not in completed_by_hash:
+            completed_by_hash[item_hash] = item
     with _state_lock:
         for key, info in list(_state["pending"].items()):
-            torrent_hash = info.get("hash")
+            torrent_hash = _normalize_torrent_hash(info.get("hash"))
             match = None
             if torrent_hash:
-                match = next((item for item in completed_items if item.get("hash") == torrent_hash), None)
+                match = completed_by_hash.get(torrent_hash)
             if not match:
                 expected = (info.get("expected_name") or "").lower()
                 if expected:
@@ -453,12 +465,13 @@ def _check_completed(torrent_cfg, scan_cb=None, post_cb=None):
                         key
                     )
                     continue
-                if match.get("hash"):
-                    matched_hashes.add(match.get("hash"))
+                matched_hash = _normalize_torrent_hash(match.get("hash"))
+                if matched_hash:
+                    matched_hashes.add(matched_hash)
                 _state["pending"].pop(key, None)
                 _state["completed"].add(key)
                 moved_paths.append(moved_path)
-                torrent_hash = match.get("hash")
+                torrent_hash = matched_hash
                 if torrent_hash:
                     ok, message = remove_torrent(
                         client_type=torrent_cfg.get("type"),
@@ -472,7 +485,7 @@ def _check_completed(torrent_cfg, scan_cb=None, post_cb=None):
                 newly_completed = True
         unmatched_count = 0
         for item in completed_items:
-            torrent_hash = item.get("hash")
+            torrent_hash = _normalize_torrent_hash(item.get("hash"))
             if torrent_hash and torrent_hash in matched_hashes:
                 continue
             unmatched_count += 1
