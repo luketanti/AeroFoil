@@ -784,6 +784,7 @@ def reload_conf():
 def on_library_change(events):
     # TODO refactor: group modified and created together
     with app.app_context():
+        has_changes = False
         created_events = [e for e in events if e.type == 'created']
         modified_events = [e for e in events if e.type != 'created']
 
@@ -791,11 +792,14 @@ def on_library_change(events):
             if event.type == 'moved':
                 moved_outside_library = not event.dest_path or not event.dest_path.startswith(event.directory)
                 if moved_outside_library:
+                    if file_exists_in_db(event.src_path):
+                        has_changes = True
                     delete_file_by_filepath(event.src_path)
                     continue
                 if file_exists_in_db(event.src_path):
                     # update the path
                     update_file_path(event.directory, event.src_path, event.dest_path)
+                    has_changes = True
                 else:
                     # add to the database
                     event.src_path = event.dest_path
@@ -803,19 +807,27 @@ def on_library_change(events):
 
             elif event.type == 'deleted':
                 # delete the file from library if it exists
+                if file_exists_in_db(event.src_path):
+                    has_changes = True
                 delete_file_by_filepath(event.src_path)
 
             elif event.type == 'modified':
                 # can happen if file copy has started before the app was running
+                if file_exists_in_db(event.src_path):
+                    continue
                 add_files_to_library(event.directory, [event.src_path])
+                has_changes = True
 
         if created_events:
             directories = list(set(e.directory for e in created_events))
             for library_path in directories:
                 new_files = [e.src_path for e in created_events if e.directory == library_path]
                 add_files_to_library(library_path, new_files)
+                if new_files:
+                    has_changes = True
 
-    post_library_change()
+    if has_changes:
+        post_library_change()
 
 def create_app():
     app = Flask(__name__)
