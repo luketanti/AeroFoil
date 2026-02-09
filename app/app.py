@@ -2044,6 +2044,17 @@ def _apply_download_search_char_replacements(text, downloads_settings):
     return out
 
 
+def _normalize_download_search_query(text, downloads_settings=None):
+    normalized = _apply_download_search_char_replacements(text, downloads_settings)
+    try:
+        normalized = unicodedata.normalize('NFKD', normalized)
+        normalized = normalized.encode('ascii', 'ignore').decode('ascii')
+    except Exception:
+        normalized = str(normalized or '')
+    normalized = re.sub(r"[^A-Za-z0-9\s]+", " ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
 @app.get('/api/requests/search')
 @access_required('admin')
 def request_prowlarr_search_api():
@@ -2068,8 +2079,8 @@ def request_prowlarr_search_api():
         finally:
             titles.release_titledb()
 
-    base_query = _apply_download_search_char_replacements(resolved_name or title_id, downloads)
-    prefix = (downloads.get('search_prefix') or '').strip()
+    base_query = _normalize_download_search_query(resolved_name or title_id, downloads)
+    prefix = _normalize_download_search_query(downloads.get('search_prefix') or '', downloads)
     full_query = base_query
     if prefix and not full_query.lower().startswith(prefix.lower()):
         full_query = f"{prefix} {full_query}".strip()
@@ -2653,10 +2664,10 @@ def downloads_search():
         except (TypeError, ValueError):
             timeout_seconds = 15
         timeout_seconds = max(5, min(timeout_seconds, 180))
-        full_query = _apply_download_search_char_replacements(query, downloads)
+        full_query = _normalize_download_search_query(query, downloads)
         if apply_settings:
-            prefix = (downloads.get('search_prefix') or '').strip()
-            suffix = (downloads.get('search_suffix') or '').strip()
+            prefix = _normalize_download_search_query(downloads.get('search_prefix') or '', downloads)
+            suffix = _normalize_download_search_query(downloads.get('search_suffix') or '', downloads)
             if prefix and not full_query.lower().startswith(prefix.lower()):
                 full_query = f"{prefix} {full_query}".strip()
             if suffix and not full_query.lower().endswith(suffix.lower()):
@@ -3279,17 +3290,26 @@ def get_all_titles_api():
         except Exception:
             return False
 
+    def _normalize_library_search_text(text):
+        try:
+            normalized = unicodedata.normalize('NFKD', str(text or ''))
+            normalized = normalized.encode('ascii', 'ignore').decode('ascii')
+        except Exception:
+            normalized = str(text or '')
+        normalized = re.sub(r"[^A-Za-z0-9\s]+", " ", normalized)
+        return re.sub(r"\s+", " ", normalized).strip().lower()
+
     def _filter_games(games, search=None, types=None, owned=None, updates=None, completion=None, genre=None, recognized=None):
         out = games
         if search:
-            q = str(search).strip().lower()
+            q = _normalize_library_search_text(search)
             if q:
                 out = [
                     g for g in out
-                    if q in str(g.get('app_id') or '').lower()
-                    or q in str(g.get('title_id') or '').lower()
-                    or q in str(g.get('name') or '').lower()
-                    or q in str(g.get('title_id_name') or '').lower()
+                    if q in _normalize_library_search_text(g.get('app_id') or '')
+                    or q in _normalize_library_search_text(g.get('title_id') or '')
+                    or q in _normalize_library_search_text(g.get('name') or '')
+                    or q in _normalize_library_search_text(g.get('title_id_name') or '')
                 ]
         if types:
             allowed = {t.strip().upper() for t in str(types).split(',') if t.strip()}
