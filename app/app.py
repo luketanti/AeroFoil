@@ -36,6 +36,7 @@ from app import titledb
 from app.title_requests import create_title_request, list_requests
 import requests
 import re
+import unicodedata
 import threading
 import time
 import uuid
@@ -3151,17 +3152,46 @@ def get_all_titles_api():
         except Exception:
             return False
 
+    def _normalize_library_search_text(text):
+        value = str(text or '')
+        try:
+            value = unicodedata.normalize('NFKD', value)
+            value = value.encode('ascii', 'ignore').decode('ascii')
+        except Exception:
+            pass
+        value = re.sub(r"[^A-Za-z0-9\s]+", " ", value)
+        return re.sub(r"\s+", " ", value).strip().lower()
+
+    def _search_matches_field(query_normalized, field_value):
+        hay = _normalize_library_search_text(field_value)
+        if not hay:
+            return False
+        if query_normalized in hay:
+            return True
+
+        # Handle spacing/symbol differences (e.g. "you update" vs "youupdate").
+        query_compact = query_normalized.replace(' ', '')
+        hay_compact = hay.replace(' ', '')
+        if query_compact and query_compact in hay_compact:
+            return True
+
+        # Token-aware fallback so all query terms must be present.
+        terms = [t for t in query_normalized.split(' ') if t]
+        if terms and all(term in hay for term in terms):
+            return True
+        return False
+
     def _filter_games(games, search=None, types=None, owned=None, updates=None, completion=None, genre=None, recognized=None):
         out = games
         if search:
-            q = str(search).strip().lower()
+            q = _normalize_library_search_text(search)
             if q:
                 out = [
                     g for g in out
-                    if q in str(g.get('app_id') or '').lower()
-                    or q in str(g.get('title_id') or '').lower()
-                    or q in str(g.get('name') or '').lower()
-                    or q in str(g.get('title_id_name') or '').lower()
+                    if _search_matches_field(q, g.get('app_id') or '')
+                    or _search_matches_field(q, g.get('title_id') or '')
+                    or _search_matches_field(q, g.get('name') or '')
+                    or _search_matches_field(q, g.get('title_id_name') or '')
                 ]
         if types:
             allowed = {t.strip().upper() for t in str(types).split(',') if t.strip()}
