@@ -820,6 +820,10 @@ def on_library_change(events):
 
             elif event.type == 'modified':
                 # can happen if file copy has started before the app was running
+                # Ignore noisy modify events for files already indexed.
+                # Keep handling unknown files so interrupted copies still get discovered.
+                if file_exists_in_db(event.src_path):
+                    continue
                 add_files_to_library(event.directory, [event.src_path])
 
         if created_events:
