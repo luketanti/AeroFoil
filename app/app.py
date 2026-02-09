@@ -387,6 +387,7 @@ library_rebuild_lock = threading.Lock()
 shop_sections_cache = {
     'limit': None,
     'timestamp': 0,
+    'state_token': None,
     'payload': None
 }
 shop_sections_cache_lock = threading.Lock()
@@ -442,6 +443,14 @@ def _invalidate_shop_root_cache():
         shop_root_cache['state_token'] = None
         shop_root_cache['files'] = None
         shop_root_cache['encrypted'] = {}
+
+def _get_titledb_aware_state_token():
+    library_token = str(get_library_cache_state_token() or '')
+    try:
+        titledb_token = str(titles.get_titledb_cache_token() or 'missing')
+    except Exception:
+        titledb_token = 'missing'
+    return f"{library_token}::{titledb_token}"
 
 def _get_cached_shop_files():
     state_token = get_library_cache_state_token()
@@ -544,7 +553,7 @@ def _build_titles_metadata_cache():
     }
 
 def _get_cached_titles_metadata():
-    state_token = get_library_cache_state_token()
+    state_token = _get_titledb_aware_state_token()
     with titles_metadata_cache_lock:
         if titles_metadata_cache.get('state_token') == state_token:
             return {
@@ -580,6 +589,7 @@ def _get_discovery_sections(limit=12):
         limit = 12
 
     now = time.time()
+    state_token = _get_titledb_aware_state_token()
     payload = None
     with shop_sections_cache_lock:
         cache_enabled = SHOP_SECTIONS_CACHE_TTL_S is None or SHOP_SECTIONS_CACHE_TTL_S > 0
@@ -589,6 +599,7 @@ def _get_discovery_sections(limit=12):
         cache_hit = (
             cache_enabled
             and shop_sections_cache['payload'] is not None
+            and shop_sections_cache.get('state_token') == state_token
             and cache_valid
         )
         if cache_hit:
@@ -597,7 +608,7 @@ def _get_discovery_sections(limit=12):
     if payload is None:
         payload = _build_shop_sections_payload(max(limit, 50))
         if SHOP_SECTIONS_CACHE_TTL_S is None or SHOP_SECTIONS_CACHE_TTL_S > 0:
-            _store_shop_sections_cache(payload, max(limit, 50), now, persist_disk=True)
+            _store_shop_sections_cache(payload, max(limit, 50), now, state_token, persist_disk=True)
 
     sections = payload.get('sections') if isinstance(payload, dict) else []
     newest = []
@@ -636,13 +647,14 @@ def _load_shop_sections_cache_from_disk():
         return None
     return data
 
-def _save_shop_sections_cache_to_disk(payload, limit, timestamp):
+def _save_shop_sections_cache_to_disk(payload, limit, timestamp, state_token=None):
     cache_path = SHOP_SECTIONS_CACHE_FILE
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     data = {
         'payload': payload,
         'limit': limit,
-        'timestamp': timestamp
+        'timestamp': timestamp,
+        'state_token': state_token,
     }
     try:
         with open(cache_path, 'w', encoding='utf-8') as handle:
@@ -656,7 +668,7 @@ def _estimate_json_size_bytes(payload):
     except Exception:
         return None
 
-def _store_shop_sections_cache(payload, limit, timestamp, persist_disk=True):
+def _store_shop_sections_cache(payload, limit, timestamp, state_token, persist_disk=True):
     cache_payload = payload
     max_bytes = SHOP_SECTIONS_MAX_IN_MEMORY_BYTES
     if max_bytes is not None:
@@ -678,13 +690,15 @@ def _store_shop_sections_cache(payload, limit, timestamp, persist_disk=True):
             shop_sections_cache['payload'] = None
             shop_sections_cache['limit'] = None
             shop_sections_cache['timestamp'] = 0
+            shop_sections_cache['state_token'] = None
         else:
             shop_sections_cache['payload'] = cache_payload
             shop_sections_cache['limit'] = limit
             shop_sections_cache['timestamp'] = timestamp
+            shop_sections_cache['state_token'] = state_token
 
     if persist_disk:
-        _save_shop_sections_cache_to_disk(payload, limit, timestamp)
+        _save_shop_sections_cache_to_disk(payload, limit, timestamp, state_token=state_token)
 
 def _summarize_shop_sections_payload(payload):
     summary = {
@@ -920,8 +934,9 @@ def _refresh_shop_sections_cache(limit):
         try:
             with app.app_context():
                 now = time.time()
+                state_token = _get_titledb_aware_state_token()
                 payload = _build_shop_sections_payload(limit)
-                _store_shop_sections_cache(payload, limit, now, persist_disk=True)
+                _store_shop_sections_cache(payload, limit, now, state_token, persist_disk=True)
         finally:
             with shop_sections_refresh_lock:
                 shop_sections_refresh_running = False
@@ -3643,15 +3658,16 @@ def get_all_titles_api():
     all_lookup_ids.update([aid for aid in dlc_app_ids if aid])
     info_cache = {}
     release_dates_by_title = {}
-    with titles.titledb_session():
-        for lookup_id in all_lookup_ids:
-            info_cache[lookup_id] = titles.get_game_info(lookup_id) or {}
-        for title_fk, title_id in title_id_by_fk.items():
-            versions = titles.get_all_existing_versions(title_id) or []
-            release_dates_by_title[title_fk] = {
-                int(v.get('version') or 0): v.get('release_date') or 'Unknown'
-                for v in versions
-            }
+    with titles.titledb_session() as titledb_loaded:
+        if titledb_loaded:
+            for lookup_id in all_lookup_ids:
+                info_cache[lookup_id] = titles.get_game_info(lookup_id) or {}
+            for title_fk, title_id in title_id_by_fk.items():
+                versions = titles.get_all_existing_versions(title_id) or []
+                release_dates_by_title[title_fk] = {
+                    int(v.get('version') or 0): v.get('release_date') or 'Unknown'
+                    for v in versions
+                }
 
     for title_fk, versions in update_versions_by_title_fk.items():
         release_dates = release_dates_by_title.get(title_fk) or {}
@@ -3885,6 +3901,7 @@ def set_manual_title_info_api():
         shop_sections_cache['payload'] = None
         shop_sections_cache['timestamp'] = 0
         shop_sections_cache['limit'] = None
+        shop_sections_cache['state_token'] = None
     with titles_metadata_cache_lock:
         titles_metadata_cache['state_token'] = None
         titles_metadata_cache['genres'] = []
@@ -4051,6 +4068,7 @@ def shop_sections_api():
         limit = 50
 
     now = time.time()
+    state_token = _get_titledb_aware_state_token()
     payload = None
     with shop_sections_cache_lock:
         cache_enabled = SHOP_SECTIONS_CACHE_TTL_S is None or SHOP_SECTIONS_CACHE_TTL_S > 0
@@ -4061,6 +4079,7 @@ def shop_sections_api():
             cache_enabled
             and shop_sections_cache['payload'] is not None
             and shop_sections_cache['limit'] == limit
+            and shop_sections_cache.get('state_token') == state_token
             and cache_valid
         )
         if cache_hit:
@@ -4070,11 +4089,16 @@ def shop_sections_api():
             shop_sections_cache['payload'] = None
             shop_sections_cache['limit'] = None
             shop_sections_cache['timestamp'] = 0
+            shop_sections_cache['state_token'] = None
 
     if payload is None:
         if SHOP_SECTIONS_CACHE_TTL_S is None or SHOP_SECTIONS_CACHE_TTL_S > 0:
             disk_cache = _load_shop_sections_cache_from_disk()
-            if disk_cache and disk_cache.get('limit') == limit:
+            if (
+                disk_cache
+                and disk_cache.get('limit') == limit
+                and str(disk_cache.get('state_token') or '') == state_token
+            ):
                 disk_payload = disk_cache.get('payload')
                 disk_ts = float(disk_cache.get('timestamp') or 0)
                 disk_ok = True
@@ -4082,12 +4106,12 @@ def shop_sections_api():
                     disk_ok = (now - disk_ts) <= SHOP_SECTIONS_CACHE_TTL_S
                 if disk_payload and disk_ok:
                     payload = disk_payload
-                    _store_shop_sections_cache(payload, limit, disk_ts, persist_disk=False)
+                    _store_shop_sections_cache(payload, limit, disk_ts, state_token, persist_disk=False)
 
     if payload is None:
         payload = _build_shop_sections_payload(limit)
         if SHOP_SECTIONS_CACHE_TTL_S is None or SHOP_SECTIONS_CACHE_TTL_S > 0:
-            _store_shop_sections_cache(payload, limit, now, persist_disk=True)
+            _store_shop_sections_cache(payload, limit, now, state_token, persist_disk=True)
 
     if _is_cyberfoil_request():
         _log_access(
@@ -4430,6 +4454,7 @@ def post_library_change():
                 shop_sections_cache['payload'] = None
                 shop_sections_cache['timestamp'] = 0
                 shop_sections_cache['limit'] = None
+                shop_sections_cache['state_token'] = None
             _invalidate_shop_root_cache()
             with titles_metadata_cache_lock:
                 titles_metadata_cache['state_token'] = None
@@ -4444,7 +4469,7 @@ def post_library_change():
                 _media_cache_index['banner'].clear()
             now = time.time()
             payload = _build_shop_sections_payload(50)
-            _store_shop_sections_cache(payload, 50, now, persist_disk=True)
+            _store_shop_sections_cache(payload, 50, now, _get_titledb_aware_state_token(), persist_disk=True)
         finally:
             titles.release_titledb()
             with library_rebuild_lock:
