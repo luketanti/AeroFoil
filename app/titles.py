@@ -2,7 +2,6 @@ import os
 import sys
 import re
 import json
-import unicodedata
 import requests
 import threading
 from contextlib import contextmanager
@@ -696,17 +695,7 @@ def search_titles(query, limit=20):
         logger.warning("titles_db is not loaded. Call load_titledb first.")
         return []
 
-    def _normalize_search_text(value):
-        text = str(value or '')
-        try:
-            text = unicodedata.normalize('NFKD', text)
-            text = text.encode('ascii', 'ignore').decode('ascii')
-        except Exception:
-            pass
-        text = re.sub(r"[^A-Za-z0-9\s]+", " ", text)
-        return re.sub(r"\s+", " ", text).strip().lower()
-
-    q = _normalize_search_text(query)
+    q = (query or '').strip().lower()
     if not q:
         return []
 
@@ -728,7 +717,7 @@ def search_titles(query, limit=20):
         if not tid or tid in seen_ids:
             continue
 
-        hay = _normalize_search_text(f"{tid} {name}")
+        hay = f"{tid} {name}".lower()
         if q not in hay:
             continue
 

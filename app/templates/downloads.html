@@ -72,8 +72,6 @@
 
 <script>
     let downloadsPollTimer = null;
-    let autoCheckInProgress = false;
-    const DOWNLOADS_POLL_MS = 5000;
 
     function showDownloadsAlert(message, type = 'info') {
         const alertBox = $('#downloadsAlert');
@@ -111,35 +109,10 @@
         return `${s}s`;
     }
 
-    function startDownloadsPolling() {
-        if (!downloadsPollTimer) {
-            downloadsPollTimer = setInterval(pollDownloads, DOWNLOADS_POLL_MS);
-        }
-    }
-
-    function stopDownloadsPolling() {
-        if (downloadsPollTimer) {
-            clearInterval(downloadsPollTimer);
-            downloadsPollTimer = null;
-        }
-    }
-
-    function updatePollingFromPendingCount(pendingCount) {
-        if (Number(pendingCount || 0) > 0 && !document.hidden) {
-            startDownloadsPolling();
-        } else {
-            stopDownloadsPolling();
-        }
-    }
-
-    function loadQueueState(options = {}) {
-        const managePolling = !!options.managePolling;
-        return $.getJSON('/api/downloads/queue', function (result) {
+    function loadQueueState() {
+        $.getJSON('/api/downloads/queue', function (result) {
             if (!result['success']) {
                 $('#downloadsQueueStatus').text('Failed to load queue state.');
-                if (managePolling) {
-                    stopDownloadsPolling();
-                }
                 return;
             }
             const state = result['state'] || {};
@@ -147,9 +120,6 @@
             const running = state['running'] ? 'running' : 'idle';
             const lastRun = state['last_run'] ? new Date(state['last_run'] * 1000).toLocaleString() : 'never';
             $('#downloadsQueueStatus').text(`Status: ${running}. Last check: ${lastRun}. Pending: ${pending.length}.`);
-            if (managePolling) {
-                updatePollingFromPendingCount(pending.length);
-            }
             if (!pending.length) {
                 $('#downloadsQueueList').text('No pending downloads.');
                 return;
@@ -196,61 +166,43 @@
         });
     }
 
-    function checkCompletedDownloads(options = {}) {
-        const silent = !!options.silent;
-        const fromPoll = !!options.fromPoll;
-        if (silent && autoCheckInProgress) {
-            return;
-        }
-        if (silent) {
-            autoCheckInProgress = true;
-        } else {
-            $('#checkDownloadsBtn').prop('disabled', true);
-        }
+    function checkCompletedDownloads() {
+        $('#checkDownloadsBtn').prop('disabled', true);
         $.ajax({
             url: "/api/downloads/check-completed",
             type: 'POST',
             success: function (result) {
-                if (!silent && result['success']) {
+                if (result['success']) {
                     showDownloadsAlert(result['message'] || 'Checked completed downloads.', 'success');
-                } else if (!silent) {
+                } else {
                     showDownloadsAlert(result['message'] || 'Check failed.', 'danger');
                 }
-                if (!fromPoll) {
-                    loadQueueState({ managePolling: true });
-                    loadActiveDownloads();
-                }
+                loadQueueState();
+                loadActiveDownloads();
             },
             complete: function () {
-                if (silent) {
-                    autoCheckInProgress = false;
-                } else {
-                    $('#checkDownloadsBtn').prop('disabled', false);
-                }
-                if (fromPoll) {
-                    loadQueueState({ managePolling: true });
-                    loadActiveDownloads();
-                }
+                $('#checkDownloadsBtn').prop('disabled', false);
             }
         });
     }
 
     function pollDownloads() {
-        checkCompletedDownloads({ silent: true, fromPoll: true });
+        loadQueueState();
+        loadActiveDownloads();
     }
 
     $(document).ready(function () {
-        loadQueueState({ managePolling: true });
-        loadActiveDownloads();
+        pollDownloads();
+        downloadsPollTimer = setInterval(pollDownloads, 5000);
         document.addEventListener('visibilitychange', function () {
             if (document.hidden) {
-                stopDownloadsPolling();
-            } else {
-                loadQueueState({ managePolling: true });
-                loadActiveDownloads();
                 if (downloadsPollTimer) {
-                    pollDownloads();
+                    clearInterval(downloadsPollTimer);
+                    downloadsPollTimer = null;
                 }
+            } else if (!downloadsPollTimer) {
+                pollDownloads();
+                downloadsPollTimer = setInterval(pollDownloads, 5000);
             }
         });
     });

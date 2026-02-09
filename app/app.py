@@ -211,12 +211,6 @@ def init():
     def downloads_job():
         run_downloads_job(scan_cb=scan_library, post_cb=post_library_change)
 
-    def downloads_pending_job():
-        state = get_downloads_state()
-        if not (state.get('pending') or []):
-            return
-        check_completed_downloads(scan_cb=scan_library, post_cb=post_library_change)
-
     def maintenance_job():
         run_library_maintenance()
 
@@ -225,13 +219,6 @@ def init():
         job_id='downloads_update_job',
         func=downloads_job,
         interval=timedelta(minutes=5)
-    )
-
-    # Fast completion monitor: only does work while Ownfoil has pending downloads.
-    app.scheduler.add_job(
-        job_id='downloads_pending_monitor_job',
-        func=downloads_pending_job,
-        interval=timedelta(seconds=10)
     )
 
     maintenance_interval_minutes = _get_maintenance_interval_minutes(app_settings)
@@ -820,10 +807,6 @@ def on_library_change(events):
 
             elif event.type == 'modified':
                 # can happen if file copy has started before the app was running
-                # Ignore noisy modify events for files already indexed.
-                # Keep handling unknown files so interrupted copies still get discovered.
-                if file_exists_in_db(event.src_path):
-                    continue
                 add_files_to_library(event.directory, [event.src_path])
 
         if created_events:
@@ -1307,124 +1290,15 @@ def _job_log(job_id, message):
     message = _fix_mojibake(str(message)).strip()
     if not message:
         return
-    if '\r' in message or '\n' in message:
-        # NSZ minimal mode writes carriage-return updates; keep only the last frame.
-        frames = [part.strip() for part in re.split(r'[\r\n]+', message) if part and part.strip()]
-        if frames:
-            message = frames[-1]
-        if not message:
-            return
     with conversion_jobs_lock:
         job = conversion_jobs.get(job_id)
         if not job:
             return
-        # NSZ --machine-readable emits JSON records. Prefer these over regex parsing.
-        try:
-            payload = json.loads(message)
-        except Exception:
-            payload = None
-        if isinstance(payload, dict):
-            error_text = payload.get('error')
-            warning_text = payload.get('warning')
-            job_name = payload.get('job')
-            data = payload.get('data') if isinstance(payload.get('data'), dict) else {}
-
-            if error_text:
-                text = str(error_text).strip()
-                if text:
-                    job['logs'].append(text)
-                    job['progress']['message'] = text
-                    job['updated_at'] = time.time()
-                if len(job['logs']) > 500:
-                    job['logs'] = job['logs'][-500:]
-                return
-            if warning_text:
-                text = str(warning_text).strip()
-                if text:
-                    job['logs'].append(text)
-                    job['updated_at'] = time.time()
-                if len(job['logs']) > 500:
-                    job['logs'] = job['logs'][-500:]
-                return
-
-            if job_name == 'Complete':
-                total = int(job['progress'].get('total') or 0)
-                done = int(job['progress'].get('done') or 0)
-                if total > 0:
-                    job['progress']['done'] = max(done, total)
-                job['progress']['percent'] = 100.0
-                job['progress']['stage'] = 'done'
-                job['progress']['message'] = 'Conversion complete.'
-                job['updated_at'] = time.time()
-                return
-
-            if isinstance(data, dict):
-                source_size = data.get('sourceSize')
-                processed = data.get('processed')
-                if source_size is not None and processed is not None:
-                    try:
-                        source_size = max(int(source_size), 0)
-                        processed = max(int(processed), 0)
-                        percent_value = 0 if source_size <= 0 else min(100.0, (processed * 100.0) / source_size)
-                        step = str(data.get('step') or job_name or '').strip().lower()
-                        stage = job['progress'].get('stage') or 'converting'
-                        if 'verif' in step:
-                            stage = 'verifying'
-                        elif 'compress' in step or 'convert' in step:
-                            stage = 'converting'
-                        job['progress']['stage'] = stage
-                        job['progress']['percent'] = float(percent_value)
-                        label = 'Verifying' if stage == 'verifying' else 'Converting'
-                        file_name = (job['progress'].get('file') or '').strip()
-                        file_suffix = f" ({file_name})" if file_name else ''
-                        job['progress']['message'] = f"{label}: {percent_value:.0f}%{file_suffix}"
-                        job['updated_at'] = time.time()
-                        return
-                    except (TypeError, ValueError):
-                        pass
-            # Ignore unhandled machine-readable records instead of logging raw JSON.
-            return
-
         percent_match = re.search(r'Compressed\s+([0-9.]+)%', message)
-        minimal_spinner_match = re.fullmatch(r'([|/\\-])\s+([0-9]{1,3})%\s+(.+)', message)
-        minimal_done_match = re.fullmatch(r'100%\s+Done', message, re.IGNORECASE)
+        minimal_progress_match = re.search(r'^\s*(?:[^0-9]{1,4}\s*)?([0-9]{1,3}(?:\.[0-9]+)?)%\s*(.*)$', message)
         numeric_match = re.fullmatch(r'\d{1,3}', message)
         convert_match = re.search(r'^\[CONVERT\]\s+(.+?)\s+->\s+(.+)$', message)
         verify_match = re.search(r'^\[VERIFY\]\s+(.+)$', message)
-
-        if minimal_done_match:
-            total = int(job['progress'].get('total') or 0)
-            done = int(job['progress'].get('done') or 0)
-            if total > 0:
-                job['progress']['done'] = max(done, total)
-            job['progress']['percent'] = 100.0
-            job['progress']['stage'] = 'done'
-            job['progress']['message'] = 'Conversion complete.'
-            job['updated_at'] = time.time()
-            return
-
-        if minimal_spinner_match:
-            percent_value = int(minimal_spinner_match.group(2))
-            status_hint = (minimal_spinner_match.group(3) or '').strip()
-            status_hint_lower = status_hint.lower()
-            stage = job['progress'].get('stage') or 'converting'
-            if 'verif' in status_hint_lower:
-                stage = 'verifying'
-            elif 'compress' in status_hint_lower or 'convert' in status_hint_lower:
-                stage = 'converting'
-            job['progress']['stage'] = stage
-            file_match = re.search(r'([^\s].*\.(?:nsp|nsz|xci|xcz|nca|ncz))', status_hint, re.IGNORECASE)
-            if file_match:
-                status_file = os.path.basename(file_match.group(1).strip())
-                if status_file:
-                    job['progress']['file'] = status_file
-            job['progress']['percent'] = float(percent_value)
-            label = 'Verifying' if stage == 'verifying' else 'Converting'
-            file_name = (job['progress'].get('file') or '').strip()
-            file_suffix = f" ({file_name})" if file_name else ''
-            job['progress']['message'] = f"{label}: {percent_value}%{file_suffix}"
-            job['updated_at'] = time.time()
-            return
 
         if numeric_match:
             try:
@@ -1436,6 +1310,33 @@ def _job_log(job_id, message):
                     file_name = (job['progress'].get('file') or '').strip()
                     file_suffix = f" ({file_name})" if file_name else ''
                     job['progress']['message'] = f"{label}: {percent_value}%{file_suffix}"
+                    job['updated_at'] = time.time()
+                    return
+            except ValueError:
+                pass
+        if minimal_progress_match:
+            try:
+                percent_value = float(minimal_progress_match.group(1))
+                if 0 <= percent_value <= 100:
+                    status_hint = (minimal_progress_match.group(2) or '').strip()
+                    status_hint_lower = status_hint.lower()
+                    stage = job['progress'].get('stage') or 'converting'
+                    if 'verif' in status_hint_lower:
+                        stage = 'verifying'
+                    elif 'compress' in status_hint_lower or 'convert' in status_hint_lower:
+                        stage = 'converting'
+                    job['progress']['stage'] = stage
+                    file_match = re.search(r'([^\s].*\.(?:nsp|nsz|xci|xcz|nca|ncz))', status_hint, re.IGNORECASE)
+                    if file_match:
+                        status_file = os.path.basename(file_match.group(1).strip())
+                        if status_file:
+                            job['progress']['file'] = status_file
+                    job['progress']['percent'] = percent_value
+                    label = 'Verifying' if stage == 'verifying' else 'Converting'
+                    file_name = (job['progress'].get('file') or '').strip()
+                    file_suffix = f" ({file_name})" if file_name else ''
+                    suffix = f" - {status_hint}" if status_hint else ''
+                    job['progress']['message'] = f"{label}: {percent_value:.0f}%{file_suffix}{suffix}"
                     job['updated_at'] = time.time()
                     return
             except ValueError:
@@ -1517,39 +1418,18 @@ def _job_finish(job_id, results):
         progress = job.setdefault('progress', {})
         kind = str(job.get('kind') or '')
         total = int(progress.get('total') or 0)
-        done = int(progress.get('done') or 0)
         if kind == 'convert-single':
             total = max(total, 1)
             progress['total'] = total
-            progress['done'] = max(done, total)
+            progress['done'] = total
         else:
             if total > 0:
-                progress['done'] = max(done, total)
+                progress['done'] = total
             else:
                 estimated_total = int(job['summary'].get('converted', 0) or 0) + int(job['summary'].get('skipped', 0) or 0)
                 if estimated_total > 0:
                     progress['total'] = estimated_total
-                    progress['done'] = max(done, estimated_total)
-        status = job.get('status')
-        terminal_message = None
-        if status == 'success':
-            progress['percent'] = 100.0
-            progress['stage'] = 'done'
-            progress['message'] = 'Conversion complete.'
-            progress['file'] = ''
-            terminal_message = 'Conversion complete.'
-        elif status == 'cancelled':
-            progress['stage'] = 'cancelled'
-            progress['message'] = 'Conversion cancelled.'
-            terminal_message = 'Conversion cancelled.'
-        else:
-            progress['stage'] = 'failed'
-            progress['message'] = 'Conversion failed.'
-            terminal_message = 'Conversion failed.'
-        if terminal_message:
-            logs = job.setdefault('logs', [])
-            if not logs or logs[-1] != terminal_message:
-                logs.append(terminal_message)
+                    progress['done'] = estimated_total
         job['updated_at'] = time.time()
         if len(conversion_jobs) > conversion_job_limit:
             oldest = sorted(conversion_jobs.values(), key=lambda item: item['created_at'])[:len(conversion_jobs) - conversion_job_limit]
@@ -2048,17 +1928,6 @@ def _apply_download_search_char_replacements(text, downloads_settings):
     return out
 
 
-def _normalize_download_search_query(text, downloads_settings=None):
-    normalized = _apply_download_search_char_replacements(text, downloads_settings)
-    try:
-        normalized = unicodedata.normalize('NFKD', normalized)
-        normalized = normalized.encode('ascii', 'ignore').decode('ascii')
-    except Exception:
-        normalized = str(normalized or '')
-    normalized = re.sub(r"[^A-Za-z0-9\s]+", " ", normalized)
-    return re.sub(r"\s+", " ", normalized).strip()
-
-
 @app.get('/api/requests/search')
 @access_required('admin')
 def request_prowlarr_search_api():
@@ -2083,8 +1952,8 @@ def request_prowlarr_search_api():
         finally:
             titles.release_titledb()
 
-    base_query = _normalize_download_search_query(resolved_name or title_id, downloads)
-    prefix = _normalize_download_search_query(downloads.get('search_prefix') or '', downloads)
+    base_query = _apply_download_search_char_replacements(resolved_name or title_id, downloads)
+    prefix = (downloads.get('search_prefix') or '').strip()
     full_query = base_query
     if prefix and not full_query.lower().startswith(prefix.lower()):
         full_query = f"{prefix} {full_query}".strip()
@@ -2668,10 +2537,10 @@ def downloads_search():
         except (TypeError, ValueError):
             timeout_seconds = 15
         timeout_seconds = max(5, min(timeout_seconds, 180))
-        full_query = _normalize_download_search_query(query, downloads)
+        full_query = _apply_download_search_char_replacements(query, downloads)
         if apply_settings:
-            prefix = _normalize_download_search_query(downloads.get('search_prefix') or '', downloads)
-            suffix = _normalize_download_search_query(downloads.get('search_suffix') or '', downloads)
+            prefix = (downloads.get('search_prefix') or '').strip()
+            suffix = (downloads.get('search_suffix') or '').strip()
             if prefix and not full_query.lower().startswith(prefix.lower()):
                 full_query = f"{prefix} {full_query}".strip()
             if suffix and not full_query.lower().endswith(suffix.lower()):
@@ -2855,32 +2724,20 @@ def manage_convert_job():
 
     def _run_job():
         with app.app_context():
-            try:
-                results = convert_to_nsz(
-                    command_template=command,
-                    delete_original=delete_original,
-                    dry_run=dry_run,
-                    verbose=verbose,
-                    log_cb=lambda msg: _job_log(job_id, msg),
-                    progress_cb=lambda done, total: _job_progress(job_id, done, total),
-                    stream_output=True,
-                    threads=threads,
-                    library_id=library_id,
-                    cancel_cb=lambda: _job_is_cancelled(job_id),
-                    timeout_seconds=timeout_seconds,
-                    min_size_bytes=200 * 1024 * 1024
-                )
-            except Exception as e:
-                logger.exception("Conversion job %s crashed", job_id)
-                results = {
-                    'success': False,
-                    'converted': 0,
-                    'skipped': 0,
-                    'deleted': 0,
-                    'moved': 0,
-                    'errors': [str(e)],
-                    'details': []
-                }
+            results = convert_to_nsz(
+                command_template=command,
+                delete_original=delete_original,
+                dry_run=dry_run,
+                verbose=verbose,
+                log_cb=lambda msg: _job_log(job_id, msg),
+                progress_cb=lambda done, total: _job_progress(job_id, done, total),
+                stream_output=True,
+                threads=threads,
+                library_id=library_id,
+                cancel_cb=lambda: _job_is_cancelled(job_id),
+                timeout_seconds=timeout_seconds,
+                min_size_bytes=200 * 1024 * 1024
+            )
             _job_finish(job_id, results)
             if results.get('success') and not dry_run:
                 post_library_change()
@@ -2907,31 +2764,19 @@ def manage_convert_single_job():
 
     def _run_job():
         with app.app_context():
-            try:
-                results = convert_single_to_nsz(
-                    file_id=int(file_id),
-                    command_template=command,
-                    delete_original=delete_original,
-                    dry_run=dry_run,
-                    verbose=verbose,
-                    log_cb=lambda msg: _job_log(job_id, msg),
-                    progress_cb=lambda done, total: _job_progress(job_id, done, total),
-                    stream_output=True,
-                    threads=threads,
-                    cancel_cb=lambda: _job_is_cancelled(job_id),
-                    timeout_seconds=timeout_seconds
-                )
-            except Exception as e:
-                logger.exception("Single conversion job %s crashed", job_id)
-                results = {
-                    'success': False,
-                    'converted': 0,
-                    'skipped': 0,
-                    'deleted': 0,
-                    'moved': 0,
-                    'errors': [str(e)],
-                    'details': []
-                }
+            results = convert_single_to_nsz(
+                file_id=int(file_id),
+                command_template=command,
+                delete_original=delete_original,
+                dry_run=dry_run,
+                verbose=verbose,
+                log_cb=lambda msg: _job_log(job_id, msg),
+                progress_cb=lambda done, total: _job_progress(job_id, done, total),
+                stream_output=True,
+                threads=threads,
+                cancel_cb=lambda: _job_is_cancelled(job_id),
+                timeout_seconds=timeout_seconds
+            )
             _job_finish(job_id, results)
             if results.get('success') and not dry_run:
                 post_library_change()
@@ -3294,26 +3139,17 @@ def get_all_titles_api():
         except Exception:
             return False
 
-    def _normalize_library_search_text(text):
-        try:
-            normalized = unicodedata.normalize('NFKD', str(text or ''))
-            normalized = normalized.encode('ascii', 'ignore').decode('ascii')
-        except Exception:
-            normalized = str(text or '')
-        normalized = re.sub(r"[^A-Za-z0-9\s]+", " ", normalized)
-        return re.sub(r"\s+", " ", normalized).strip().lower()
-
     def _filter_games(games, search=None, types=None, owned=None, updates=None, completion=None, genre=None, recognized=None):
         out = games
         if search:
-            q = _normalize_library_search_text(search)
+            q = str(search).strip().lower()
             if q:
                 out = [
                     g for g in out
-                    if q in _normalize_library_search_text(g.get('app_id') or '')
-                    or q in _normalize_library_search_text(g.get('title_id') or '')
-                    or q in _normalize_library_search_text(g.get('name') or '')
-                    or q in _normalize_library_search_text(g.get('title_id_name') or '')
+                    if q in str(g.get('app_id') or '').lower()
+                    or q in str(g.get('title_id') or '').lower()
+                    or q in str(g.get('name') or '').lower()
+                    or q in str(g.get('title_id_name') or '').lower()
                 ]
         if types:
             allowed = {t.strip().upper() for t in str(types).split(',') if t.strip()}

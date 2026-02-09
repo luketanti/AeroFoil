@@ -7,37 +7,6 @@ import requests
 logger = logging.getLogger("downloads.prowlarr")
 
 
-def _normalize_numeric_list(values):
-    if values is None:
-        return []
-    if isinstance(values, str):
-        raw_items = values.split(",")
-    elif isinstance(values, (list, tuple, set)):
-        raw_items = values
-    else:
-        raw_items = [values]
-    normalized = []
-    for item in raw_items:
-        if isinstance(item, int):
-            normalized.append(str(item))
-            continue
-        if isinstance(item, str):
-            value = item.strip()
-            if not value:
-                continue
-            # Allow legacy single-string lists like "43,48,50".
-            if "," in value:
-                for part in value.split(","):
-                    part = part.strip()
-                    if part.isdigit():
-                        normalized.append(part)
-                continue
-            if value.isdigit():
-                normalized.append(value)
-    # Preserve order while removing duplicates.
-    return list(dict.fromkeys(normalized))
-
-
 class ProwlarrClient:
     def __init__(self, base_url, api_key, timeout_seconds=15):
         self.base_url = base_url.rstrip("/") + "/"
@@ -66,12 +35,20 @@ class ProwlarrClient:
 
     def search(self, query, indexer_ids=None, categories=None, limit=None):
         params = {"query": query}
-        normalized_indexers = _normalize_numeric_list(indexer_ids)
-        if normalized_indexers:
-            params["indexerIds"] = ",".join(normalized_indexers)
-        normalized_categories = _normalize_numeric_list(categories)
-        if normalized_categories:
-            params["categories"] = ",".join(normalized_categories)
+        if indexer_ids:
+            params["indexerIds"] = ",".join(str(i) for i in indexer_ids)
+        if categories:
+            normalized = []
+            for item in categories:
+                if isinstance(item, int):
+                    normalized.append(str(item))
+                    continue
+                if isinstance(item, str):
+                    value = item.strip()
+                    if value.isdigit():
+                        normalized.append(value)
+            if normalized:
+                params["categories"] = ",".join(normalized)
         results = self._get("/api/v1/search", params=params)
         normalized = [_normalize_result(item) for item in results or []]
         if limit:
