@@ -42,6 +42,7 @@ import uuid
 import re
 import secrets
 import gc
+import ctypes
 
 from app.db import add_access_event, get_access_events
 
@@ -66,6 +67,25 @@ _ICON_SIZE = (300, 300)
 _BANNER_SIZE = (920, 520)
 _WEB_ICON_SIZE = (300, 300)
 _WEB_BANNER_SIZE = (640, 360)
+try:
+    _libc = ctypes.CDLL("libc.so.6")
+    _malloc_trim = getattr(_libc, "malloc_trim", None)
+    if _malloc_trim is not None:
+        _malloc_trim.argtypes = [ctypes.c_size_t]
+        _malloc_trim.restype = ctypes.c_int
+except Exception:
+    _malloc_trim = None
+
+def _release_process_memory():
+    try:
+        gc.collect()
+    except Exception:
+        pass
+    if _malloc_trim is not None:
+        try:
+            _malloc_trim(0)
+        except Exception:
+            pass
 
 def _media_variant_dirname(media_kind, size_override=None):
     if media_kind == 'icon':
@@ -342,6 +362,8 @@ def run_library_maintenance():
             logger.warning("Library maintenance reported errors: %s", results.get('errors'))
     except Exception as e:
         logger.error("Error during library maintenance job: %s", e)
+    finally:
+        _release_process_memory()
 
 def _reschedule_library_maintenance(app):
     try:
@@ -529,13 +551,21 @@ def _split_genres_value(raw):
     return out
 
 def _build_titles_metadata_cache():
-    title_ids = [row.title_id for row in db.session.query(Titles.title_id).all() if row.title_id]
     genres_map = {}
     genre_title_ids = {}
     title_name_map = {}
     unrecognized_title_ids = set()
 
-    with titles.titledb_session():
+    with titles.titledb_session() as titledb_loaded:
+        if not titledb_loaded:
+            return {
+                'genres': [],
+                'title_name_map': {},
+                'genre_title_ids': {},
+                'unrecognized_title_ids': set(),
+            }
+
+        title_ids = [row.title_id for row in db.session.query(Titles.title_id).all() if row.title_id]
         for tid in title_ids:
             normalized_tid = str(tid or '').strip().upper()
             if not normalized_tid:
@@ -613,6 +643,23 @@ def _get_discovery_sections(limit=12):
             payload = shop_sections_cache['payload']
 
     if payload is None:
+        if SHOP_SECTIONS_CACHE_TTL_S is None or SHOP_SECTIONS_CACHE_TTL_S > 0:
+            disk_cache = _load_shop_sections_cache_from_disk()
+            if (
+                disk_cache
+                and disk_cache.get('limit') == max(limit, 50)
+                and str(disk_cache.get('state_token') or '') == state_token
+            ):
+                disk_payload = disk_cache.get('payload')
+                disk_ts = float(disk_cache.get('timestamp') or 0)
+                disk_ok = True
+                if SHOP_SECTIONS_CACHE_TTL_S is not None:
+                    disk_ok = (now - disk_ts) <= SHOP_SECTIONS_CACHE_TTL_S
+                if disk_payload and disk_ok:
+                    payload = disk_payload
+                    _store_shop_sections_cache(payload, max(limit, 50), disk_ts, state_token, persist_disk=False)
+
+    if payload is None:
         payload = _build_shop_sections_payload(max(limit, 50))
         if SHOP_SECTIONS_CACHE_TTL_S is None or SHOP_SECTIONS_CACHE_TTL_S > 0:
             _store_shop_sections_cache(payload, max(limit, 50), now, state_token, persist_disk=True)
@@ -633,6 +680,7 @@ def _get_discovery_sections(limit=12):
 # Set to None to disable expiry (cache refreshes on library rebuild).
 SHOP_SECTIONS_CACHE_TTL_S = _read_cache_ttl('SHOP_SECTIONS_CACHE_TTL_S', None)
 SHOP_SECTIONS_ALL_ITEMS_CAP = _read_cache_ttl('SHOP_SECTIONS_ALL_ITEMS_CAP', 300)
+SHOP_SECTIONS_ALL_ITEMS_CAP_NO_TITLEDB = _read_cache_ttl('SHOP_SECTIONS_ALL_ITEMS_CAP_NO_TITLEDB', 120)
 SHOP_SECTIONS_MAX_IN_MEMORY_BYTES = _read_cache_ttl('SHOP_SECTIONS_MAX_IN_MEMORY_BYTES', 4 * 1024 * 1024)
 MEDIA_INDEX_TTL_S = _read_cache_ttl('MEDIA_INDEX_TTL_S', None)
 REQUEST_SETTINGS_SYNC_INTERVAL_S = _read_cache_ttl('REQUEST_SETTINGS_SYNC_INTERVAL_S', 5)
@@ -677,11 +725,15 @@ def _estimate_json_size_bytes(payload):
 
 def _store_shop_sections_cache(payload, limit, timestamp, state_token, persist_disk=True):
     cache_payload = payload
+    if '::missing' in str(state_token or ''):
+        # Keep cold-boot payload on disk only; avoid retaining large placeholder payloads in RAM.
+        cache_payload = None
+
     max_bytes = SHOP_SECTIONS_MAX_IN_MEMORY_BYTES
-    if max_bytes is not None:
+    if cache_payload is not None and max_bytes is not None:
         try:
             max_bytes = max(0, int(max_bytes))
-            payload_size = _estimate_json_size_bytes(payload)
+            payload_size = _estimate_json_size_bytes(cache_payload)
             if payload_size is not None and payload_size > max_bytes:
                 logger.info(
                     "Skipping in-memory shop sections cache (%s bytes > %s bytes); using disk cache only.",
@@ -812,8 +864,10 @@ def _build_shop_sections_payload(limit):
 
     info_cache = {}
 
-    with titles.titledb_session():
+    with titles.titledb_session() as titledb_loaded:
         def _get_info(lookup_id):
+            if not titledb_loaded:
+                return {}
             key = (lookup_id or '').strip().upper()
             if not key:
                 return {}
@@ -832,8 +886,14 @@ def _build_shop_sections_payload(limit):
             if row.app_type == APP_TYPE_DLC:
                 app_info = _get_info(app_id) or base_info
 
-            name = (app_info or {}).get('name') or app_id
-            title_name = (base_info or {}).get('name') or name
+            if titledb_loaded:
+                name = (app_info or {}).get('name') or app_id
+                title_name = (base_info or {}).get('name') or name
+                category = (base_info or {}).get('category', '')
+            else:
+                name = title_id or app_id
+                title_name = title_id or name
+                category = ''
             return {
                 'name': name,
                 'title_name': title_name,
@@ -841,7 +901,7 @@ def _build_shop_sections_payload(limit):
                 'app_id': app_id,
                 'app_version': row.app_version,
                 'app_type': row.app_type,
-                'category': (base_info or {}).get('category', ''),
+                'category': category,
                 'icon_url': f'/api/shop/icon/{title_id}' if title_id else '',
                 'url': f"/api/get_game/{int(row.file_id)}#{row.filename}",
                 'size': int(row.size or 0),
@@ -904,7 +964,10 @@ def _build_shop_sections_payload(limit):
         all_total = len(base_items) + len(update_items_full) + len(dlc_items_full)
         all_limit = None
         if SHOP_SECTIONS_ALL_ITEMS_CAP is not None:
-            all_limit = max(limit, int(SHOP_SECTIONS_ALL_ITEMS_CAP))
+            cap_value = int(SHOP_SECTIONS_ALL_ITEMS_CAP)
+            if not titledb_loaded and SHOP_SECTIONS_ALL_ITEMS_CAP_NO_TITLEDB is not None:
+                cap_value = min(cap_value, int(SHOP_SECTIONS_ALL_ITEMS_CAP_NO_TITLEDB))
+            all_limit = max(limit, cap_value)
 
         all_items = sorted(
             base_items + update_items_full + dlc_items_full,
@@ -4474,11 +4537,14 @@ def post_library_change():
             with _media_cache_lock:
                 _media_cache_index['icon'].clear()
                 _media_cache_index['banner'].clear()
-            now = time.time()
-            payload = _build_shop_sections_payload(50)
-            _store_shop_sections_cache(payload, 50, now, _get_titledb_aware_state_token(), persist_disk=True)
+            state_token = _get_titledb_aware_state_token()
+            if '::missing' not in state_token:
+                now = time.time()
+                payload = _build_shop_sections_payload(50)
+                _store_shop_sections_cache(payload, 50, now, state_token, persist_disk=True)
         finally:
             titles.release_titledb()
+            _release_process_memory()
             with library_rebuild_lock:
                 library_rebuild_status['in_progress'] = False
                 library_rebuild_status['updated_at'] = time.time()
