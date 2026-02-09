@@ -1314,6 +1314,73 @@ def _job_log(job_id, message):
         job = conversion_jobs.get(job_id)
         if not job:
             return
+        # NSZ --machine-readable emits JSON records. Prefer these over regex parsing.
+        try:
+            payload = json.loads(message)
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            error_text = payload.get('error')
+            warning_text = payload.get('warning')
+            job_name = payload.get('job')
+            data = payload.get('data') if isinstance(payload.get('data'), dict) else {}
+
+            if error_text:
+                text = str(error_text).strip()
+                if text:
+                    job['logs'].append(text)
+                    job['progress']['message'] = text
+                    job['updated_at'] = time.time()
+                if len(job['logs']) > 500:
+                    job['logs'] = job['logs'][-500:]
+                return
+            if warning_text:
+                text = str(warning_text).strip()
+                if text:
+                    job['logs'].append(text)
+                    job['updated_at'] = time.time()
+                if len(job['logs']) > 500:
+                    job['logs'] = job['logs'][-500:]
+                return
+
+            if job_name == 'Complete':
+                total = int(job['progress'].get('total') or 0)
+                done = int(job['progress'].get('done') or 0)
+                if total > 0:
+                    job['progress']['done'] = max(done, total)
+                job['progress']['percent'] = 100.0
+                job['progress']['stage'] = 'done'
+                job['progress']['message'] = 'Conversion complete.'
+                job['updated_at'] = time.time()
+                return
+
+            if isinstance(data, dict):
+                source_size = data.get('sourceSize')
+                processed = data.get('processed')
+                if source_size is not None and processed is not None:
+                    try:
+                        source_size = max(int(source_size), 0)
+                        processed = max(int(processed), 0)
+                        percent_value = 0 if source_size <= 0 else min(100.0, (processed * 100.0) / source_size)
+                        step = str(data.get('step') or job_name or '').strip().lower()
+                        stage = job['progress'].get('stage') or 'converting'
+                        if 'verif' in step:
+                            stage = 'verifying'
+                        elif 'compress' in step or 'convert' in step:
+                            stage = 'converting'
+                        job['progress']['stage'] = stage
+                        job['progress']['percent'] = float(percent_value)
+                        label = 'Verifying' if stage == 'verifying' else 'Converting'
+                        file_name = (job['progress'].get('file') or '').strip()
+                        file_suffix = f" ({file_name})" if file_name else ''
+                        job['progress']['message'] = f"{label}: {percent_value:.0f}%{file_suffix}"
+                        job['updated_at'] = time.time()
+                        return
+                    except (TypeError, ValueError):
+                        pass
+            # Ignore unhandled machine-readable records instead of logging raw JSON.
+            return
+
         percent_match = re.search(r'Compressed\s+([0-9.]+)%', message)
         minimal_spinner_match = re.fullmatch(r'([|/\\-])\s+([0-9]{1,3})%\s+(.+)', message)
         minimal_done_match = re.fullmatch(r'100%\s+Done', message, re.IGNORECASE)

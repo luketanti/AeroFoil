@@ -1030,7 +1030,7 @@ def _format_nsz_command(command_template, input_file, output_file, threads=None)
     nsz_runner = _get_nsz_runner() or 'nsz'
     nsz_keys = _get_nsz_keys_file() or KEYS_FILE
     if not command_template:
-        command_template = '{nsz_runner} --keys "{nsz_keys}" --minimal-output --verify -C -o "{output_dir}" "{input_file}"'
+        command_template = '{nsz_runner} --keys "{nsz_keys}" --machine-readable --verify -C -o "{output_dir}" "{input_file}"'
     command = command_template.format(
         nsz_runner=nsz_runner,
         nsz_keys=nsz_keys,
