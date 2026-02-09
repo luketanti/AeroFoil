@@ -231,6 +231,9 @@ def init():
     def downloads_job():
         run_downloads_job(scan_cb=scan_library, post_cb=post_library_change)
 
+    def downloads_pending_job():
+        check_completed_downloads(scan_cb=scan_library, post_cb=post_library_change)
+
     def maintenance_job():
         run_library_maintenance()
 
