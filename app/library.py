@@ -1665,6 +1665,93 @@ def delete_older_updates(dry_run=False, verbose=False, detail_limit=200):
         results['success'] = False
     return results
 
+def delete_duplicates(dry_run=False, verbose=False, detail_limit=200):
+    results = {
+        'success': True,
+        'deleted': 0,
+        'skipped': 0,
+        'errors': [],
+        'details': []
+    }
+    detail_count = 0
+
+    def add_detail(message):
+        nonlocal detail_count
+        if (verbose or dry_run) and detail_count < detail_limit:
+            results['details'].append(message)
+            detail_count += 1
+
+    def file_rank(file_entry):
+        ext = str(file_entry.extension or '').strip().lower()
+        ext_priority = {
+            'nsz': 5,
+            'xcz': 4,
+            'nsp': 3,
+            'xci': 2,
+        }.get(ext, 1)
+        mtime = 0
+        try:
+            if file_entry.filepath and os.path.exists(file_entry.filepath):
+                mtime = int(os.path.getmtime(file_entry.filepath))
+        except Exception:
+            mtime = 0
+        return (ext_priority, mtime, _safe_int(file_entry.size), _safe_int(file_entry.id))
+
+    apps = Apps.query.filter(Apps.owned.is_(True)).all()
+    for app in apps:
+        app_files_list = [f for f in list(app.files or []) if f and f.filepath]
+        if len(app_files_list) <= 1:
+            results['skipped'] += 1
+            add_detail(f"Skip {app.app_id} v{app.app_version}: {len(app_files_list)} file(s).")
+            continue
+
+        ordered = sorted(app_files_list, key=file_rank, reverse=True)
+        keeper = ordered[0]
+        duplicates = ordered[1:]
+        add_detail(
+            f"Keep {app.app_id} v{app.app_version}: {keeper.filepath} "
+            f"(ext={keeper.extension or ''}, size={_safe_int(keeper.size)})."
+        )
+        for dup in duplicates:
+            dup_filepath = str(getattr(dup, 'filepath', '') or '')
+            dup_ext = str(getattr(dup, 'extension', '') or '')
+            dup_size = _safe_int(getattr(dup, 'size', 0))
+            try:
+                linked_apps_count = len(list(dup.apps or []))
+            except Exception:
+                linked_apps_count = 0
+            if linked_apps_count > 1:
+                results['skipped'] += 1
+                add_detail(f"Skip shared file {dup_filepath}: linked to {linked_apps_count} app records.")
+                continue
+
+            if dry_run:
+                results['deleted'] += 1
+                add_detail(
+                    f"Plan delete duplicate {app.app_id} v{app.app_version}: "
+                    f"{dup_filepath} (ext={dup_ext}, size={dup_size})."
+                )
+                continue
+
+            try:
+                if dup_filepath and os.path.exists(dup_filepath):
+                    os.remove(dup_filepath)
+                if dup_filepath:
+                    delete_file_by_filepath(dup_filepath)
+                results['deleted'] += 1
+                add_detail(
+                    f"Deleted duplicate {app.app_id} v{app.app_version}: "
+                    f"{dup_filepath} (ext={dup_ext}, size={dup_size})."
+                )
+            except Exception as e:
+                logger.error(f"Failed to delete duplicate file {dup_filepath}: {e}")
+                results['errors'].append(str(e))
+                add_detail(f"Error deleting duplicate {dup_filepath}: {e}.")
+
+    if results['errors']:
+        results['success'] = False
+    return results
+
 def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbose=False, detail_limit=200, log_cb=None, progress_cb=None, stream_output=False, threads=None, library_id=None, cancel_cb=None, timeout_seconds=None, min_size_bytes=None):
     results = {
         'success': True,

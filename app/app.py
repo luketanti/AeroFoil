@@ -22,7 +22,7 @@ flask.cli.show_server_banner = lambda *args: None
 from app.constants import *
 from app.settings import *
 from app.downloads import ProwlarrClient, test_torrent_client, run_downloads_job, manual_search_update, queue_download_url, search_update_options, check_completed_downloads, get_downloads_state, get_active_downloads
-from app.library import organize_library, delete_older_updates
+from app.library import organize_library, delete_older_updates, delete_duplicates
 from app.db import *
 from app.shop import *
 from app.auth import *
@@ -3106,6 +3106,17 @@ def manage_delete_updates():
     dry_run = bool(data.get('dry_run', False))
     verbose = bool(data.get('verbose', False))
     results = delete_older_updates(dry_run=dry_run, verbose=verbose)
+    if results.get('success') and not dry_run:
+        post_library_change()
+    return jsonify(results)
+
+@app.post('/api/manage/delete-duplicates')
+@access_required('admin')
+def manage_delete_duplicates():
+    data = request.json or {}
+    dry_run = bool(data.get('dry_run', False))
+    verbose = bool(data.get('verbose', False))
+    results = delete_duplicates(dry_run=dry_run, verbose=verbose)
     if results.get('success') and not dry_run:
         post_library_change()
     return jsonify(results)

@@ -94,6 +94,22 @@
                                                 onClick='deleteOlderUpdates()'>Delete older updates</button>
                                         </div>
                                     </div>
+                                    <div class="border rounded p-3">
+                                        <div class="fw-semibold">Delete duplicates</div>
+                                        <div class="text-muted small mb-2">Keep one owned file per app ID/version and remove duplicate file entries, even across different extensions.</div>
+                                        <div class="d-flex flex-wrap gap-3 align-items-center">
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="deleteDuplicatesDryRun" checked>
+                                                <label class="form-check-label" for="deleteDuplicatesDryRun">Dry run</label>
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="deleteDuplicatesVerbose">
+                                                <label class="form-check-label" for="deleteDuplicatesVerbose">Verbose</label>
+                                            </div>
+                                            <button type="button" id="deleteDuplicatesBtn" class="btn btn-danger ms-auto"
+                                                onClick='deleteDuplicates()'>Delete duplicates</button>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -308,6 +324,32 @@
             },
             complete: function () {
                 $('#deleteUpdatesBtn').prop('disabled', false);
+            }
+        });
+    }
+
+    function deleteDuplicates() {
+        $('#deleteDuplicatesBtn').prop('disabled', true);
+        data = {
+            dry_run: $('#deleteDuplicatesDryRun').is(':checked'),
+            verbose: $('#deleteDuplicatesVerbose').is(':checked')
+        }
+        $.ajax({
+            url: "/api/manage/delete-duplicates",
+            type: 'POST',
+            data: JSON.stringify(data),
+            contentType: "application/json",
+            success: function (result) {
+                if (result['success']) {
+                    showManageAlert(`Delete duplicates complete. Deleted ${result['deleted']} files. Skipped ${result['skipped']}.`, 'success');
+                    showManageOutput(result['details']);
+                } else {
+                    showManageAlert(`Delete duplicates failed: ${result['errors'].join('; ')}`, 'danger');
+                    showManageOutput(result['details']);
+                }
+            },
+            complete: function () {
+                $('#deleteDuplicatesBtn').prop('disabled', false);
             }
         });
     }
