@@ -432,8 +432,10 @@ shop_root_cache = {
     'encrypted': {},
 }
 _SHOP_ROOT_ENCRYPTED_CACHE_LIMIT = 8
+_TITLES_METADATA_CACHE_VERSION = 2
 titles_metadata_cache_lock = threading.Lock()
 titles_metadata_cache = {
+    'version': _TITLES_METADATA_CACHE_VERSION,
     'state_token': None,
     'genres': [],
     'title_name_map': {},
@@ -553,6 +555,35 @@ def _split_genres_value(raw):
         out.append(part)
     return out
 
+def _normalize_library_search_text(text):
+    value = str(text or '')
+    try:
+        value = unicodedata.normalize('NFKD', value)
+        value = value.encode('ascii', 'ignore').decode('ascii')
+    except Exception:
+        pass
+    value = re.sub(r"[^A-Za-z0-9\s]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip().lower()
+
+def _search_matches_normalized_text(query_normalized, field_value):
+    hay = _normalize_library_search_text(field_value)
+    if not hay:
+        return False
+    if query_normalized in hay:
+        return True
+
+    # Handle spacing/symbol differences (e.g. "you update" vs "youupdate").
+    query_compact = query_normalized.replace(' ', '')
+    hay_compact = hay.replace(' ', '')
+    if query_compact and query_compact in hay_compact:
+        return True
+
+    # Token-aware fallback so all query terms must be present.
+    terms = [t for t in query_normalized.split(' ') if t]
+    if terms and all(term in hay for term in terms):
+        return True
+    return False
+
 def _build_titles_metadata_cache():
     genres_map = {}
     genre_title_ids = {}
@@ -575,7 +606,7 @@ def _build_titles_metadata_cache():
                 continue
             info = titles.get_game_info(normalized_tid) or {}
             name = str(info.get('name') or '').strip()
-            title_name_map[normalized_tid] = name.lower()
+            title_name_map[normalized_tid] = _normalize_library_search_text(name)
             if _is_titledb_unrecognized(info):
                 unrecognized_title_ids.add(normalized_tid)
             for genre in _split_genres_value(info.get('category') or ''):
@@ -595,7 +626,10 @@ def _build_titles_metadata_cache():
 def _get_cached_titles_metadata():
     state_token = _get_titledb_aware_state_token()
     with titles_metadata_cache_lock:
-        if titles_metadata_cache.get('state_token') == state_token:
+        if (
+            titles_metadata_cache.get('state_token') == state_token
+            and int(titles_metadata_cache.get('version') or 0) == _TITLES_METADATA_CACHE_VERSION
+        ):
             return {
                 'genres': list(titles_metadata_cache.get('genres') or []),
                 'title_name_map': dict(titles_metadata_cache.get('title_name_map') or {}),
@@ -608,6 +642,7 @@ def _get_cached_titles_metadata():
 
     fresh = _build_titles_metadata_cache()
     with titles_metadata_cache_lock:
+        titles_metadata_cache['version'] = _TITLES_METADATA_CACHE_VERSION
         titles_metadata_cache['state_token'] = state_token
         titles_metadata_cache['genres'] = list(fresh.get('genres') or [])
         titles_metadata_cache['title_name_map'] = dict(fresh.get('title_name_map') or {})
@@ -3626,21 +3661,22 @@ def get_all_titles_api():
         query = query.filter(and_(Apps.app_type == APP_TYPE_BASE, Titles.complete.is_(False)))
 
     if search:
-        search_lower = search.lower()
-        search_term = f"%{search_lower}%"
-        titles_metadata = _get_cached_titles_metadata()
-        title_ids_from_search = [
-            title_id
-            for title_id, lowered_name in (titles_metadata.get('title_name_map') or {}).items()
-            if search_lower in str(lowered_name or '')
-        ]
-        search_filters = [
-            func.lower(Apps.app_id).like(search_term),
-            func.lower(Titles.title_id).like(search_term),
-        ]
-        if title_ids_from_search:
-            search_filters.append(Titles.title_id.in_(title_ids_from_search))
-        query = query.filter(or_(*search_filters))
+        search_normalized = _normalize_library_search_text(search)
+        if search_normalized:
+            search_term = f"%{search_normalized}%"
+            titles_metadata = _get_cached_titles_metadata()
+            title_ids_from_search = [
+                title_id
+                for title_id, lowered_name in (titles_metadata.get('title_name_map') or {}).items()
+                if _search_matches_normalized_text(search_normalized, lowered_name)
+            ]
+            search_filters = [
+                func.lower(Apps.app_id).like(search_term),
+                func.lower(Titles.title_id).like(search_term),
+            ]
+            if title_ids_from_search:
+                search_filters.append(Titles.title_id.in_(title_ids_from_search))
+            query = query.filter(or_(*search_filters))
 
     if genre or recognized in ('recognized', 'unrecognized'):
         if titles_metadata is None:
@@ -3976,6 +4012,7 @@ def set_manual_title_info_api():
         shop_sections_cache['limit'] = None
         shop_sections_cache['state_token'] = None
     with titles_metadata_cache_lock:
+        titles_metadata_cache['version'] = _TITLES_METADATA_CACHE_VERSION
         titles_metadata_cache['state_token'] = None
         titles_metadata_cache['genres'] = []
         titles_metadata_cache['title_name_map'] = {}
@@ -4530,6 +4567,7 @@ def post_library_change():
                 shop_sections_cache['state_token'] = None
             _invalidate_shop_root_cache()
             with titles_metadata_cache_lock:
+                titles_metadata_cache['version'] = _TITLES_METADATA_CACHE_VERSION
                 titles_metadata_cache['state_token'] = None
                 titles_metadata_cache['genres'] = []
                 titles_metadata_cache['title_name_map'] = {}
