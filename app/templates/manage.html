@@ -2,6 +2,31 @@
 {% block content %}
 {% include 'nav.html' %}
 
+<style>
+    #manageDiagnosticsResizeShell {
+        height: 280px;
+        min-height: 180px;
+        min-width: 320px;
+        resize: both;
+        overflow: auto;
+        border: 1px solid var(--bs-border-color);
+        border-radius: 0.375rem;
+        background: var(--bs-body-bg);
+    }
+
+    #manageDiagnosticsResizeShell.diagnostics-expanded {
+        height: clamp(360px, 60vh, 900px);
+    }
+
+    #manageDiagnostics {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        border: 0;
+        background: transparent;
+    }
+</style>
+
 <div class="container-fluid setting-body">
     <div class="row">
         <div class="col">
@@ -185,10 +210,13 @@
                                 <details id="manageDiagnosticsDetails">
                                     <summary class="fw-semibold">Diagnostics</summary>
                                     <div class="text-muted small mt-2 mb-2">Live memory and scan diagnostics.</div>
-                                    <div class="d-flex justify-content-end mb-2">
+                                    <div class="d-flex justify-content-end gap-2 mb-2">
+                                        <button class="btn btn-outline-secondary btn-sm" type="button" id="expandDiagnosticsBtn" onClick="toggleDiagnosticsExpand()">Expand</button>
                                         <button class="btn btn-outline-secondary btn-sm" type="button" id="copyDiagnosticsBtn" onClick="copyDiagnostics()">Copy</button>
                                     </div>
-                                    <pre id="manageDiagnostics" class="mb-0 small" style="max-height: 280px; overflow: auto;">Loading diagnostics...</pre>
+                                    <div id="manageDiagnosticsResizeShell">
+                                        <pre id="manageDiagnostics" class="mb-0 small">Loading diagnostics...</pre>
+                                    </div>
                                 </details>
                             </div>
                         </div>
@@ -729,6 +757,21 @@
         } else {
             showManageAlert('Clipboard not available in this browser.', 'danger');
         }
+    }
+
+    function toggleDiagnosticsExpand() {
+        const shell = $('#manageDiagnosticsResizeShell');
+        const btn = $('#expandDiagnosticsBtn');
+        const isExpanded = shell.hasClass('diagnostics-expanded');
+        if (isExpanded) {
+            shell.removeClass('diagnostics-expanded');
+            btn.text('Expand');
+            btn.attr('aria-pressed', 'false');
+            return;
+        }
+        shell.addClass('diagnostics-expanded');
+        btn.text('Collapse');
+        btn.attr('aria-pressed', 'true');
     }
 
     let diagnosticsTimer = null;
