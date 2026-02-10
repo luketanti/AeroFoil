@@ -2,6 +2,9 @@ import os
 import sys
 import re
 import json
+import sqlite3
+import gc
+import ctypes
 import unicodedata
 import requests
 import threading
@@ -96,6 +99,12 @@ _titles_desc_by_title_id = None
 _titles_images_by_title_id = None
 _versions_db = None
 _versions_txt_db = None
+_cnmts_index_ready = False
+_titles_index_ready = False
+_versions_index_ready = False
+_versions_index_file = os.path.join(TITLEDB_DIR, 'versions.index.sqlite3')
+_cnmts_index_file = os.path.join(TITLEDB_DIR, 'cnmts.index.sqlite3')
+_titles_index_file = os.path.join(TITLEDB_DIR, 'titles.index.sqlite3')
 _titledb_lock = threading.Lock()
 _missing_titledb_log_lock = threading.Lock()
 _missing_titledb_last_log = {}
@@ -106,6 +115,18 @@ _MISSING_FILES_RECOVERY_COOLDOWN_S = 60
 _missing_files_recovery_last_attempt_ts = 0.0
 _missing_files_recovery_in_progress = False
 _titledb_data_signature = None
+_title_lookup_cache = {}
+_title_lookup_cache_lock = threading.Lock()
+_TITLE_LOOKUP_CACHE_MAX = 4096
+
+try:
+    _libc = ctypes.CDLL("libc.so.6")
+    _malloc_trim = getattr(_libc, "malloc_trim", None)
+    if _malloc_trim is not None:
+        _malloc_trim.argtypes = [ctypes.c_size_t]
+        _malloc_trim.restype = ctypes.c_int
+except Exception:
+    _malloc_trim = None
 
 class CorruptedTitleDBFileError(Exception):
     def __init__(self, file_path, label, original_error):
@@ -120,6 +141,9 @@ def _reset_titledb_state():
     global _titles_by_title_id
     global _versions_db
     global _versions_txt_db
+    global _cnmts_index_ready
+    global _titles_index_ready
+    global _versions_index_ready
     global _titles_desc_db
     global _titles_desc_by_title_id
     global _titles_images_by_title_id
@@ -130,10 +154,15 @@ def _reset_titledb_state():
     _titles_by_title_id = None
     _versions_db = None
     _versions_txt_db = None
+    _cnmts_index_ready = False
+    _titles_index_ready = False
+    _versions_index_ready = False
     _titles_desc_db = None
     _titles_desc_by_title_id = None
     _titles_images_by_title_id = None
     _titles_db_loaded = False
+    with _title_lookup_cache_lock:
+        _title_lookup_cache.clear()
 
 def _load_json_file(path, label):
     try:
@@ -141,6 +170,462 @@ def _load_json_file(path, label):
             return json.load(f)
     except json.JSONDecodeError as e:
         raise CorruptedTitleDBFileError(path, label, e) from e
+
+def _versions_source_signature(path):
+    stat = os.stat(path)
+    mtime_ns = getattr(stat, 'st_mtime_ns', int(stat.st_mtime * 1e9))
+    return f"{int(stat.st_size)}:{int(mtime_ns)}"
+
+def _open_versions_index_db(path):
+    conn = sqlite3.connect(path, timeout=30)
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
+
+def _release_process_memory():
+    try:
+        gc.collect()
+    except Exception:
+        pass
+    if _malloc_trim is not None:
+        try:
+            _malloc_trim(0)
+        except Exception:
+            pass
+
+def _normalize_title_search_text(value):
+    text = str(value or '')
+    try:
+        text = unicodedata.normalize('NFKD', text)
+        text = text.encode('ascii', 'ignore').decode('ascii')
+    except Exception:
+        pass
+    text = re.sub(r"[^A-Za-z0-9\s]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+def _read_versions_index_meta(conn, key):
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (str(key),)).fetchone()
+    return row[0] if row else None
+
+def _ensure_versions_index(versions_file):
+    global _versions_index_ready
+    expected_signature = _versions_source_signature(versions_file)
+
+    conn = None
+    try:
+        conn = _open_versions_index_db(_versions_index_file)
+        with conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS versions ("
+                "title_id TEXT NOT NULL, "
+                "version INTEGER NOT NULL, "
+                "release_date TEXT, "
+                "PRIMARY KEY (title_id, version))"
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_versions_title_id ON versions(title_id)")
+            signature = _read_versions_index_meta(conn, "source_signature")
+            rows_count = _read_versions_index_meta(conn, "rows_count")
+            if signature == expected_signature and rows_count is not None:
+                _versions_index_ready = True
+                return True
+    except Exception as e:
+        logger.warning(f"Failed to validate versions index, rebuilding: {e}")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    logger.info("Building versions index from versions.json...")
+    data = _load_json_file(versions_file, 'versions')
+    if not isinstance(data, dict):
+        raise ValueError("Invalid versions.json structure: expected object at root")
+
+    tmp_db = _versions_index_file + ".tmp"
+    try:
+        if os.path.exists(tmp_db):
+            os.remove(tmp_db)
+    except Exception:
+        pass
+
+    rows_count = 0
+    conn = _open_versions_index_db(tmp_db)
+    try:
+        with conn:
+            conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            conn.execute(
+                "CREATE TABLE versions ("
+                "title_id TEXT NOT NULL, "
+                "version INTEGER NOT NULL, "
+                "release_date TEXT, "
+                "PRIMARY KEY (title_id, version))"
+            )
+            conn.execute("CREATE INDEX idx_versions_title_id ON versions(title_id)")
+
+            batch = []
+            batch_size = 5000
+            for title_id, versions in data.items():
+                if not isinstance(versions, dict):
+                    continue
+                title_key = str(title_id or '').strip().lower()
+                if not title_key:
+                    continue
+                for version_key, release_date in versions.items():
+                    try:
+                        version_int = int(version_key)
+                    except Exception:
+                        continue
+                    batch.append((title_key, version_int, release_date))
+                    if len(batch) >= batch_size:
+                        conn.executemany(
+                            "INSERT OR REPLACE INTO versions (title_id, version, release_date) VALUES (?, ?, ?)",
+                            batch,
+                        )
+                        rows_count += len(batch)
+                        batch.clear()
+            if batch:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO versions (title_id, version, release_date) VALUES (?, ?, ?)",
+                    batch,
+                )
+                rows_count += len(batch)
+
+            conn.executemany(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                [
+                    ("source_signature", expected_signature),
+                    ("rows_count", str(int(rows_count))),
+                ],
+            )
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    os.replace(tmp_db, _versions_index_file)
+    _versions_index_ready = True
+    logger.info("Versions index ready with %s rows.", rows_count)
+    _release_process_memory()
+    return True
+
+def _versions_index_row_count():
+    if not _versions_index_ready:
+        return 0
+    try:
+        conn = _open_versions_index_db(_versions_index_file)
+        try:
+            value = _read_versions_index_meta(conn, "rows_count")
+            return int(value) if value is not None else 0
+        finally:
+            conn.close()
+    except Exception:
+        return 0
+
+def _ensure_cnmts_index(cnmts_file):
+    global _cnmts_index_ready
+    expected_signature = _versions_source_signature(cnmts_file)
+
+    conn = None
+    try:
+        conn = _open_versions_index_db(_cnmts_index_file)
+        with conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS cnmts ("
+                "app_id TEXT NOT NULL, "
+                "version_key TEXT NOT NULL, "
+                "sort_order INTEGER NOT NULL, "
+                "version_int INTEGER, "
+                "title_type INTEGER, "
+                "other_application_id TEXT, "
+                "PRIMARY KEY (app_id, version_key))"
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_cnmts_app_sort ON cnmts(app_id, sort_order DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_cnmts_title_type_other ON cnmts(title_type, other_application_id)")
+            signature = _read_versions_index_meta(conn, "source_signature")
+            rows_count = _read_versions_index_meta(conn, "rows_count")
+            if signature == expected_signature and rows_count is not None:
+                _cnmts_index_ready = True
+                return True
+    except Exception as e:
+        logger.warning(f"Failed to validate cnmts index, rebuilding: {e}")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    logger.info("Building cnmts index from cnmts.json...")
+    data = _load_json_file(cnmts_file, 'cnmts')
+    if not isinstance(data, dict):
+        raise ValueError("Invalid cnmts.json structure: expected object at root")
+
+    tmp_db = _cnmts_index_file + ".tmp"
+    try:
+        if os.path.exists(tmp_db):
+            os.remove(tmp_db)
+    except Exception:
+        pass
+
+    conn = _open_versions_index_db(tmp_db)
+    try:
+        with conn:
+            conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            conn.execute(
+                "CREATE TABLE cnmts ("
+                "app_id TEXT NOT NULL, "
+                "version_key TEXT NOT NULL, "
+                "sort_order INTEGER NOT NULL, "
+                "version_int INTEGER, "
+                "title_type INTEGER, "
+                "other_application_id TEXT, "
+                "PRIMARY KEY (app_id, version_key))"
+            )
+            conn.execute("CREATE INDEX idx_cnmts_app_sort ON cnmts(app_id, sort_order DESC)")
+            conn.execute("CREATE INDEX idx_cnmts_title_type_other ON cnmts(title_type, other_application_id)")
+
+            batch = []
+            batch_size = 5000
+            for app_id, versions in data.items():
+                if not isinstance(versions, dict):
+                    continue
+                app_key = str(app_id or '').strip().lower()
+                if not app_key:
+                    continue
+                order = 0
+                for version_key, version_desc in versions.items():
+                    order += 1
+                    version_key_str = str(version_key or '').strip()
+                    if not version_key_str:
+                        continue
+                    try:
+                        version_int = int(version_key_str)
+                    except Exception:
+                        version_int = None
+                    title_type = None
+                    other_application_id = None
+                    if isinstance(version_desc, dict):
+                        try:
+                            title_type = int(version_desc.get('titleType'))
+                        except Exception:
+                            title_type = None
+                        other_value = str(version_desc.get('otherApplicationId') or '').strip().lower()
+                        if other_value:
+                            other_application_id = other_value
+                    batch.append((app_key, version_key_str, int(order), version_int, title_type, other_application_id))
+                    if len(batch) >= batch_size:
+                        conn.executemany(
+                            "INSERT OR REPLACE INTO cnmts "
+                            "(app_id, version_key, sort_order, version_int, title_type, other_application_id) "
+                            "VALUES (?, ?, ?, ?, ?, ?)",
+                            batch,
+                        )
+                        batch.clear()
+
+            if batch:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO cnmts "
+                    "(app_id, version_key, sort_order, version_int, title_type, other_application_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    batch,
+                )
+
+            row_count = conn.execute("SELECT COUNT(*) FROM cnmts").fetchone()[0]
+            app_count = conn.execute("SELECT COUNT(DISTINCT app_id) FROM cnmts").fetchone()[0]
+            conn.executemany(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                [
+                    ("source_signature", expected_signature),
+                    ("rows_count", str(int(row_count))),
+                    ("apps_count", str(int(app_count))),
+                ],
+            )
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    os.replace(tmp_db, _cnmts_index_file)
+    _cnmts_index_ready = True
+    logger.info("cnmts index ready with %s rows.", row_count)
+    _release_process_memory()
+    return True
+
+def _ensure_titles_index(region_titles_file):
+    global _titles_index_ready
+    expected_signature = _versions_source_signature(region_titles_file)
+
+    conn = None
+    try:
+        conn = _open_versions_index_db(_titles_index_file)
+        with conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS titles ("
+                "title_id TEXT PRIMARY KEY, "
+                "name TEXT, "
+                "banner_url TEXT, "
+                "icon_url TEXT, "
+                "category TEXT, "
+                "nsu_id TEXT, "
+                "description TEXT, "
+                "search_hay TEXT, "
+                "sort_order INTEGER NOT NULL)"
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_titles_sort_order ON titles(sort_order)")
+            signature = _read_versions_index_meta(conn, "source_signature")
+            rows_count = _read_versions_index_meta(conn, "rows_count")
+            if signature == expected_signature and rows_count is not None:
+                _titles_index_ready = True
+                return True
+    except Exception as e:
+        logger.warning(f"Failed to validate titles index, rebuilding: {e}")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    logger.info("Building titles index from region titles...")
+    data = _load_json_file(region_titles_file, 'region_titles')
+    if not isinstance(data, dict):
+        raise ValueError("Invalid region titles file: expected object at root")
+
+    tmp_db = _titles_index_file + ".tmp"
+    try:
+        if os.path.exists(tmp_db):
+            os.remove(tmp_db)
+    except Exception:
+        pass
+
+    conn = _open_versions_index_db(tmp_db)
+    try:
+        with conn:
+            conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            conn.execute(
+                "CREATE TABLE titles ("
+                "title_id TEXT PRIMARY KEY, "
+                "name TEXT, "
+                "banner_url TEXT, "
+                "icon_url TEXT, "
+                "category TEXT, "
+                "nsu_id TEXT, "
+                "description TEXT, "
+                "search_hay TEXT, "
+                "sort_order INTEGER NOT NULL)"
+            )
+            conn.execute("CREATE INDEX idx_titles_sort_order ON titles(sort_order)")
+
+            batch = []
+            batch_size = 5000
+            order = 0
+            for item in data.values():
+                if not isinstance(item, dict):
+                    continue
+                title_id = str(item.get('id') or '').strip().upper()
+                if not title_id:
+                    continue
+                order += 1
+                name = str(item.get('name') or '').strip()
+                banner_url = str(item.get('bannerUrl') or '').strip()
+                icon_url = str(item.get('iconUrl') or '').strip()
+                category = str(item.get('category') or '').strip()
+                nsu_id_raw = item.get('nsuId')
+                nsu_id = None if nsu_id_raw is None else str(nsu_id_raw)
+                description = str(item.get('description') or '').strip() or None
+                search_hay = _normalize_title_search_text(f"{title_id} {name}")
+                batch.append((
+                    title_id,
+                    name,
+                    banner_url,
+                    icon_url,
+                    category,
+                    nsu_id,
+                    description,
+                    search_hay,
+                    int(order),
+                ))
+                if len(batch) >= batch_size:
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO titles "
+                        "(title_id, name, banner_url, icon_url, category, nsu_id, description, search_hay, sort_order) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        batch,
+                    )
+                    batch.clear()
+            if batch:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO titles "
+                    "(title_id, name, banner_url, icon_url, category, nsu_id, description, search_hay, sort_order) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    batch,
+                )
+
+            row_count = conn.execute("SELECT COUNT(*) FROM titles").fetchone()[0]
+            conn.executemany(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                [
+                    ("source_signature", expected_signature),
+                    ("rows_count", str(int(row_count))),
+                ],
+            )
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    os.replace(tmp_db, _titles_index_file)
+    _titles_index_ready = True
+    logger.info("titles index ready with %s rows.", row_count)
+    with _title_lookup_cache_lock:
+        _title_lookup_cache.clear()
+    _release_process_memory()
+    return True
+
+def _cnmts_index_row_count():
+    if not _cnmts_index_ready:
+        return 0
+    try:
+        conn = _open_versions_index_db(_cnmts_index_file)
+        try:
+            value = _read_versions_index_meta(conn, "rows_count")
+            return int(value) if value is not None else 0
+        finally:
+            conn.close()
+    except Exception:
+        return 0
+
+def _cnmts_index_app_count():
+    if not _cnmts_index_ready:
+        return 0
+    try:
+        conn = _open_versions_index_db(_cnmts_index_file)
+        try:
+            value = _read_versions_index_meta(conn, "apps_count")
+            return int(value) if value is not None else 0
+        finally:
+            conn.close()
+    except Exception:
+        return 0
+
+def _titles_index_row_count():
+    if not _titles_index_ready:
+        return 0
+    try:
+        conn = _open_versions_index_db(_titles_index_file)
+        try:
+            value = _read_versions_index_meta(conn, "rows_count")
+            return int(value) if value is not None else 0
+        finally:
+            conn.close()
+    except Exception:
+        return 0
 
 def _recover_corrupted_titledb_file(app_settings, file_path, label):
     rel_path = os.path.relpath(file_path, start=APP_DIR) if os.path.isabs(file_path) else file_path
@@ -292,56 +777,59 @@ def get_file_info(filepath):
 
 def identify_appId(app_id):
     app_id = app_id.lower()
-    
-    global _cnmts_db
-    if _cnmts_db is None:
-        _warn_titledb_state_once('cnmts_not_loaded', "cnmts_db is not loaded. Call load_titledb first.")
+
+    def _fallback_identification():
+        logger.warning(f'{app_id} not in cnmts index, fallback to default identification.')
+        if app_id.endswith('000'):
+            app_type_local = APP_TYPE_BASE
+            title_id_local = app_id
+        elif app_id.endswith('800'):
+            app_type_local = APP_TYPE_UPD
+            title_id_local = get_title_id_from_app_id(app_id, app_type_local)
+        else:
+            app_type_local = APP_TYPE_DLC
+            title_id_local = get_title_id_from_app_id(app_id, app_type_local)
+        return title_id_local.upper(), app_type_local
+
+    global _cnmts_index_ready
+    if not _cnmts_index_ready:
+        _warn_titledb_state_once('cnmts_not_loaded', "cnmts index is not loaded. Call load_titledb first.")
         return None, None
 
-    if app_id in _cnmts_db:
-        app_id_keys = list(_cnmts_db[app_id].keys())
-        if len(app_id_keys):
-            app = _cnmts_db[app_id][app_id_keys[-1]]
-            
-            if app['titleType'] == 128:
-                app_type = APP_TYPE_BASE
-                title_id = app_id.upper()
-            elif app['titleType'] == 129:
-                app_type = APP_TYPE_UPD
-                if 'otherApplicationId' in app:
-                    title_id = app['otherApplicationId'].upper()
-                else:
-                    title_id = get_title_id_from_app_id(app_id, app_type)
-            elif app['titleType'] == 130:
-                app_type = APP_TYPE_DLC
-                if 'otherApplicationId' in app:
-                    title_id = app['otherApplicationId'].upper()
-                else:
-                    title_id = get_title_id_from_app_id(app_id, app_type)
-        else:
-            logger.warning(f'{app_id} has no keys in cnmts_db, fallback to default identification.')
-            if app_id.endswith('000'):
-                app_type = APP_TYPE_BASE
-                title_id = app_id
-            elif app_id.endswith('800'):
-                app_type = APP_TYPE_UPD
-                title_id = get_title_id_from_app_id(app_id, app_type)
-            else:
-                app_type = APP_TYPE_DLC
-                title_id = get_title_id_from_app_id(app_id, app_type)
-    else:
-        logger.warning(f'{app_id} not in cnmts_db, fallback to default identification.')
-        if app_id.endswith('000'):
-            app_type = APP_TYPE_BASE
-            title_id = app_id
-        elif app_id.endswith('800'):
-            app_type = APP_TYPE_UPD
-            title_id = get_title_id_from_app_id(app_id, app_type)
-        else:
-            app_type = APP_TYPE_DLC
-            title_id = get_title_id_from_app_id(app_id, app_type)
-    
-    return title_id.upper(), app_type
+    try:
+        conn = _open_versions_index_db(_cnmts_index_file)
+        try:
+            row = conn.execute(
+                "SELECT title_type, other_application_id "
+                "FROM cnmts WHERE app_id = ? "
+                "ORDER BY sort_order DESC LIMIT 1",
+                (app_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"Failed querying cnmts index for {app_id.upper()}: {e}")
+        return _fallback_identification()
+
+    if not row:
+        return _fallback_identification()
+
+    title_type, other_application_id = row
+    if title_type == 128:
+        return app_id.upper(), APP_TYPE_BASE
+    if title_type == 129:
+        app_type = APP_TYPE_UPD
+        if other_application_id:
+            return str(other_application_id).upper(), app_type
+        return get_title_id_from_app_id(app_id, app_type).upper(), app_type
+    if title_type == 130:
+        app_type = APP_TYPE_DLC
+        if other_application_id:
+            return str(other_application_id).upper(), app_type
+        return get_title_id_from_app_id(app_id, app_type).upper(), app_type
+
+    logger.warning(f'{app_id} has unknown title type in cnmts index, fallback to default identification.')
+    return _fallback_identification()
 
 def load_titledb():
     global _cnmts_db
@@ -349,6 +837,9 @@ def load_titledb():
     global _titles_by_title_id
     global _versions_db
     global _versions_txt_db
+    global _cnmts_index_ready
+    global _titles_index_ready
+    global _versions_index_ready
     global _titles_desc_db
     global _titles_desc_by_title_id
     global _titles_images_by_title_id
@@ -405,21 +896,17 @@ def load_titledb():
 
         for attempt in range(2):
             try:
-                _cnmts_db = _load_json_file(cnmts_file, 'cnmts')
-                _titles_db = _load_json_file(region_titles_file, 'region_titles')
+                _versions_db = None
+                _cnmts_index_ready = False
+                _titles_index_ready = False
+                _versions_index_ready = False
+                _ensure_versions_index(versions_file)
+                _ensure_cnmts_index(cnmts_file)
+                _ensure_titles_index(region_titles_file)
 
-                # Build an O(1) lookup by title id once to avoid repeated full scans.
-                by_title_id = {}
-                if isinstance(_titles_db, dict):
-                    for item in _titles_db.values():
-                        if not isinstance(item, dict):
-                            continue
-                        tid = (item.get('id') or '').strip().upper()
-                        if tid:
-                            by_title_id[tid] = item
-                _titles_by_title_id = by_title_id
-                # Keep only the direct lookup map to avoid retaining a second large dict.
+                _cnmts_db = None
                 _titles_db = None
+                _titles_by_title_id = None
 
                 _titles_desc_db = None
                 _titles_desc_by_title_id = None
@@ -460,8 +947,6 @@ def load_titledb():
                 except Exception as e:
                     logger.warning(f"Failed to load TitleDB descriptions: {e}")
 
-                _versions_db = _load_json_file(versions_file, 'versions')
-
                 _versions_txt_db = {}
                 with open(versions_txt_file, encoding="utf-8") as f:
                     for line in f:
@@ -475,6 +960,7 @@ def load_titledb():
                 _titledb_data_signature = _build_titledb_data_signature(required_files)
                 identification_in_progress_count += 1
                 logger.info("TitleDBs loaded.")
+                _release_process_memory()
                 return True
             except CorruptedTitleDBFileError as e:
                 _reset_titledb_state()
@@ -521,11 +1007,17 @@ def get_titledb_diagnostics():
             'cache_token': str(_titledb_data_signature or 'missing'),
             'refcount': int(identification_in_progress_count or 0),
             'sizes': {
-                'cnmts': len(_cnmts_db) if isinstance(_cnmts_db, dict) else 0,
-                'titles_by_title_id': len(_titles_by_title_id) if isinstance(_titles_by_title_id, dict) else 0,
+                'cnmts': _cnmts_index_app_count() if _cnmts_index_ready else (len(_cnmts_db) if isinstance(_cnmts_db, dict) else 0),
+                'cnmts_index_rows': _cnmts_index_row_count(),
+                'cnmts_index_apps': _cnmts_index_app_count(),
+                'cnmts_index_ready': bool(_cnmts_index_ready),
+                'titles_by_title_id': _titles_index_row_count() if _titles_index_ready else (len(_titles_by_title_id) if isinstance(_titles_by_title_id, dict) else 0),
+                'titles_index_rows': _titles_index_row_count(),
+                'titles_index_ready': bool(_titles_index_ready),
                 'titles_desc_by_title_id': len(_titles_desc_by_title_id) if isinstance(_titles_desc_by_title_id, dict) else 0,
                 'titles_images_by_title_id': len(_titles_images_by_title_id) if isinstance(_titles_images_by_title_id, dict) else 0,
-                'versions': len(_versions_db) if isinstance(_versions_db, dict) else 0,
+                'versions': _versions_index_row_count(),
+                'versions_index_ready': bool(_versions_index_ready),
                 'versions_txt': len(_versions_txt_db) if isinstance(_versions_txt_db, dict) else 0,
             }
         }
@@ -537,6 +1029,9 @@ def unload_titledb():
     global _titles_by_title_id
     global _versions_db
     global _versions_txt_db
+    global _cnmts_index_ready
+    global _titles_index_ready
+    global _versions_index_ready
     global _titles_desc_db
     global _titles_desc_by_title_id
     global _titles_images_by_title_id
@@ -556,10 +1051,15 @@ def unload_titledb():
         _titles_by_title_id = None
         _versions_db = None
         _versions_txt_db = None
+        _cnmts_index_ready = False
+        _titles_index_ready = False
+        _versions_index_ready = False
         _titles_desc_db = None
         _titles_desc_by_title_id = None
         _titles_images_by_title_id = None
         _titles_db_loaded = False
+        with _title_lookup_cache_lock:
+            _title_lookup_cache.clear()
         logger.info("TitleDBs unloaded.")
 
 def identify_file_from_filename(filename):
@@ -699,13 +1199,55 @@ def _apply_manual_title_override(title_id, info):
         out['screenshots'] = [str(u).strip() for u in screenshots if str(u or '').strip()][:12]
     return out
 
+def _get_title_info_from_index(title_key):
+    with _title_lookup_cache_lock:
+        cached = _title_lookup_cache.get(title_key)
+        if isinstance(cached, dict):
+            return dict(cached)
+
+    try:
+        conn = _open_versions_index_db(_titles_index_file)
+        try:
+            row = conn.execute(
+                "SELECT name, banner_url, icon_url, title_id, category, nsu_id, description "
+                "FROM titles WHERE title_id = ? LIMIT 1",
+                (title_key,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"Failed querying titles index for {title_key}: {e}")
+        return None
+
+    if not row:
+        return None
+
+    info = {
+        'name': row[0] or '',
+        'bannerUrl': row[1] or '',
+        'iconUrl': row[2] or '',
+        'id': row[3] or title_key,
+        'category': row[4] or '',
+        'nsuId': row[5],
+        'description': row[6],
+    }
+    with _title_lookup_cache_lock:
+        _title_lookup_cache[title_key] = info
+        if len(_title_lookup_cache) > _TITLE_LOOKUP_CACHE_MAX:
+            try:
+                _title_lookup_cache.pop(next(iter(_title_lookup_cache)))
+            except Exception:
+                _title_lookup_cache.clear()
+    return dict(info)
+
 def get_game_info(title_id):
     global _titles_db
     global _titles_by_title_id
+    global _titles_index_ready
     global _titles_desc_by_title_id
     global _titles_images_by_title_id
-    if _titles_db is None and _titles_by_title_id is None:
-        _warn_titledb_state_once('titles_not_loaded', "titles_db is not loaded. Call load_titledb first.")
+    if not _titles_index_ready and _titles_db is None and _titles_by_title_id is None:
+        _warn_titledb_state_once('titles_not_loaded', "titles index is not loaded. Call load_titledb first.")
         # Return default structure so games can still be displayed
         return _apply_manual_title_override(title_id, {
             'name': 'Unrecognized',
@@ -720,7 +1262,7 @@ def get_game_info(title_id):
 
     try:
         title_key = str(title_id or '').strip().upper()
-        title_info = (_titles_by_title_id or {}).get(title_key)
+        title_info = _get_title_info_from_index(title_key) if _titles_index_ready else (_titles_by_title_id or {}).get(title_key)
         if title_info is None and isinstance(_titles_db, dict):
             for item in _titles_db.values():
                 if not isinstance(item, dict):
@@ -789,21 +1331,12 @@ def search_titles(query, limit=20):
     """
     global _titles_db
     global _titles_by_title_id
-    if _titles_db is None and _titles_by_title_id is None:
-        _warn_titledb_state_once('titles_not_loaded', "titles_db is not loaded. Call load_titledb first.")
+    global _titles_index_ready
+    if not _titles_index_ready and _titles_db is None and _titles_by_title_id is None:
+        _warn_titledb_state_once('titles_not_loaded', "titles index is not loaded. Call load_titledb first.")
         return []
 
-    def _normalize_search_text(value):
-        text = str(value or '')
-        try:
-            text = unicodedata.normalize('NFKD', text)
-            text = text.encode('ascii', 'ignore').decode('ascii')
-        except Exception:
-            pass
-        text = re.sub(r"[^A-Za-z0-9\s]+", " ", text)
-        return re.sub(r"\s+", " ", text).strip().lower()
-
-    q = _normalize_search_text(query)
+    q = _normalize_title_search_text(query)
     if not q:
         return []
 
@@ -812,6 +1345,36 @@ def search_titles(query, limit=20):
     except Exception:
         limit = 20
     limit = max(1, min(limit, 100))
+
+    if _titles_index_ready:
+        like_query = f"%{q}%"
+        try:
+            conn = _open_versions_index_db(_titles_index_file)
+            try:
+                rows = conn.execute(
+                    "SELECT title_id, name, category, icon_url, banner_url "
+                    "FROM titles "
+                    "WHERE search_hay LIKE ? "
+                    "ORDER BY sort_order ASC "
+                    "LIMIT ?",
+                    (like_query, int(limit)),
+                ).fetchall()
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning(f"Failed searching titles index for '{q}': {e}")
+            rows = []
+
+        out = []
+        for row in rows:
+            out.append({
+                'id': (row[0] or '').upper(),
+                'name': (row[1] or '').strip() or 'Unrecognized',
+                'category': row[2] or '',
+                'iconUrl': row[3] or '',
+                'bannerUrl': row[4] or '',
+            })
+        return out
 
     out = []
     seen_ids = set()
@@ -824,11 +1387,9 @@ def search_titles(query, limit=20):
             continue
         if not tid or tid in seen_ids:
             continue
-
-        hay = _normalize_search_text(f"{tid} {name}")
+        hay = _normalize_title_search_text(f"{tid} {name}")
         if q not in hay:
             continue
-
         out.append({
             'id': tid,
             'name': name or 'Unrecognized',
@@ -848,9 +1409,9 @@ def get_game_latest_version(all_existing_versions):
     return max(v['version'] for v in all_existing_versions)
 
 def get_all_existing_versions(titleid):
-    global _versions_db
-    if _versions_db is None:
-        _warn_titledb_state_once('versions_not_loaded', "versions_db is not loaded. Call load_titledb first.")
+    global _versions_index_ready
+    if not _versions_index_ready:
+        _warn_titledb_state_once('versions_not_loaded', "versions index is not loaded. Call load_titledb first.")
         return []
 
     if not titleid:
@@ -858,24 +1419,38 @@ def get_all_existing_versions(titleid):
         return []
 
     titleid = titleid.lower()
-    if titleid not in _versions_db:
-        # print(f'Title ID not in versions.json: {titleid.upper()}')
+    try:
+        conn = _open_versions_index_db(_versions_index_file)
+        try:
+            rows = conn.execute(
+                "SELECT version, release_date FROM versions WHERE title_id = ? ORDER BY version ASC",
+                (titleid,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"Failed querying versions index for {titleid.upper()}: {e}")
         return []
 
-    versions_from_db = _versions_db[titleid].keys()
-    return [
-        {
-            'version': int(version_from_db),
-            'update_number': get_update_number(version_from_db),
-            'release_date': _versions_db[titleid][str(version_from_db)],
-        }
-        for version_from_db in versions_from_db
-    ]
+    out = []
+    for version, release_date in rows:
+        try:
+            version_int = int(version)
+        except Exception:
+            continue
+        out.append(
+            {
+                'version': version_int,
+                'update_number': get_update_number(version_int),
+                'release_date': release_date,
+            }
+        )
+    return out
 
 def get_all_app_existing_versions(app_id):
-    global _cnmts_db
-    if _cnmts_db is None:
-        _warn_titledb_state_once('cnmts_not_loaded', "cnmts_db is not loaded. Call load_titledb first.")
+    global _cnmts_index_ready
+    if not _cnmts_index_ready:
+        _warn_titledb_state_once('cnmts_not_loaded', "cnmts index is not loaded. Call load_titledb first.")
         return None
 
     if not app_id:
@@ -883,16 +1458,22 @@ def get_all_app_existing_versions(app_id):
         return None
 
     app_id = app_id.lower()
-    if app_id in _cnmts_db:
-        versions_from_cnmts_db = _cnmts_db[app_id].keys()
-        if len(versions_from_cnmts_db):
-            return sorted(versions_from_cnmts_db)
-        else:
-            logger.warning(f'No keys in cnmts.json for app ID: {app_id.upper()}')
-            return None
-    else:
-        # print(f'DLC app ID not in cnmts.json: {app_id.upper()}')
+    try:
+        conn = _open_versions_index_db(_cnmts_index_file)
+        try:
+            rows = conn.execute(
+                "SELECT version_key FROM cnmts WHERE app_id = ?",
+                (app_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"Failed querying cnmts index for app versions {app_id.upper()}: {e}")
         return None
+    if not rows:
+        return None
+    versions = [str(r[0]) for r in rows if r and r[0] is not None]
+    return sorted(versions) if versions else None
     
 def get_app_id_version_from_versions_txt(app_id):
     global _versions_txt_db
@@ -905,9 +1486,9 @@ def get_app_id_version_from_versions_txt(app_id):
     return _versions_txt_db.get(app_id, None)
     
 def get_all_existing_dlc(title_id):
-    global _cnmts_db
-    if _cnmts_db is None:
-        _warn_titledb_state_once('cnmts_not_loaded', "cnmts_db is not loaded. Call load_titledb first.")
+    global _cnmts_index_ready
+    if not _cnmts_index_ready:
+        _warn_titledb_state_once('cnmts_not_loaded', "cnmts index is not loaded. Call load_titledb first.")
         return []
 
     if not title_id:
@@ -915,10 +1496,18 @@ def get_all_existing_dlc(title_id):
         return []
 
     title_id = title_id.lower()
-    dlcs = []
-    for app_id in _cnmts_db.keys():
-        for version, version_description in _cnmts_db[app_id].items():
-            if version_description.get('titleType') == 130 and version_description.get('otherApplicationId') == title_id:
-                if app_id.upper() not in dlcs:
-                    dlcs.append(app_id.upper())
-    return dlcs
+    try:
+        conn = _open_versions_index_db(_cnmts_index_file)
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT app_id FROM cnmts "
+                "WHERE title_type = 130 AND other_application_id = ? "
+                "ORDER BY app_id ASC",
+                (title_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"Failed querying cnmts DLC entries for {title_id.upper()}: {e}")
+        return []
+    return [str(r[0]).upper() for r in rows if r and r[0]]

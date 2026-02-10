@@ -9,7 +9,7 @@ if PROJECT_DIR not in sys.path:
 from flask import Flask, render_template, request, redirect, url_for, jsonify, send_from_directory, Response, has_app_context, has_request_context, g
 from flask_login import LoginManager
 from werkzeug.utils import secure_filename
-from sqlalchemy import func, and_, or_, case
+from sqlalchemy import func, and_, or_, case, literal
 from app.scheduler import init_scheduler
 from functools import wraps
 from app.file_watcher import Watcher
@@ -2343,13 +2343,10 @@ def admin_unseen_requests_count_api():
 def admin_mark_requests_seen_api():
     data = request.json or {}
     ids = data.get('request_ids')
+    mark_all_open = not ids
 
-    # Default: mark all open requests as seen.
-    if not ids:
-        try:
-            ids = [r[0] for r in db.session.query(TitleRequests.id).filter(TitleRequests.status == 'open').all()]
-        except Exception:
-            ids = []
+    if mark_all_open:
+        ids = []
 
     try:
         ids = [int(x) for x in (ids or [])]
@@ -2357,7 +2354,7 @@ def admin_mark_requests_seen_api():
         return api_error('Invalid request_ids.', 400)
 
     ids = list(dict.fromkeys([x for x in ids if x > 0]))
-    if not ids:
+    if not ids and not mark_all_open:
         return jsonify({'success': True, 'message': 'Nothing to mark.', 'marked': 0})
 
     now = None
@@ -2367,34 +2364,63 @@ def admin_mark_requests_seen_api():
         now = None
 
     try:
-        existing_ids = {
-            row.request_id
-            for row in (
-                db.session.query(TitleRequestViews.request_id)
-                .filter(TitleRequestViews.user_id == current_user.id)
-                .filter(TitleRequestViews.request_id.in_(ids))
-                .all()
-            )
-            if row.request_id is not None
-        }
         ts = now or datetime.utcnow()
-        to_insert = [
-            {'user_id': current_user.id, 'request_id': req_id, 'viewed_at': ts}
-            for req_id in ids
-            if req_id not in existing_ids
-        ]
-        marked = 0
-        if to_insert:
+
+        if mark_all_open:
+            select_stmt = (
+                db.session.query(
+                    literal(int(current_user.id)).label('user_id'),
+                    TitleRequests.id.label('request_id'),
+                    literal(ts).label('viewed_at'),
+                )
+                .outerjoin(
+                    TitleRequestViews,
+                    (TitleRequestViews.request_id == TitleRequests.id)
+                    & (TitleRequestViews.user_id == current_user.id),
+                )
+                .filter(TitleRequests.status == 'open')
+                .filter(TitleRequestViews.id.is_(None))
+            )
             stmt = (
                 insert(TitleRequestViews)
-                .values(to_insert)
+                .from_select(['user_id', 'request_id', 'viewed_at'], select_stmt)
                 .on_conflict_do_nothing(index_elements=['user_id', 'request_id'])
             )
             result = db.session.execute(stmt)
             try:
                 marked = int(result.rowcount or 0)
             except Exception:
-                marked = len(to_insert)
+                marked = 0
+            if marked < 0:
+                marked = 0
+        else:
+            existing_ids = {
+                row.request_id
+                for row in (
+                    db.session.query(TitleRequestViews.request_id)
+                    .filter(TitleRequestViews.user_id == current_user.id)
+                    .filter(TitleRequestViews.request_id.in_(ids))
+                    .all()
+                )
+                if row.request_id is not None
+            }
+            to_insert = [
+                {'user_id': current_user.id, 'request_id': req_id, 'viewed_at': ts}
+                for req_id in ids
+                if req_id not in existing_ids
+            ]
+            marked = 0
+            if to_insert:
+                stmt = (
+                    insert(TitleRequestViews)
+                    .values(to_insert)
+                    .on_conflict_do_nothing(index_elements=['user_id', 'request_id'])
+                )
+                result = db.session.execute(stmt)
+                try:
+                    marked = int(result.rowcount or 0)
+                except Exception:
+                    marked = len(to_insert)
         db.session.commit()
         return jsonify({'success': True, 'message': 'Marked seen.', 'marked': int(marked)})
     except Exception as e:
