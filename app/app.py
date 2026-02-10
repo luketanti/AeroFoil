@@ -1712,6 +1712,62 @@ def _job_log(job_id, message):
         job = conversion_jobs.get(job_id)
         if not job:
             return
+        suppress_traceback = bool(job.get('_suppress_traceback'))
+        if message.startswith('Traceback (most recent call last):'):
+            job['_suppress_traceback'] = True
+            if not job.get('_traceback_notice_emitted'):
+                job['_traceback_notice_emitted'] = True
+                job['logs'].append('Converter traceback suppressed. Showing concise error summary.')
+            job['updated_at'] = time.time()
+            return
+        if message.startswith('During handling of the above exception'):
+            job['_suppress_traceback'] = True
+            job['updated_at'] = time.time()
+            return
+        if suppress_traceback:
+            if re.match(r'^\s*File ".*", line \d+, in .+$', message):
+                job['updated_at'] = time.time()
+                return
+            if re.match(r'^\s*~+.*$', message):
+                job['updated_at'] = time.time()
+                return
+            if re.match(r'^\s*[A-Za-z_][A-Za-z0-9_.]*: .*$', message):
+                # Exception summary line; stop traceback suppression after this.
+                job['_suppress_traceback'] = False
+            elif message.strip() == '':
+                job['updated_at'] = time.time()
+                return
+            else:
+                job['updated_at'] = time.time()
+                return
+
+        verification_error_match = re.search(
+            r'VerificationException:\s*Verification detected hash mismatch',
+            message,
+            re.IGNORECASE
+        )
+        permission_32_match = re.search(r'PermissionError:.*WinError\s*32', message, re.IGNORECASE)
+        bad_verify_match = re.search(r'^\[BAD VERIFY\]\s+(.+)$', message)
+        delete_failed_output_match = re.search(r'^\[DELETE NSZ\]\s+(.+)$', message)
+        compress_error_match = re.search(r'^Error while compressing file:\s+(.+)$', message)
+
+        if verification_error_match:
+            message = 'Verification failed: hash mismatch detected. Source file is likely bad or corrupted.'
+        elif permission_32_match:
+            message = 'Cleanup warning: failed output file is in use (WinError 32), so automatic delete failed.'
+        elif bad_verify_match:
+            bad_path = str(bad_verify_match.group(1) or '').strip()
+            bad_name = os.path.basename(bad_path) if bad_path else bad_path
+            message = f"Verification failed for output: {bad_name or bad_path}."
+        elif delete_failed_output_match:
+            out_path = str(delete_failed_output_match.group(1) or '').strip()
+            out_name = os.path.basename(out_path) if out_path else out_path
+            message = f"Removing failed output: {out_name or out_path}."
+        elif compress_error_match:
+            in_path = str(compress_error_match.group(1) or '').strip()
+            in_name = os.path.basename(in_path) if in_path else in_path
+            message = f"Conversion failed for input: {in_name or in_path}."
+
         percent_match = re.search(r'Compressed\s+([0-9.]+)%', message)
         minimal_progress_match = re.search(r'^\s*(?:[^0-9]{1,4}\s*)?([0-9]{1,3}(?:\.[0-9]+)?)%\s*(.*)$', message)
         numeric_match = re.fullmatch(r'\d{1,3}', message)
@@ -3162,6 +3218,7 @@ def manage_convert_nsz():
     dry_run = bool(data.get('dry_run', False))
     delete_original = bool(data.get('delete_original', True))
     verbose = bool(data.get('verbose', False))
+    verify = bool(data.get('verify', True))
     threads = data.get('threads')
     command = data.get('command')
     results = convert_to_nsz(
@@ -3169,7 +3226,8 @@ def manage_convert_nsz():
         delete_original=delete_original,
         dry_run=dry_run,
         verbose=verbose,
-        threads=threads
+        threads=threads,
+        verify=verify
     )
     if results.get('success') and not dry_run:
         post_library_change()
@@ -3190,6 +3248,7 @@ def manage_convert_single():
     dry_run = bool(data.get('dry_run', False))
     delete_original = bool(data.get('delete_original', True))
     verbose = bool(data.get('verbose', False))
+    verify = bool(data.get('verify', True))
     threads = data.get('threads')
     command = data.get('command')
     if not file_id:
@@ -3200,7 +3259,8 @@ def manage_convert_single():
         delete_original=delete_original,
         dry_run=dry_run,
         verbose=verbose,
-        threads=threads
+        threads=threads,
+        verify=verify
     )
     if results.get('success') and not dry_run:
         post_library_change()
@@ -3213,6 +3273,7 @@ def manage_convert_job():
     dry_run = bool(data.get('dry_run', False))
     delete_original = bool(data.get('delete_original', True))
     verbose = bool(data.get('verbose', False))
+    verify = bool(data.get('verify', True))
     threads = data.get('threads')
     library_id = data.get('library_id')
     timeout_seconds = data.get('timeout_seconds')
@@ -3231,6 +3292,7 @@ def manage_convert_job():
                 progress_cb=lambda done, total: _job_progress(job_id, done, total),
                 stream_output=True,
                 threads=threads,
+                verify=verify,
                 library_id=library_id,
                 cancel_cb=lambda: _job_is_cancelled(job_id),
                 timeout_seconds=timeout_seconds,
@@ -3252,6 +3314,7 @@ def manage_convert_single_job():
     dry_run = bool(data.get('dry_run', False))
     delete_original = bool(data.get('delete_original', True))
     verbose = bool(data.get('verbose', False))
+    verify = bool(data.get('verify', True))
     threads = data.get('threads')
     timeout_seconds = data.get('timeout_seconds')
     command = data.get('command')
@@ -3272,6 +3335,7 @@ def manage_convert_single_job():
                 progress_cb=lambda done, total: _job_progress(job_id, done, total),
                 stream_output=True,
                 threads=threads,
+                verify=verify,
                 cancel_cb=lambda: _job_is_cancelled(job_id),
                 timeout_seconds=timeout_seconds
             )

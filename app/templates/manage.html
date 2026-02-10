@@ -155,6 +155,10 @@
                                                 <input class="form-check-input" type="checkbox" id="convertSingleVerbose">
                                                 <label class="form-check-label" for="convertSingleVerbose">Verbose</label>
                                             </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="convertSingleVerify" checked>
+                                                <label class="form-check-label" for="convertSingleVerify">Verify output</label>
+                                            </div>
                                         </div>
                                         <div class="form-text">Only NSP/XCI files are listed.</div>
                                     </div>
@@ -184,6 +188,10 @@
                                             <div class="form-check">
                                                 <input class="form-check-input" type="checkbox" id="convertVerbose">
                                                 <label class="form-check-label" for="convertVerbose">Verbose</label>
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="convertVerify" checked>
+                                                <label class="form-check-label" for="convertVerify">Verify output</label>
                                             </div>
                                             <button type="button" id="convertNszBtn" class="btn btn-warning ms-auto"
                                                 onClick='convertToNsz()'>Start Library Conversion</button>
@@ -360,6 +368,7 @@
             dry_run: $('#convertDryRun').is(':checked'),
             delete_original: $('#convertDeleteOriginal').is(':checked'),
             verbose: $('#convertVerbose').is(':checked'),
+            verify: $('#convertVerify').is(':checked'),
             threads: getThreadsValue(),
             library_id: getLibraryValue(),
             timeout_seconds: getTimeoutValue()
@@ -422,6 +431,7 @@
             dry_run: $('#convertSingleDryRun').is(':checked'),
             delete_original: $('#convertSingleDeleteOriginal').is(':checked'),
             verbose: $('#convertSingleVerbose').is(':checked'),
+            verify: $('#convertSingleVerify').is(':checked'),
             threads: getSingleThreadsValue(),
             timeout_seconds: getSingleTimeoutValue()
         }

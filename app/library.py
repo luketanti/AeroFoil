@@ -1056,7 +1056,7 @@ def _get_nsz_runner():
         return f"{_quote_arg(sys.executable)} -c \"import nsz; nsz.main()\""
     return None
 
-def _format_nsz_command(command_template, input_file, output_file, threads=None):
+def _format_nsz_command(command_template, input_file, output_file, threads=None, verify=True):
     nsz_runner = _get_nsz_runner() or 'nsz'
     nsz_keys = _get_nsz_keys_file() or KEYS_FILE
     if not command_template:
@@ -1069,9 +1069,54 @@ def _format_nsz_command(command_template, input_file, output_file, threads=None)
         output_dir=os.path.dirname(output_file),
         threads=threads or ''
     )
+    if verify:
+        if re.search(r'(^|\s)--verify(\s|$)', command) is None:
+            command = f"{command} --verify"
+    else:
+        command = re.sub(r'(^|\s)--verify(?=\s|$)', ' ', command)
+        command = re.sub(r'\s+', ' ', command).strip()
     if threads and re.search(r'(^|\\s)(-t|--threads)\\s', command) is None:
         command = f"{command} -t {threads}"
     return command
+
+def _expected_compressed_output_path(input_file):
+    base, ext = os.path.splitext(str(input_file or ''))
+    ext = str(ext or '').strip().lower()
+    if ext in ('.xci', '.xcz'):
+        return f"{base}.xcz"
+    return f"{base}.nsz"
+
+def _alternate_compressed_output_path(path):
+    base, ext = os.path.splitext(str(path or ''))
+    ext = str(ext or '').strip().lower()
+    if ext == '.xcz':
+        return f"{base}.nsz"
+    if ext == '.nsz':
+        return f"{base}.xcz"
+    return None
+
+def _resolve_existing_output_path(preferred_path):
+    if preferred_path and os.path.exists(preferred_path):
+        return preferred_path
+    alt = _alternate_compressed_output_path(preferred_path)
+    if alt and os.path.exists(alt):
+        return alt
+    return preferred_path
+
+def _summarize_conversion_failure(log_text, output_file=None):
+    text = str(log_text or '')
+    lowered = text.lower()
+
+    if 'verification detected hash mismatch' in lowered or '[bad verify]' in lowered:
+        summary = 'Verification failed (hash mismatch). Source file is likely bad or corrupted.'
+    elif 'permissionerror' in lowered and 'winerror 32' in lowered:
+        summary = 'Conversion failed and cleanup could not remove failed output (WinError 32: file in use).'
+    else:
+        summary = 'Conversion failed.'
+
+    if output_file and os.path.exists(output_file):
+        summary = f"{summary} Output file exists but is unverified and may be invalid: {output_file}"
+    return summary
 
 def _run_command(command, log_cb=None, stream_output=False, cancel_cb=None, timeout_seconds=None):
     env = os.environ.copy()
@@ -1090,6 +1135,7 @@ def _run_command(command, log_cb=None, stream_output=False, cancel_cb=None, time
         env=env
     )
     start_time = time.time()
+    streamed_lines = []
     if process.stdout:
         while True:
             if cancel_cb and cancel_cb():
@@ -1102,14 +1148,19 @@ def _run_command(command, log_cb=None, stream_output=False, cancel_cb=None, time
                 break
             line = process.stdout.readline()
             if line:
+                clean_line = line.rstrip()
+                streamed_lines.append(clean_line)
+                if len(streamed_lines) > 120:
+                    streamed_lines = streamed_lines[-120:]
                 if log_cb:
-                    log_cb(line.rstrip())
+                    log_cb(clean_line)
             elif process.poll() is not None:
                 break
             else:
                 time.sleep(0.2)
     returncode = process.wait()
-    result = subprocess.CompletedProcess(command, returncode, '', '')
+    stderr_summary = '\n'.join(streamed_lines[-40:]) if streamed_lines else ''
+    result = subprocess.CompletedProcess(command, returncode, '', stderr_summary)
     return result
 
 def _choose_primary_app(apps):
@@ -1752,7 +1803,7 @@ def delete_duplicates(dry_run=False, verbose=False, detail_limit=200):
         results['success'] = False
     return results
 
-def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbose=False, detail_limit=200, log_cb=None, progress_cb=None, stream_output=False, threads=None, library_id=None, cancel_cb=None, timeout_seconds=None, min_size_bytes=None):
+def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbose=False, detail_limit=200, log_cb=None, progress_cb=None, stream_output=False, threads=None, library_id=None, cancel_cb=None, timeout_seconds=None, min_size_bytes=None, verify=True):
     results = {
         'success': True,
         'converted': 0,
@@ -1816,12 +1867,13 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
                 progress_cb(processed, total_files)
             continue
 
-        output_file = os.path.splitext(file_entry.filepath)[0] + '.nsz'
-        if os.path.exists(output_file):
+        output_file = _expected_compressed_output_path(file_entry.filepath)
+        existing_output = _resolve_existing_output_path(output_file)
+        if existing_output and os.path.exists(existing_output):
             results['skipped'] += 1
-            add_detail(f"Skip existing output: {output_file}.")
+            add_detail(f"Skip existing output: {existing_output}.")
             if log_cb:
-                log_cb(f"Skip existing output: {output_file}.")
+                log_cb(f"Skip existing output: {existing_output}.")
             processed += 1
             if progress_cb:
                 progress_cb(processed, total_files)
@@ -1831,7 +1883,8 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
             command_template,
             file_entry.filepath,
             output_file,
-            threads=threads
+            threads=threads,
+            verify=verify
         )
 
         if dry_run:
@@ -1855,13 +1908,16 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
                 timeout_seconds=timeout_seconds
             )
             if process.returncode != 0:
-                results['errors'].append(process.stderr.strip() or 'Conversion failed.')
-                add_detail(f"Error converting {file_entry.filepath}: {process.stderr.strip() or 'Conversion failed.'}.")
+                failed_output = _resolve_existing_output_path(output_file)
+                failure_message = _summarize_conversion_failure(process.stderr, failed_output)
+                results['errors'].append(failure_message)
+                add_detail(f"Error converting {file_entry.filepath}: {failure_message}.")
                 processed += 1
                 if progress_cb:
                     progress_cb(processed, total_files)
                 continue
-            if not os.path.exists(output_file):
+            output_file = _resolve_existing_output_path(output_file)
+            if not output_file or not os.path.exists(output_file):
                 results['errors'].append(f'Output not found: {output_file}')
                 add_detail(f"Error missing output: {output_file}.")
                 processed += 1
@@ -1869,13 +1925,14 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
                     progress_cb(processed, total_files)
                 continue
 
+            output_ext = os.path.splitext(output_file)[1].lstrip('.').lower() or 'nsz'
             if delete_original:
                 old_path = file_entry.filepath
                 if os.path.exists(old_path):
                     os.remove(old_path)
                 library_path = get_library_path(file_entry.library_id)
                 update_file_path(library_path, old_path, output_file)
-                file_entry.extension = 'nsz'
+                file_entry.extension = output_ext
                 file_entry.compressed = True
                 file_entry.size = os.path.getsize(output_file)
                 db.session.commit()
@@ -1885,7 +1942,7 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
                 folder = _compute_relative_folder(library_path, output_file)
                 existing_file = Files.query.filter_by(filepath=output_file).first()
                 if existing_file:
-                    existing_file.extension = 'nsz'
+                    existing_file.extension = output_ext
                     existing_file.compressed = True
                     existing_file.size = os.path.getsize(output_file)
                     for app in list(file_entry.apps):
@@ -1899,7 +1956,7 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
                         library_id=file_entry.library_id,
                         folder=folder,
                         filename=os.path.basename(output_file),
-                        extension='nsz',
+                        extension=output_ext,
                         size=os.path.getsize(output_file),
                         compressed=True,
                         multicontent=file_entry.multicontent,
@@ -1950,7 +2007,7 @@ def list_convertible_files(limit=2000, library_id=None, min_size_bytes=200 * 102
     ]
     return filtered
 
-def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_run=False, verbose=False, log_cb=None, progress_cb=None, stream_output=False, threads=None, cancel_cb=None, timeout_seconds=None):
+def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_run=False, verbose=False, log_cb=None, progress_cb=None, stream_output=False, threads=None, cancel_cb=None, timeout_seconds=None, verify=True):
     results = {
         'success': True,
         'converted': 0,
@@ -1987,18 +2044,20 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
         results['details'].append(warning)
         if log_cb:
             log_cb(warning)
-    output_file = os.path.splitext(file_entry.filepath)[0] + '.nsz'
-    if os.path.exists(output_file):
+    output_file = _expected_compressed_output_path(file_entry.filepath)
+    existing_output = _resolve_existing_output_path(output_file)
+    if existing_output and os.path.exists(existing_output):
         results['skipped'] = 1
         if verbose:
-            results['details'].append(f"Skip existing output: {output_file}.")
+            results['details'].append(f"Skip existing output: {existing_output}.")
         return results
 
     command = _format_nsz_command(
         command_template,
         file_entry.filepath,
         output_file,
-        threads=threads
+        threads=threads,
+        verify=verify
     )
 
     if cancel_cb and cancel_cb():
@@ -2025,14 +2084,17 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
             timeout_seconds=timeout_seconds
         )
         if process.returncode != 0:
+            failed_output = _resolve_existing_output_path(output_file)
+            failure_message = _summarize_conversion_failure(process.stderr, failed_output)
             results['success'] = False
-            results['errors'].append(process.stderr.strip() or 'Conversion failed.')
+            results['errors'].append(failure_message)
             if verbose:
-                results['details'].append(f"Error converting {file_entry.filepath}: {process.stderr.strip() or 'Conversion failed.'}.")
+                results['details'].append(f"Error converting {file_entry.filepath}: {failure_message}.")
             if progress_cb:
                 progress_cb(1, 1)
             return results
-        if not os.path.exists(output_file):
+        output_file = _resolve_existing_output_path(output_file)
+        if not output_file or not os.path.exists(output_file):
             results['success'] = False
             results['errors'].append(f'Output not found: {output_file}')
             if verbose:
@@ -2041,13 +2103,14 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
                 progress_cb(1, 1)
             return results
 
+        output_ext = os.path.splitext(output_file)[1].lstrip('.').lower() or 'nsz'
         if delete_original:
             old_path = file_entry.filepath
             if os.path.exists(old_path):
                 os.remove(old_path)
             library_path = get_library_path(file_entry.library_id)
             update_file_path(library_path, old_path, output_file)
-            file_entry.extension = 'nsz'
+            file_entry.extension = output_ext
             file_entry.compressed = True
             file_entry.size = os.path.getsize(output_file)
             db.session.commit()
@@ -2058,7 +2121,7 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
             folder = _compute_relative_folder(library_path, output_file)
             existing_file = Files.query.filter_by(filepath=output_file).first()
             if existing_file:
-                existing_file.extension = 'nsz'
+                existing_file.extension = output_ext
                 existing_file.compressed = True
                 existing_file.size = os.path.getsize(output_file)
                 for app in list(file_entry.apps):
@@ -2073,7 +2136,7 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
                     library_id=file_entry.library_id,
                     folder=folder,
                     filename=os.path.basename(output_file),
-                    extension='nsz',
+                    extension=output_ext,
                     size=os.path.getsize(output_file),
                     compressed=True,
                     multicontent=file_entry.multicontent,
