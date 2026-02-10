@@ -1904,6 +1904,19 @@ def _job_finish(job_id, results):
                 if estimated_total > 0:
                     progress['total'] = estimated_total
                     progress['done'] = estimated_total
+        final_total = int(progress.get('total') or 0)
+        final_done = int(progress.get('done') or 0)
+        if final_total > 0 and final_done >= final_total:
+            progress['percent'] = 100.0
+        if job['status'] == 'success':
+            progress['message'] = 'Conversion complete.'
+            progress['stage'] = 'completed'
+        elif job['status'] == 'cancelled':
+            progress['message'] = 'Conversion cancelled.'
+            progress['stage'] = 'cancelled'
+        else:
+            progress['message'] = 'Conversion failed.'
+            progress['stage'] = 'failed'
         job['updated_at'] = time.time()
         if len(conversion_jobs) > conversion_job_limit:
             oldest = sorted(conversion_jobs.values(), key=lambda item: item['created_at'])[:len(conversion_jobs) - conversion_job_limit]
@@ -3309,24 +3322,39 @@ def manage_convert_job():
 
     def _run_job():
         with app.app_context():
-            results = convert_to_nsz(
-                command_template=command,
-                delete_original=delete_original,
-                dry_run=dry_run,
-                verbose=verbose,
-                log_cb=lambda msg: _job_log(job_id, msg),
-                progress_cb=lambda done, total: _job_progress(job_id, done, total),
-                stream_output=True,
-                threads=threads,
-                verify=verify,
-                library_id=library_id,
-                cancel_cb=lambda: _job_is_cancelled(job_id),
-                timeout_seconds=timeout_seconds,
-                min_size_bytes=200 * 1024 * 1024
-            )
+            try:
+                results = convert_to_nsz(
+                    command_template=command,
+                    delete_original=delete_original,
+                    dry_run=dry_run,
+                    verbose=verbose,
+                    log_cb=lambda msg: _job_log(job_id, msg),
+                    progress_cb=lambda done, total: _job_progress(job_id, done, total),
+                    stream_output=True,
+                    threads=threads,
+                    verify=verify,
+                    library_id=library_id,
+                    cancel_cb=lambda: _job_is_cancelled(job_id),
+                    timeout_seconds=timeout_seconds,
+                    min_size_bytes=200 * 1024 * 1024
+                )
+            except Exception as e:
+                logger.exception('Unexpected error while running conversion job %s', job_id)
+                results = {
+                    'success': False,
+                    'converted': 0,
+                    'skipped': 0,
+                    'deleted': 0,
+                    'moved': 0,
+                    'errors': [f'Unexpected conversion job error: {e}'],
+                    'details': []
+                }
             _job_finish(job_id, results)
             if results.get('success') and not dry_run:
-                post_library_change()
+                try:
+                    post_library_change()
+                except Exception:
+                    logger.exception('Conversion job %s succeeded but post_library_change failed', job_id)
 
     thread = threading.Thread(target=_run_job, daemon=True)
     thread.start()
@@ -3351,23 +3379,38 @@ def manage_convert_single_job():
 
     def _run_job():
         with app.app_context():
-            results = convert_single_to_nsz(
-                file_id=int(file_id),
-                command_template=command,
-                delete_original=delete_original,
-                dry_run=dry_run,
-                verbose=verbose,
-                log_cb=lambda msg: _job_log(job_id, msg),
-                progress_cb=lambda done, total: _job_progress(job_id, done, total),
-                stream_output=True,
-                threads=threads,
-                verify=verify,
-                cancel_cb=lambda: _job_is_cancelled(job_id),
-                timeout_seconds=timeout_seconds
-            )
+            try:
+                results = convert_single_to_nsz(
+                    file_id=int(file_id),
+                    command_template=command,
+                    delete_original=delete_original,
+                    dry_run=dry_run,
+                    verbose=verbose,
+                    log_cb=lambda msg: _job_log(job_id, msg),
+                    progress_cb=lambda done, total: _job_progress(job_id, done, total),
+                    stream_output=True,
+                    threads=threads,
+                    verify=verify,
+                    cancel_cb=lambda: _job_is_cancelled(job_id),
+                    timeout_seconds=timeout_seconds
+                )
+            except Exception as e:
+                logger.exception('Unexpected error while running single conversion job %s', job_id)
+                results = {
+                    'success': False,
+                    'converted': 0,
+                    'skipped': 0,
+                    'deleted': 0,
+                    'moved': 0,
+                    'errors': [f'Unexpected single conversion job error: {e}'],
+                    'details': []
+                }
             _job_finish(job_id, results)
             if results.get('success') and not dry_run:
-                post_library_change()
+                try:
+                    post_library_change()
+                except Exception:
+                    logger.exception('Single conversion job %s succeeded but post_library_change failed', job_id)
 
     thread = threading.Thread(target=_run_job, daemon=True)
     thread.start()
