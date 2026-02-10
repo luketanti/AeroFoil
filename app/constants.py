@@ -81,10 +81,10 @@ DEFAULT_SETTINGS = {
         "enabled": False,
         "interval_minutes": 60,
         "min_seeders": 2,
-        "required_terms": ["update"],
+        "required_terms": [],
         "blacklist_terms": [],
         "search_prefix": "Nintendo Switch",
-        "search_suffix": "update",
+        "search_suffix": "",
         "search_char_replacements": [
             {"from": "™", "to": ""},
             {"from": "®", "to": ""},
