@@ -28,13 +28,13 @@ def gen_shop_files(db):
         })
     return shop_files
 
-def encrypt_shop(shop, public_key_pem=None):
+def encrypt_shop(shop, public_key_pem=None, compression_level=6):
     input = json.dumps(shop).encode('utf-8')
     # random 128-bit AES key (16 bytes), used later for symmetric encryption (AES)
     aesKey = secrets.token_bytes(16)
     # zstandard compression
     flag = 0xFD
-    cctx = zstd.ZstdCompressor(level=22)
+    cctx = zstd.ZstdCompressor(level=max(1, min(int(compression_level or 6), 22)))
     buf = cctx.compress(input)
     sz = len(buf)
 

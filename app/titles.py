@@ -2,8 +2,10 @@ import os
 import sys
 import re
 import json
+import unicodedata
 import requests
 import threading
+import time
 from contextlib import contextmanager
 
 from app import titledb
@@ -95,6 +97,15 @@ _titles_images_by_title_id = None
 _versions_db = None
 _versions_txt_db = None
 _titledb_lock = threading.Lock()
+_missing_titledb_log_lock = threading.Lock()
+_missing_titledb_last_log = {}
+_MISSING_TITLE_LOG_TTL_S = 3600
+_TITLEDB_STATE_WARN_TTL_S = 60
+_titledb_state_warn_last_log = {}
+_MISSING_FILES_RECOVERY_COOLDOWN_S = 60
+_missing_files_recovery_last_attempt_ts = 0.0
+_missing_files_recovery_in_progress = False
+_titledb_data_signature = None
 
 class CorruptedTitleDBFileError(Exception):
     def __init__(self, file_path, label, original_error):
@@ -144,6 +155,57 @@ def _recover_corrupted_titledb_file(app_settings, file_path, label):
     except Exception as e:
         logger.warning("Failed to remove corrupted TitleDB file %s: %s", rel_path, e)
     titledb.update_titledb(app_settings)
+
+def _required_titledb_files(app_settings):
+    return [
+        ('cnmts', os.path.join(TITLEDB_DIR, 'cnmts.json')),
+        ('region_titles', os.path.join(TITLEDB_DIR, titledb.get_region_titles_file(app_settings))),
+        ('versions', os.path.join(TITLEDB_DIR, 'versions.json')),
+        ('versions_txt', os.path.join(TITLEDB_DIR, 'versions.txt')),
+    ]
+
+def _missing_titledb_files(required_files):
+    return [(label, path) for label, path in (required_files or []) if not os.path.isfile(path)]
+
+def _build_titledb_data_signature(required_files):
+    parts = []
+    for label, path in (required_files or []):
+        try:
+            stat = os.stat(path)
+            parts.append(f"{label}:{os.path.basename(path)}:{int(stat.st_size)}:{int(getattr(stat, 'st_mtime_ns', int(stat.st_mtime * 1e9)))}")
+        except Exception:
+            parts.append(f"{label}:{os.path.basename(path)}:missing")
+    return "|".join(parts)
+
+def _warn_titledb_state_once(key, message, *args):
+    now = time.time()
+    should_log = False
+    with _missing_titledb_log_lock:
+        last_logged = float(_titledb_state_warn_last_log.get(key, 0.0))
+        if (now - last_logged) >= _TITLEDB_STATE_WARN_TTL_S:
+            _titledb_state_warn_last_log[key] = now
+            should_log = True
+        if len(_titledb_state_warn_last_log) > 128:
+            cutoff = now - (_TITLEDB_STATE_WARN_TTL_S * 2)
+            stale_keys = [k for k, ts in _titledb_state_warn_last_log.items() if ts < cutoff]
+            for stale_key in stale_keys:
+                _titledb_state_warn_last_log.pop(stale_key, None)
+    if should_log:
+        logger.warning(message, *args)
+
+def _recover_missing_titledb_files_background(app_settings):
+    global _missing_files_recovery_in_progress
+    try:
+        titledb.update_titledb(app_settings)
+    except Exception as e:
+        logger.warning(f"Failed to recover missing TitleDB files: {e}")
+    finally:
+        with _titledb_lock:
+            _missing_files_recovery_in_progress = False
+
+def get_titledb_cache_token():
+    with _titledb_lock:
+        return str(_titledb_data_signature or 'missing')
 
 
 def _ensure_titledb_descriptions_file(app_settings):
@@ -233,7 +295,7 @@ def identify_appId(app_id):
     
     global _cnmts_db
     if _cnmts_db is None:
-        logger.warning("cnmts_db is not loaded. Call load_titledb first.")
+        _warn_titledb_state_once('cnmts_not_loaded', "cnmts_db is not loaded. Call load_titledb first.")
         return None, None
 
     if app_id in _cnmts_db:
@@ -292,6 +354,9 @@ def load_titledb():
     global _titles_images_by_title_id
     global identification_in_progress_count
     global _titles_db_loaded
+    global _missing_files_recovery_last_attempt_ts
+    global _missing_files_recovery_in_progress
+    global _titledb_data_signature
     with _titledb_lock:
         if _titles_db_loaded:
             identification_in_progress_count += 1
@@ -300,30 +365,43 @@ def load_titledb():
         logger.info("Loading TitleDBs into memory...")
         app_settings = load_settings()
 
-        # Check if TitleDB directory exists and has required files.
+        # Ensure directory exists before any recovery attempt.
         if not os.path.isdir(TITLEDB_DIR):
-            logger.warning(f"TitleDB directory {TITLEDB_DIR} does not exist. TitleDB files need to be downloaded first.")
+            try:
+                os.makedirs(TITLEDB_DIR, exist_ok=True)
+            except Exception:
+                pass
+
+        required_files = _required_titledb_files(app_settings)
+        missing_files = _missing_titledb_files(required_files)
+        if missing_files:
+            missing_parts = [f"{label}:{os.path.basename(path)}" for label, path in missing_files]
+            _titledb_data_signature = "missing|" + ",".join(sorted(missing_parts))
+            missing_names = ", ".join([os.path.basename(path) for _, path in missing_files])
+            _warn_titledb_state_once('missing_required_files', "Missing required TitleDB file(s): %s", missing_names)
+            now = time.time()
+            should_attempt_recovery = (
+                not _missing_files_recovery_in_progress and
+                (now - float(_missing_files_recovery_last_attempt_ts or 0.0))
+                >= float(_MISSING_FILES_RECOVERY_COOLDOWN_S)
+            )
+            if should_attempt_recovery:
+                _missing_files_recovery_last_attempt_ts = now
+                _missing_files_recovery_in_progress = True
+                try:
+                    threading.Thread(
+                        target=_recover_missing_titledb_files_background,
+                        args=(app_settings,),
+                        daemon=True
+                    ).start()
+                except Exception:
+                    _missing_files_recovery_in_progress = False
             return False
 
-        cnmts_file = os.path.join(TITLEDB_DIR, 'cnmts.json')
-        if not os.path.isfile(cnmts_file):
-            logger.warning(f"TitleDB file {cnmts_file} does not exist. TitleDB files need to be downloaded first.")
-            return False
-
-        region_titles_file = os.path.join(TITLEDB_DIR, titledb.get_region_titles_file(app_settings))
-        if not os.path.isfile(region_titles_file):
-            logger.warning(f"TitleDB file {region_titles_file} does not exist. TitleDB files need to be downloaded first.")
-            return False
-
-        versions_file = os.path.join(TITLEDB_DIR, 'versions.json')
-        if not os.path.isfile(versions_file):
-            logger.warning(f"TitleDB file {versions_file} does not exist. TitleDB files need to be downloaded first.")
-            return False
-
-        versions_txt_file = os.path.join(TITLEDB_DIR, 'versions.txt')
-        if not os.path.isfile(versions_txt_file):
-            logger.warning(f"TitleDB file {versions_txt_file} does not exist. TitleDB files need to be downloaded first.")
-            return False
+        cnmts_file = dict(required_files).get('cnmts')
+        region_titles_file = dict(required_files).get('region_titles')
+        versions_file = dict(required_files).get('versions')
+        versions_txt_file = dict(required_files).get('versions_txt')
 
         for attempt in range(2):
             try:
@@ -394,20 +472,25 @@ def load_titledb():
                         _versions_txt_db[app_id] = version
 
                 _titles_db_loaded = True
+                _titledb_data_signature = _build_titledb_data_signature(required_files)
                 identification_in_progress_count += 1
                 logger.info("TitleDBs loaded.")
                 return True
             except CorruptedTitleDBFileError as e:
                 _reset_titledb_state()
                 if attempt == 0:
-                    _recover_corrupted_titledb_file(app_settings, e.file_path, e.label)
+                    try:
+                        _recover_corrupted_titledb_file(app_settings, e.file_path, e.label)
+                    except Exception as recovery_error:
+                        logger.error(f"Failed to recover corrupted TitleDB files: {recovery_error}")
+                        return False
                     continue
                 logger.error(f"Failed to load TitleDB files after recovery attempt: {e}")
-                raise
+                return False
             except Exception as e:
                 _reset_titledb_state()
                 logger.error(f"Failed to load TitleDB files: {e}")
-                raise
+                return False
 
 def release_titledb():
     global identification_in_progress_count
@@ -435,6 +518,7 @@ def get_titledb_diagnostics():
     with _titledb_lock:
         return {
             'loaded': bool(_titles_db_loaded),
+            'cache_token': str(_titledb_data_signature or 'missing'),
             'refcount': int(identification_in_progress_count or 0),
             'sizes': {
                 'cnmts': len(_cnmts_db) if isinstance(_cnmts_db, dict) else 0,
@@ -621,7 +705,7 @@ def get_game_info(title_id):
     global _titles_desc_by_title_id
     global _titles_images_by_title_id
     if _titles_db is None and _titles_by_title_id is None:
-        logger.warning("titles_db is not loaded. Call load_titledb first.")
+        _warn_titledb_state_once('titles_not_loaded', "titles_db is not loaded. Call load_titledb first.")
         # Return default structure so games can still be displayed
         return _apply_manual_title_override(title_id, {
             'name': 'Unrecognized',
@@ -671,7 +755,21 @@ def get_game_info(title_id):
             'screenshots': screenshots,
         })
     except Exception:
-        logger.error(f"Title ID not found in titledb: {title_id}")
+        normalized_title_id = str(title_id or '').strip().upper()
+        now = time.time()
+        should_log = False
+        with _missing_titledb_log_lock:
+            last_logged = float(_missing_titledb_last_log.get(normalized_title_id, 0.0))
+            if (now - last_logged) >= _MISSING_TITLE_LOG_TTL_S:
+                _missing_titledb_last_log[normalized_title_id] = now
+                should_log = True
+            if len(_missing_titledb_last_log) > 5000:
+                cutoff = now - (_MISSING_TITLE_LOG_TTL_S * 2)
+                stale_keys = [k for k, ts in _missing_titledb_last_log.items() if ts < cutoff]
+                for key in stale_keys:
+                    _missing_titledb_last_log.pop(key, None)
+        if should_log:
+            logger.warning("Title ID not found in titledb: %s", normalized_title_id or title_id)
         return _apply_manual_title_override(title_id, {
             'name': 'Unrecognized',
             'bannerUrl': '//placehold.it/400x200',
@@ -692,10 +790,20 @@ def search_titles(query, limit=20):
     global _titles_db
     global _titles_by_title_id
     if _titles_db is None and _titles_by_title_id is None:
-        logger.warning("titles_db is not loaded. Call load_titledb first.")
+        _warn_titledb_state_once('titles_not_loaded', "titles_db is not loaded. Call load_titledb first.")
         return []
 
-    q = (query or '').strip().lower()
+    def _normalize_search_text(value):
+        text = str(value or '')
+        try:
+            text = unicodedata.normalize('NFKD', text)
+            text = text.encode('ascii', 'ignore').decode('ascii')
+        except Exception:
+            pass
+        text = re.sub(r"[^A-Za-z0-9\s]+", " ", text)
+        return re.sub(r"\s+", " ", text).strip().lower()
+
+    q = _normalize_search_text(query)
     if not q:
         return []
 
@@ -717,7 +825,7 @@ def search_titles(query, limit=20):
         if not tid or tid in seen_ids:
             continue
 
-        hay = f"{tid} {name}".lower()
+        hay = _normalize_search_text(f"{tid} {name}")
         if q not in hay:
             continue
 
@@ -742,7 +850,7 @@ def get_game_latest_version(all_existing_versions):
 def get_all_existing_versions(titleid):
     global _versions_db
     if _versions_db is None:
-        logger.warning("versions_db is not loaded. Call load_titledb first.")
+        _warn_titledb_state_once('versions_not_loaded', "versions_db is not loaded. Call load_titledb first.")
         return []
 
     if not titleid:
@@ -767,7 +875,7 @@ def get_all_existing_versions(titleid):
 def get_all_app_existing_versions(app_id):
     global _cnmts_db
     if _cnmts_db is None:
-        logger.warning("cnmts_db is not loaded. Call load_titledb first.")
+        _warn_titledb_state_once('cnmts_not_loaded', "cnmts_db is not loaded. Call load_titledb first.")
         return None
 
     if not app_id:
@@ -789,7 +897,7 @@ def get_all_app_existing_versions(app_id):
 def get_app_id_version_from_versions_txt(app_id):
     global _versions_txt_db
     if _versions_txt_db is None:
-        logger.warning("versions_txt_db is not loaded. Call load_titledb first.")
+        _warn_titledb_state_once('versions_txt_not_loaded', "versions_txt_db is not loaded. Call load_titledb first.")
         return None
     if not app_id:
         logger.warning("get_app_id_version_from_versions_txt called with None or empty app_id")
@@ -799,7 +907,7 @@ def get_app_id_version_from_versions_txt(app_id):
 def get_all_existing_dlc(title_id):
     global _cnmts_db
     if _cnmts_db is None:
-        logger.warning("cnmts_db is not loaded. Call load_titledb first.")
+        _warn_titledb_state_once('cnmts_not_loaded', "cnmts_db is not loaded. Call load_titledb first.")
         return []
 
     if not title_id:

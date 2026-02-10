@@ -1,4 +1,3 @@
-import hashlib
 import copy
 import gc
 import os
@@ -197,7 +196,7 @@ def init_libraries(app, watcher, paths):
                 # Ensure watchdog is monitoring existing library
                 watcher.add_directory(path)
 
-def add_files_to_library(library, files):
+def add_files_to_library(library, files, check_existing=True):
     nb_to_identify = len(files)
     if isinstance(library, int) or library.isdigit():
         library_id = library
@@ -208,7 +207,7 @@ def add_files_to_library(library, files):
 
     library_path = get_library_path(library_id)
     for n, filepath in enumerate(files):
-        if file_exists_in_db(filepath):
+        if check_existing and file_exists_in_db(filepath):
             logger.debug(f'File already in database, skipping: {filepath}')
             continue
         file = filepath.replace(library_path, "")
@@ -268,23 +267,26 @@ def scan_library_path(library_path):
                 continue
             pending_new_files.append(filepath)
             if len(pending_new_files) >= _SCAN_ADD_BATCH_SIZE:
-                add_files_to_library(library_id, pending_new_files)
+                add_files_to_library(library_id, pending_new_files, check_existing=False)
                 added += len(pending_new_files)
                 pending_new_files.clear()
                 db.session.expunge_all()
                 _diag_sample_identity_map(phase)
 
         if pending_new_files:
-            add_files_to_library(library_id, pending_new_files)
+            add_files_to_library(library_id, pending_new_files, check_existing=False)
             added += len(pending_new_files)
             pending_new_files.clear()
             _diag_sample_identity_map(phase)
 
-        missing_count = len(existing_filepaths)
-        for n, filepath in enumerate(existing_filepaths, start=1):
-            delete_file_by_filepath(filepath)
+        missing_paths = list(existing_filepaths)
+        missing_count = len(missing_paths)
+        for n in range(0, missing_count, _SCAN_DELETE_PROGRESS_INTERVAL):
+            batch_paths = missing_paths[n:n + _SCAN_DELETE_PROGRESS_INTERVAL]
+            delete_files_by_filepaths_batch(batch_paths, commit=True)
             if n % _SCAN_DELETE_PROGRESS_INTERVAL == 0:
-                logger.info(f"Removed {n}/{missing_count} missing files from DB for {library_path}.")
+                removed = min(n + _SCAN_DELETE_PROGRESS_INTERVAL, missing_count)
+                logger.info(f"Removed {removed}/{missing_count} missing files from DB for {library_path}.")
                 db.session.expunge_all()
                 _diag_sample_identity_map(phase)
 
@@ -525,6 +527,31 @@ def add_missing_apps_to_db():
             if not title_rows:
                 break
             last_title_pk = title_rows[-1].id
+            title_db_ids = [row.id for row in title_rows]
+
+            existing_apps_rows = (
+                db.session.query(
+                    Apps.title_id,
+                    Apps.app_id,
+                    Apps.app_version,
+                    Apps.app_type,
+                )
+                .filter(Apps.title_id.in_(title_db_ids))
+                .all()
+            )
+            existing_base_by_title = {}
+            existing_app_pairs = set()
+            for app_row in existing_apps_rows:
+                title_fk = app_row.title_id
+                if title_fk not in existing_base_by_title:
+                    existing_base_by_title[title_fk] = False
+                if app_row.app_type == APP_TYPE_BASE:
+                    existing_base_by_title[title_fk] = True
+                existing_app_pairs.add((
+                    int(title_fk),
+                    str(app_row.app_id or ''),
+                    str(app_row.app_version or '0'),
+                ))
 
             for row in title_rows:
                 title_id = row.title_id
@@ -535,12 +562,7 @@ def add_missing_apps_to_db():
                     continue
 
                 # Add base game if not present at all (any base version).
-                existing_bases = [
-                    a for a in get_all_title_apps(title_id)
-                    if a.get('app_type') == APP_TYPE_BASE
-                ]
-
-                if not existing_bases:
+                if not existing_base_by_title.get(title_db_id, False):
                     new_base_app = Apps(
                         app_id=title_id,
                         app_version="0",
@@ -550,6 +572,8 @@ def add_missing_apps_to_db():
                     )
                     db.session.add(new_base_app)
                     apps_added += 1
+                    existing_base_by_title[title_db_id] = True
+                    existing_app_pairs.add((int(title_db_id), str(title_id), "0"))
                     logger.debug(f'Added missing base app: {title_id}')
 
                 # Add missing update versions.
@@ -557,9 +581,8 @@ def add_missing_apps_to_db():
                 for version_info in title_versions:
                     version = str(version_info['version'])
                     update_app_id = title_id[:-3] + '800'
-                    existing_update = get_app_by_id_and_version(update_app_id, version)
-
-                    if not existing_update:
+                    pair = (int(title_db_id), str(update_app_id), version)
+                    if pair not in existing_app_pairs:
                         new_update_app = Apps(
                             app_id=update_app_id,
                             app_version=version,
@@ -569,6 +592,7 @@ def add_missing_apps_to_db():
                         )
                         db.session.add(new_update_app)
                         apps_added += 1
+                        existing_app_pairs.add(pair)
                         logger.debug(f'Added missing update app: {update_app_id} v{version}')
 
                 # Add missing DLC.
@@ -578,18 +602,20 @@ def add_missing_apps_to_db():
                     if not dlc_versions:
                         continue
                     for dlc_version in dlc_versions:
-                        existing_dlc = get_app_by_id_and_version(dlc_app_id, str(dlc_version))
-                        if existing_dlc:
+                        dlc_version_str = str(dlc_version)
+                        pair = (int(title_db_id), str(dlc_app_id), dlc_version_str)
+                        if pair in existing_app_pairs:
                             continue
                         new_dlc_app = Apps(
                             app_id=dlc_app_id,
-                            app_version=str(dlc_version),
+                            app_version=dlc_version_str,
                             app_type=APP_TYPE_DLC,
                             owned=False,
                             title_id=title_db_id
                         )
                         db.session.add(new_dlc_app)
                         apps_added += 1
+                        existing_app_pairs.add(pair)
                         logger.debug(f'Added missing DLC app: {dlc_app_id} v{dlc_version}')
 
                 if processed % _IDENTIFY_COMMIT_INTERVAL == 0:
@@ -651,41 +677,61 @@ def update_titles():
             if not title_batch:
                 break
             last_title_pk = title_batch[-1].id
+            title_batch_ids = [title.id for title in title_batch]
+            app_rows = (
+                db.session.query(
+                    Apps.title_id,
+                    Apps.app_id,
+                    Apps.app_version,
+                    Apps.app_type,
+                    Apps.owned
+                )
+                .filter(Apps.title_id.in_(title_batch_ids))
+                .all()
+            )
+            apps_by_title_fk = {}
+            for app_row in app_rows:
+                apps_by_title_fk.setdefault(app_row.title_id, []).append(app_row)
 
             for title in title_batch:
-                title_id = title.title_id
-                title_apps = get_all_title_apps(title_id)
+                title_apps = apps_by_title_fk.get(title.id, [])
 
                 # check have_base - look for owned base apps
-                owned_base_apps = [app for app in title_apps if app.get('app_type') == APP_TYPE_BASE and app.get('owned')]
+                owned_base_apps = [
+                    app for app in title_apps
+                    if app.app_type == APP_TYPE_BASE and bool(app.owned)
+                ]
                 have_base = len(owned_base_apps) > 0
 
                 # check up_to_date - find highest owned update version
-                owned_update_apps = [app for app in title_apps if app.get('app_type') == APP_TYPE_UPD and app.get('owned')]
-                available_update_apps = [app for app in title_apps if app.get('app_type') == APP_TYPE_UPD]
+                owned_update_apps = [
+                    app for app in title_apps
+                    if app.app_type == APP_TYPE_UPD and bool(app.owned)
+                ]
+                available_update_apps = [app for app in title_apps if app.app_type == APP_TYPE_UPD]
 
                 if not available_update_apps:
                     up_to_date = True
                 elif not owned_update_apps:
                     up_to_date = False
                 else:
-                    highest_available_version = max(int(app['app_version']) for app in available_update_apps)
-                    highest_owned_version = max(int(app['app_version']) for app in owned_update_apps)
+                    highest_available_version = max(_safe_int(app.app_version) for app in available_update_apps)
+                    highest_owned_version = max(_safe_int(app.app_version) for app in owned_update_apps)
                     up_to_date = highest_owned_version >= highest_available_version
 
                 # check complete - latest version of all available DLC are owned
-                available_dlc_apps = [app for app in title_apps if app.get('app_type') == APP_TYPE_DLC]
+                available_dlc_apps = [app for app in title_apps if app.app_type == APP_TYPE_DLC]
                 if not available_dlc_apps:
                     complete = True
                 else:
                     dlc_by_id = {}
                     for app in available_dlc_apps:
-                        app_id = app['app_id']
-                        version = int(app['app_version'])
+                        app_id = app.app_id
+                        version = _safe_int(app.app_version)
                         if app_id not in dlc_by_id or version > dlc_by_id[app_id]['version']:
                             dlc_by_id[app_id] = {
                                 'version': version,
-                                'owned': app.get('owned', False)
+                                'owned': bool(app.owned)
                             }
                     complete = all(dlc_info['owned'] for dlc_info in dlc_by_id.values())
 
@@ -725,33 +771,16 @@ def get_library_status(title_id):
     }
     return library_status
 
-def compute_apps_hash(apps=None):
-    """
-    Computes a hash of all Apps table content to detect changes in library state.
-    """
-    hash_md5 = hashlib.md5()
-    if apps is None:
-        apps = get_all_apps()
-    
-    # Sort apps with safe handling of None values
-    for app in sorted(apps, key=lambda x: (x['app_id'] or '', x['app_version'] or '')):
-        hash_md5.update((app['app_id'] or '').encode())
-        hash_md5.update((app['app_version'] or '').encode())
-        hash_md5.update((app['app_type'] or '').encode())
-        hash_md5.update(str(app['owned'] or False).encode())
-        hash_md5.update((app['title_id'] or '').encode())
-        hash_md5.update(str(app.get('size') or 0).encode())
-        hash_md5.update(str(app.get('title_db_id') or 0).encode())
-
-    # Include manual metadata overrides so cache invalidates when admins edit unknown titles.
-    try:
-        from app.settings import load_settings
-        settings = load_settings()
-        overrides = (settings.get('titles') or {}).get('manual_overrides') or {}
-        hash_md5.update(json.dumps(overrides, sort_keys=True).encode())
-    except Exception:
-        pass
-    return hash_md5.hexdigest()
+def get_library_cache_state_token():
+    """Cheap invalidation token based on persistent state metadata."""
+    parts = []
+    for label, path in (('db', DB_FILE), ('config', CONFIG_FILE)):
+        try:
+            st = os.stat(path)
+            parts.append(f"{label}:{int(st.st_mtime_ns)}:{int(st.st_size)}")
+        except OSError:
+            parts.append(f"{label}:missing")
+    return "|".join(parts)
 
 
 # Bump this when the cached library schema changes.
@@ -769,11 +798,12 @@ def is_library_unchanged():
     if saved_library.get('version') != LIBRARY_CACHE_VERSION:
         return False
 
-    if not saved_library.get('hash'):
+    saved_state_token = str(saved_library.get('state_token') or '').strip()
+    if not saved_state_token:
         return False
 
-    current_hash = compute_apps_hash()
-    return saved_library['hash'] == current_hash
+    current_state_token = get_library_cache_state_token()
+    return saved_state_token == current_state_token
 
 def save_library_to_disk(library_data):
     cache_path = Path(LIBRARY_CACHE_FILE)
@@ -928,7 +958,7 @@ def generate_library():
 
         library_data = {
             'version': LIBRARY_CACHE_VERSION,
-            'hash': compute_apps_hash(apps_snapshot),
+            'state_token': get_library_cache_state_token(),
             'library': sorted(games_info, key=lambda x: (
                 "title_id_name" not in x,
                 x.get("title_id_name", "Unrecognized") or "Unrecognized",
