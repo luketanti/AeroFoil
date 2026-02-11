@@ -1849,7 +1849,17 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
             if log_cb:
                 log_cb('Conversion cancelled.')
             break
-        if not file_entry.filepath or not os.path.exists(file_entry.filepath):
+        source_path = str(file_entry.filepath or '')
+        source_library_id = file_entry.library_id
+        source_multicontent = file_entry.multicontent
+        source_nb_content = file_entry.nb_content
+        source_size = file_entry.size
+        source_identification_type = file_entry.identification_type
+        source_identification_attempts = file_entry.identification_attempts
+        source_last_attempt = file_entry.last_attempt
+        source_apps = list(file_entry.apps or [])
+
+        if not source_path or not os.path.exists(source_path):
             results['skipped'] += 1
             add_detail('Skip missing file path.')
             if log_cb:
@@ -1859,17 +1869,17 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
                 progress_cb(processed, total_files)
             continue
 
-        if min_size_bytes and file_entry.size and file_entry.size < min_size_bytes:
+        if min_size_bytes and source_size and source_size < min_size_bytes:
             results['skipped'] += 1
-            add_detail(f"Skip small file (<{min_size_bytes} bytes): {file_entry.filepath}.")
+            add_detail(f"Skip small file (<{min_size_bytes} bytes): {source_path}.")
             if log_cb:
-                log_cb(f"Skip small file (<{min_size_bytes} bytes): {file_entry.filepath}.")
+                log_cb(f"Skip small file (<{min_size_bytes} bytes): {source_path}.")
             processed += 1
             if progress_cb:
                 progress_cb(processed, total_files)
             continue
 
-        output_file = _expected_compressed_output_path(file_entry.filepath)
+        output_file = _expected_compressed_output_path(source_path)
         existing_output = _resolve_existing_output_path(output_file)
         if existing_output and os.path.exists(existing_output):
             results['skipped'] += 1
@@ -1883,7 +1893,7 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
 
         command = _format_nsz_command(
             command_template,
-            file_entry.filepath,
+            source_path,
             output_file,
             threads=threads,
             verify=verify
@@ -1891,9 +1901,9 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
 
         if dry_run:
             results['converted'] += 1
-            add_detail(f"Plan convert: {file_entry.filepath} -> {output_file}.")
+            add_detail(f"Plan convert: {source_path} -> {output_file}.")
             if log_cb:
-                log_cb(f"Plan convert: {file_entry.filepath} -> {output_file}.")
+                log_cb(f"Plan convert: {source_path} -> {output_file}.")
             processed += 1
             if progress_cb:
                 progress_cb(processed, total_files)
@@ -1913,7 +1923,7 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
                 failed_output = _resolve_existing_output_path(output_file)
                 failure_message = _summarize_conversion_failure(process.stderr, failed_output)
                 results['errors'].append(failure_message)
-                add_detail(f"Error converting {file_entry.filepath}: {failure_message}.")
+                add_detail(f"Error converting {source_path}: {failure_message}.")
                 processed += 1
                 if progress_cb:
                     progress_cb(processed, total_files)
@@ -1929,10 +1939,10 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
 
             output_ext = os.path.splitext(output_file)[1].lstrip('.').lower() or 'nsz'
             if delete_original:
-                old_path = file_entry.filepath
+                old_path = source_path
                 if os.path.exists(old_path):
                     os.remove(old_path)
-                library_path = get_library_path(file_entry.library_id)
+                library_path = get_library_path(source_library_id)
                 update_file_path(library_path, old_path, output_file)
                 refreshed_entry = Files.query.filter_by(filepath=output_file).first()
                 if not refreshed_entry:
@@ -1943,14 +1953,14 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
                 db.session.commit()
                 add_detail(f"Converted and replaced: {old_path} -> {output_file}.")
             else:
-                library_path = get_library_path(file_entry.library_id)
+                library_path = get_library_path(source_library_id)
                 folder = _compute_relative_folder(library_path, output_file)
                 existing_file = Files.query.filter_by(filepath=output_file).first()
                 if existing_file:
                     existing_file.extension = output_ext
                     existing_file.compressed = True
                     existing_file.size = os.path.getsize(output_file)
-                    for app in list(file_entry.apps):
+                    for app in source_apps:
                         if existing_file not in app.files:
                             app.files.append(existing_file)
                     db.session.commit()
@@ -1958,25 +1968,25 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
                 else:
                     new_file = Files(
                         filepath=output_file,
-                        library_id=file_entry.library_id,
+                        library_id=source_library_id,
                         folder=folder,
                         filename=os.path.basename(output_file),
                         extension=output_ext,
                         size=os.path.getsize(output_file),
                         compressed=True,
-                        multicontent=file_entry.multicontent,
-                        nb_content=file_entry.nb_content,
+                        multicontent=source_multicontent,
+                        nb_content=source_nb_content,
                         identified=True,
-                        identification_type=file_entry.identification_type,
-                        identification_attempts=file_entry.identification_attempts,
-                        last_attempt=file_entry.last_attempt
+                        identification_type=source_identification_type,
+                        identification_attempts=source_identification_attempts,
+                        last_attempt=source_last_attempt
                     )
                     db.session.add(new_file)
                     db.session.flush()
-                    for app in list(file_entry.apps):
+                    for app in source_apps:
                         app.files.append(new_file)
                     db.session.commit()
-                    add_detail(f"Converted: {file_entry.filepath} -> {output_file}.")
+                    add_detail(f"Converted: {source_path} -> {output_file}.")
 
             results['converted'] += 1
             processed += 1
@@ -1984,9 +1994,9 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
                 progress_cb(processed, total_files)
         except Exception as e:
             db.session.rollback()
-            logger.error(f"Failed to convert {file_entry.filepath}: {e}")
+            logger.error(f"Failed to convert {source_path}: {e}")
             results['errors'].append(str(e))
-            add_detail(f"Error converting {file_entry.filepath}: {e}.")
+            add_detail(f"Error converting {source_path}: {e}.")
             processed += 1
             if progress_cb:
                 progress_cb(processed, total_files)
@@ -2034,7 +2044,16 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
             'details': []
         }
 
-    if not file_entry.filepath or not os.path.exists(file_entry.filepath):
+    source_path = str(file_entry.filepath or '')
+    source_library_id = file_entry.library_id
+    source_multicontent = file_entry.multicontent
+    source_nb_content = file_entry.nb_content
+    source_identification_type = file_entry.identification_type
+    source_identification_attempts = file_entry.identification_attempts
+    source_last_attempt = file_entry.last_attempt
+    source_apps = list(file_entry.apps or [])
+
+    if not source_path or not os.path.exists(source_path):
         results['success'] = False
         results['errors'].append('File path missing.')
         return results
@@ -2052,7 +2071,7 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
         results['details'].append(warning)
         if log_cb:
             log_cb(warning)
-    output_file = _expected_compressed_output_path(file_entry.filepath)
+    output_file = _expected_compressed_output_path(source_path)
     existing_output = _resolve_existing_output_path(output_file)
     if existing_output and os.path.exists(existing_output):
         results['skipped'] = 1
@@ -2062,7 +2081,7 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
 
     command = _format_nsz_command(
         command_template,
-        file_entry.filepath,
+        source_path,
         output_file,
         threads=threads,
         verify=verify
@@ -2076,7 +2095,7 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
     if dry_run:
         results['converted'] = 1
         if verbose:
-            results['details'].append(f"Plan convert: {file_entry.filepath} -> {output_file}.")
+            results['details'].append(f"Plan convert: {source_path} -> {output_file}.")
         if progress_cb:
             progress_cb(1, 1)
         return results
@@ -2097,7 +2116,7 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
             results['success'] = False
             results['errors'].append(failure_message)
             if verbose:
-                results['details'].append(f"Error converting {file_entry.filepath}: {failure_message}.")
+                results['details'].append(f"Error converting {source_path}: {failure_message}.")
             if progress_cb:
                 progress_cb(1, 1)
             return results
@@ -2113,10 +2132,10 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
 
         output_ext = os.path.splitext(output_file)[1].lstrip('.').lower() or 'nsz'
         if delete_original:
-            old_path = file_entry.filepath
+            old_path = source_path
             if os.path.exists(old_path):
                 os.remove(old_path)
-            library_path = get_library_path(file_entry.library_id)
+            library_path = get_library_path(source_library_id)
             update_file_path(library_path, old_path, output_file)
             refreshed_entry = Files.query.filter_by(filepath=output_file).first()
             if not refreshed_entry:
@@ -2128,14 +2147,14 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
             if verbose:
                 results['details'].append(f"Converted and replaced: {old_path} -> {output_file}.")
         else:
-            library_path = get_library_path(file_entry.library_id)
+            library_path = get_library_path(source_library_id)
             folder = _compute_relative_folder(library_path, output_file)
             existing_file = Files.query.filter_by(filepath=output_file).first()
             if existing_file:
                 existing_file.extension = output_ext
                 existing_file.compressed = True
                 existing_file.size = os.path.getsize(output_file)
-                for app in list(file_entry.apps):
+                for app in source_apps:
                     if existing_file not in app.files:
                         app.files.append(existing_file)
                 db.session.commit()
@@ -2144,37 +2163,37 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
             else:
                 new_file = Files(
                     filepath=output_file,
-                    library_id=file_entry.library_id,
+                    library_id=source_library_id,
                     folder=folder,
                     filename=os.path.basename(output_file),
                     extension=output_ext,
                     size=os.path.getsize(output_file),
                     compressed=True,
-                    multicontent=file_entry.multicontent,
-                    nb_content=file_entry.nb_content,
+                    multicontent=source_multicontent,
+                    nb_content=source_nb_content,
                     identified=True,
-                    identification_type=file_entry.identification_type,
-                    identification_attempts=file_entry.identification_attempts,
-                    last_attempt=file_entry.last_attempt
+                    identification_type=source_identification_type,
+                    identification_attempts=source_identification_attempts,
+                    last_attempt=source_last_attempt
                 )
                 db.session.add(new_file)
                 db.session.flush()
-                for app in list(file_entry.apps):
+                for app in source_apps:
                     app.files.append(new_file)
                 db.session.commit()
             if verbose:
-                results['details'].append(f"Converted: {file_entry.filepath} -> {output_file}.")
+                results['details'].append(f"Converted: {source_path} -> {output_file}.")
 
         results['converted'] = 1
         if progress_cb:
             progress_cb(1, 1)
     except Exception as e:
         db.session.rollback()
-        logger.error(f"Failed to convert {file_entry.filepath}: {e}")
+        logger.error(f"Failed to convert {source_path}: {e}")
         results['success'] = False
         results['errors'].append(str(e))
         if verbose:
-            results['details'].append(f"Error converting {file_entry.filepath}: {e}.")
+            results['details'].append(f"Error converting {source_path}: {e}.")
         if progress_cb:
             progress_cb(1, 1)
 
