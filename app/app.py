@@ -953,11 +953,21 @@ def _build_shop_sections_payload(limit):
             if item
         ]
         base_items.sort(key=lambda item: item['file_id'], reverse=True)
-        new_items = base_items[:limit]
+        discovery_limit = 40
+        new_items = base_items[:discovery_limit]
 
-        recommended_items = sorted(base_items, key=lambda item: item['download_count'], reverse=True)[:limit]
+        recommended_items = sorted(base_items, key=lambda item: item['download_count'], reverse=True)[:discovery_limit]
         if not any(item['download_count'] for item in recommended_items):
-            recommended_items = new_items[:limit]
+            recommended_items = new_items[:discovery_limit]
+
+        all_limit = None
+        if SHOP_SECTIONS_ALL_ITEMS_CAP is not None:
+            cap_value = int(SHOP_SECTIONS_ALL_ITEMS_CAP)
+            if not titledb_loaded and SHOP_SECTIONS_ALL_ITEMS_CAP_NO_TITLEDB is not None:
+                cap_value = min(cap_value, int(SHOP_SECTIONS_ALL_ITEMS_CAP_NO_TITLEDB))
+            all_limit = max(limit, cap_value)
+
+        updates_dlc_limit = all_limit if all_limit is not None else limit
 
         latest_update_by_title_id = {}
         for row in rows:
@@ -977,7 +987,7 @@ def _build_shop_sections_payload(limit):
             if item
         ]
         update_items_full.sort(key=lambda item: _safe_int(item['app_version']), reverse=True)
-        update_items = update_items_full[:limit]
+        update_items = update_items_full[:updates_dlc_limit]
 
         latest_dlc_by_app_id = {}
         for row in rows:
@@ -997,16 +1007,9 @@ def _build_shop_sections_payload(limit):
             if item
         ]
         dlc_items_full.sort(key=lambda item: _safe_int(item['app_version']), reverse=True)
-        dlc_items = dlc_items_full[:limit]
+        dlc_items = dlc_items_full[:updates_dlc_limit]
 
         all_total = len(base_items) + len(update_items_full) + len(dlc_items_full)
-        all_limit = None
-        if SHOP_SECTIONS_ALL_ITEMS_CAP is not None:
-            cap_value = int(SHOP_SECTIONS_ALL_ITEMS_CAP)
-            if not titledb_loaded and SHOP_SECTIONS_ALL_ITEMS_CAP_NO_TITLEDB is not None:
-                cap_value = min(cap_value, int(SHOP_SECTIONS_ALL_ITEMS_CAP_NO_TITLEDB))
-            all_limit = max(limit, cap_value)
-
         all_items = sorted(
             base_items + update_items_full + dlc_items_full,
             key=lambda item: str(item.get('name') or '').lower()
@@ -4323,6 +4326,18 @@ def shop_sections_api():
     except ValueError:
         limit = 50
 
+    is_cyberfoil = _is_cyberfoil_request()
+    if is_cyberfoil:
+        payload = _build_shop_sections_payload(limit)
+        _log_access(
+            kind='shop_sections',
+            filename=request.full_path if request.query_string else request.path,
+            ok=True,
+            status_code=200,
+            duration_ms=int((time.time() - start_ts) * 1000),
+        )
+        return jsonify(payload)
+
     now = time.time()
     state_token = _get_titledb_aware_state_token()
     payload = None
@@ -4368,15 +4383,6 @@ def shop_sections_api():
         payload = _build_shop_sections_payload(limit)
         if SHOP_SECTIONS_CACHE_TTL_S is None or SHOP_SECTIONS_CACHE_TTL_S > 0:
             _store_shop_sections_cache(payload, limit, now, state_token, persist_disk=True)
-
-    if _is_cyberfoil_request():
-        _log_access(
-            kind='shop_sections',
-            filename=request.full_path if request.query_string else request.path,
-            ok=True,
-            status_code=200,
-            duration_ms=int((time.time() - start_ts) * 1000),
-        )
 
     return jsonify(payload)
 
