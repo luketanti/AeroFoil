@@ -1187,6 +1187,73 @@ def _compute_relative_folder(library_path, full_path):
     normalized = folder.replace(library_path, '')
     return normalized if normalized.startswith(os.sep) else os.sep + normalized
 
+def _replace_or_create_converted_file_row(
+    source_file_id,
+    source_path,
+    output_file,
+    source_library_id,
+    output_ext,
+    source_multicontent,
+    source_nb_content,
+    source_identification_type,
+    source_identification_attempts,
+    source_last_attempt,
+    source_apps
+):
+    library_path = get_library_path(source_library_id)
+    folder = _compute_relative_folder(library_path, output_file)
+    row_data = {
+        'library_id': source_library_id,
+        'filepath': output_file,
+        'folder': folder,
+        'filename': os.path.basename(output_file),
+        'extension': output_ext,
+        'compressed': True,
+        'size': os.path.getsize(output_file),
+    }
+
+    updated = (
+        db.session.query(Files)
+        .filter(Files.id == source_file_id)
+        .update(row_data, synchronize_session=False)
+    )
+    if updated == 0 and source_path:
+        updated = (
+            db.session.query(Files)
+            .filter(Files.filepath == source_path)
+            .update(row_data, synchronize_session=False)
+        )
+    if updated == 0:
+        updated = (
+            db.session.query(Files)
+            .filter(Files.filepath == output_file)
+            .update(row_data, synchronize_session=False)
+        )
+
+    if updated > 0:
+        return
+
+    new_file = Files(
+        filepath=output_file,
+        library_id=source_library_id,
+        folder=folder,
+        filename=os.path.basename(output_file),
+        extension=output_ext,
+        size=os.path.getsize(output_file),
+        compressed=True,
+        multicontent=source_multicontent,
+        nb_content=source_nb_content,
+        identified=True,
+        identification_type=source_identification_type,
+        identification_attempts=source_identification_attempts,
+        last_attempt=source_last_attempt
+    )
+    db.session.add(new_file)
+    db.session.flush()
+    for app in source_apps:
+        if new_file not in app.files:
+            app.files.append(new_file)
+
 def _normalize_naming_templates(raw_templates):
     default_templates = (
         DEFAULT_SETTINGS.get('library', {})
@@ -1943,42 +2010,19 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
                 old_path = source_path
                 if os.path.exists(old_path):
                     os.remove(old_path)
-                library_path = get_library_path(source_library_id)
-                folder = _compute_relative_folder(library_path, output_file)
-                refreshed_entry = db.session.get(Files, source_file_id)
-                if not refreshed_entry and source_path:
-                    refreshed_entry = Files.query.filter_by(filepath=source_path).first()
-                if not refreshed_entry:
-                    refreshed_entry = Files.query.filter_by(filepath=output_file).first()
-                if refreshed_entry:
-                    refreshed_entry.library_id = source_library_id
-                    refreshed_entry.filepath = output_file
-                    refreshed_entry.folder = folder
-                    refreshed_entry.filename = os.path.basename(output_file)
-                    refreshed_entry.extension = output_ext
-                    refreshed_entry.compressed = True
-                    refreshed_entry.size = os.path.getsize(output_file)
-                else:
-                    refreshed_entry = Files(
-                        filepath=output_file,
-                        library_id=source_library_id,
-                        folder=folder,
-                        filename=os.path.basename(output_file),
-                        extension=output_ext,
-                        size=os.path.getsize(output_file),
-                        compressed=True,
-                        multicontent=source_multicontent,
-                        nb_content=source_nb_content,
-                        identified=True,
-                        identification_type=source_identification_type,
-                        identification_attempts=source_identification_attempts,
-                        last_attempt=source_last_attempt
-                    )
-                    db.session.add(refreshed_entry)
-                    db.session.flush()
-                    for app in source_apps:
-                        if refreshed_entry not in app.files:
-                            app.files.append(refreshed_entry)
+                _replace_or_create_converted_file_row(
+                    source_file_id=source_file_id,
+                    source_path=source_path,
+                    output_file=output_file,
+                    source_library_id=source_library_id,
+                    output_ext=output_ext,
+                    source_multicontent=source_multicontent,
+                    source_nb_content=source_nb_content,
+                    source_identification_type=source_identification_type,
+                    source_identification_attempts=source_identification_attempts,
+                    source_last_attempt=source_last_attempt,
+                    source_apps=source_apps
+                )
                 db.session.commit()
                 add_detail(f"Converted and replaced: {old_path} -> {output_file}.")
             else:
@@ -2165,42 +2209,19 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
             old_path = source_path
             if os.path.exists(old_path):
                 os.remove(old_path)
-            library_path = get_library_path(source_library_id)
-            folder = _compute_relative_folder(library_path, output_file)
-            refreshed_entry = db.session.get(Files, source_file_id)
-            if not refreshed_entry and source_path:
-                refreshed_entry = Files.query.filter_by(filepath=source_path).first()
-            if not refreshed_entry:
-                refreshed_entry = Files.query.filter_by(filepath=output_file).first()
-            if refreshed_entry:
-                refreshed_entry.library_id = source_library_id
-                refreshed_entry.filepath = output_file
-                refreshed_entry.folder = folder
-                refreshed_entry.filename = os.path.basename(output_file)
-                refreshed_entry.extension = output_ext
-                refreshed_entry.compressed = True
-                refreshed_entry.size = os.path.getsize(output_file)
-            else:
-                refreshed_entry = Files(
-                    filepath=output_file,
-                    library_id=source_library_id,
-                    folder=folder,
-                    filename=os.path.basename(output_file),
-                    extension=output_ext,
-                    size=os.path.getsize(output_file),
-                    compressed=True,
-                    multicontent=source_multicontent,
-                    nb_content=source_nb_content,
-                    identified=True,
-                    identification_type=source_identification_type,
-                    identification_attempts=source_identification_attempts,
-                    last_attempt=source_last_attempt
-                )
-                db.session.add(refreshed_entry)
-                db.session.flush()
-                for app in source_apps:
-                    if refreshed_entry not in app.files:
-                        app.files.append(refreshed_entry)
+            _replace_or_create_converted_file_row(
+                source_file_id=source_file_id,
+                source_path=source_path,
+                output_file=output_file,
+                source_library_id=source_library_id,
+                output_ext=output_ext,
+                source_multicontent=source_multicontent,
+                source_nb_content=source_nb_content,
+                source_identification_type=source_identification_type,
+                source_identification_attempts=source_identification_attempts,
+                source_last_attempt=source_last_attempt,
+                source_apps=source_apps
+            )
             db.session.commit()
             if verbose:
                 results['details'].append(f"Converted and replaced: {old_path} -> {output_file}.")
