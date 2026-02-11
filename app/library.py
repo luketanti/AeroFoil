@@ -1804,6 +1804,8 @@ def delete_duplicates(dry_run=False, verbose=False, detail_limit=200):
     return results
 
 def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbose=False, detail_limit=200, log_cb=None, progress_cb=None, stream_output=False, threads=None, library_id=None, cancel_cb=None, timeout_seconds=None, min_size_bytes=None, verify=True):
+    # Clear any previous failed transaction state before starting a new conversion run.
+    db.session.rollback()
     results = {
         'success': True,
         'converted': 0,
@@ -1932,9 +1934,12 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
                     os.remove(old_path)
                 library_path = get_library_path(file_entry.library_id)
                 update_file_path(library_path, old_path, output_file)
-                file_entry.extension = output_ext
-                file_entry.compressed = True
-                file_entry.size = os.path.getsize(output_file)
+                refreshed_entry = Files.query.filter_by(filepath=output_file).first()
+                if not refreshed_entry:
+                    raise RuntimeError(f"Converted file row not found after path update: {output_file}")
+                refreshed_entry.extension = output_ext
+                refreshed_entry.compressed = True
+                refreshed_entry.size = os.path.getsize(output_file)
                 db.session.commit()
                 add_detail(f"Converted and replaced: {old_path} -> {output_file}.")
             else:
@@ -1978,6 +1983,7 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
             if progress_cb:
                 progress_cb(processed, total_files)
         except Exception as e:
+            db.session.rollback()
             logger.error(f"Failed to convert {file_entry.filepath}: {e}")
             results['errors'].append(str(e))
             add_detail(f"Error converting {file_entry.filepath}: {e}.")
@@ -2008,6 +2014,8 @@ def list_convertible_files(limit=2000, library_id=None, min_size_bytes=200 * 102
     return filtered
 
 def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_run=False, verbose=False, log_cb=None, progress_cb=None, stream_output=False, threads=None, cancel_cb=None, timeout_seconds=None, verify=True):
+    # Clear any previous failed transaction state before starting a new conversion run.
+    db.session.rollback()
     results = {
         'success': True,
         'converted': 0,
@@ -2110,9 +2118,12 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
                 os.remove(old_path)
             library_path = get_library_path(file_entry.library_id)
             update_file_path(library_path, old_path, output_file)
-            file_entry.extension = output_ext
-            file_entry.compressed = True
-            file_entry.size = os.path.getsize(output_file)
+            refreshed_entry = Files.query.filter_by(filepath=output_file).first()
+            if not refreshed_entry:
+                raise RuntimeError(f"Converted file row not found after path update: {output_file}")
+            refreshed_entry.extension = output_ext
+            refreshed_entry.compressed = True
+            refreshed_entry.size = os.path.getsize(output_file)
             db.session.commit()
             if verbose:
                 results['details'].append(f"Converted and replaced: {old_path} -> {output_file}.")
@@ -2158,6 +2169,7 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
         if progress_cb:
             progress_cb(1, 1)
     except Exception as e:
+        db.session.rollback()
         logger.error(f"Failed to convert {file_entry.filepath}: {e}")
         results['success'] = False
         results['errors'].append(str(e))

@@ -3339,6 +3339,7 @@ def manage_convert_job():
                     min_size_bytes=200 * 1024 * 1024
                 )
             except Exception as e:
+                db.session.rollback()
                 logger.exception('Unexpected error while running conversion job %s', job_id)
                 results = {
                     'success': False,
@@ -3395,6 +3396,7 @@ def manage_convert_single_job():
                     timeout_seconds=timeout_seconds
                 )
             except Exception as e:
+                db.session.rollback()
                 logger.exception('Unexpected error while running single conversion job %s', job_id)
                 results = {
                     'success': False,
