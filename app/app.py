@@ -7,8 +7,9 @@ if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
 from flask import Flask, render_template, request, redirect, url_for, jsonify, send_from_directory, Response, has_app_context, has_request_context, g
-from flask_login import LoginManager
+from flask_login import LoginManager, current_user
 from werkzeug.utils import secure_filename
+from werkzeug.security import check_password_hash
 from sqlalchemy import func, and_, or_, case, literal
 from app.scheduler import init_scheduler
 from functools import wraps
@@ -43,6 +44,7 @@ import re
 import secrets
 import gc
 import ctypes
+import zipfile
 
 from app.db import add_access_event, get_access_events
 
@@ -1109,6 +1111,8 @@ def api_success(data=None, message=None):
 # Input validation constants and helpers
 MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100MB for keys.txt files
 MAX_LIBRARY_UPLOAD_SIZE = 64 * 1024 * 1024 * 1024  # 64GB for game files
+MAX_SAVE_UPLOAD_SIZE = 4 * 1024 * 1024 * 1024  # 4GB for save archives
+SAVE_SYNC_DIR = os.path.join(DATA_DIR, 'saves')
 MAX_TITLE_ID_LENGTH = 16
 
 def validate_title_id(title_id):
@@ -1137,6 +1141,94 @@ def validate_library_file_size(file_size):
     if file_size > MAX_LIBRARY_UPLOAD_SIZE:
         return False, f"File size exceeds maximum limit of {MAX_LIBRARY_UPLOAD_SIZE // (1024*1024*1024)}GB"
     return True, None
+
+
+def _normalize_save_title_id(raw_title_id):
+    title_id = str(raw_title_id or '').strip().upper()
+    if title_id.startswith('0X'):
+        title_id = title_id[2:]
+    if title_id.endswith('.ZIP'):
+        title_id = title_id[:-4]
+    if len(title_id) != MAX_TITLE_ID_LENGTH:
+        return None
+    if not all(c in '0123456789ABCDEF' for c in title_id):
+        return None
+    return title_id
+
+
+def _resolve_save_sync_user():
+    user = None
+    try:
+        if current_user.is_authenticated:
+            user = current_user
+    except Exception:
+        user = None
+
+    if user is None:
+        auth = request.authorization
+        if not auth or not auth.username or not auth.password:
+            return None, 'Save sync requires username/password authentication.', 401
+
+        user = User.query.filter_by(user=auth.username).first()
+        if user is None or not check_password_hash(user.password, auth.password):
+            return None, 'Invalid save sync credentials.', 401
+
+        if bool(getattr(user, 'frozen', False)):
+            message = (getattr(user, 'frozen_message', None) or '').strip() or 'Account is frozen.'
+            return None, message, 403
+
+        if not user.has_shop_access():
+            return None, f'User "{auth.username}" does not have access to the shop.', 403
+
+    if not bool(getattr(user, 'backup_access', False)):
+        return None, 'Backup access is required for save sync.', 403
+
+    return user, None, None
+
+
+def _save_sync_user_dir(user):
+    user_name = str(getattr(user, 'user', '') or '').strip()
+    user_key = secure_filename(user_name)
+    user_id = getattr(user, 'id', None)
+    if not user_key and user_id is not None:
+        user_key = secure_filename(str(user_id))
+    if not user_key:
+        user_key = 'unknown'
+
+    return os.path.join(SAVE_SYNC_DIR, user_key)
+
+
+def _save_sync_archive_path(user, title_id):
+    return os.path.join(_save_sync_user_dir(user), f'{title_id}.zip')
+
+
+def _save_sync_resolve_title_id(route_title_id=None):
+    route_value = _normalize_save_title_id(route_title_id)
+    if route_value:
+        return route_value
+
+    form_candidates = [
+        request.form.get('title_id'),
+        request.form.get('titleId'),
+        request.form.get('application_id'),
+        request.form.get('app_id'),
+    ]
+    for candidate in form_candidates:
+        normalized = _normalize_save_title_id(candidate)
+        if normalized:
+            return normalized
+    return None
+
+
+def save_sync_access(f):
+    @wraps(f)
+    def _save_sync_access(*args, **kwargs):
+        user, error, status = _resolve_save_sync_user()
+        if user is None:
+            return api_error(error or 'Save sync authorization failed.', status or 403)
+        g.save_sync_user = user
+        return f(*args, **kwargs)
+    return _save_sync_access
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -2242,6 +2334,15 @@ def requests_page():
     return render_template(
         'requests.html',
         title='Requests',
+        admin_account_created=admin_account_created())
+
+
+@app.route('/saves')
+@access_required('backup')
+def saves_page():
+    return render_template(
+        'saves.html',
+        title='Saves Files',
         admin_account_created=admin_account_created())
 
 
@@ -3705,6 +3806,159 @@ def upload_library_files():
         'skipped': skipped,
         'errors': errors
     })
+
+
+@app.get('/api/saves/list')
+@save_sync_access
+def list_saves_api():
+    user = getattr(g, 'save_sync_user', None)
+    if user is None:
+        return api_error('Save sync authorization failed.', 403)
+
+    user_dir = _save_sync_user_dir(user)
+    os.makedirs(user_dir, exist_ok=True)
+
+    saves = []
+    titledb_loaded = False
+    try:
+        titledb_loaded = bool(titles.load_titledb())
+    except Exception as e:
+        logger.warning('Unable to load TitleDB for save metadata: %s', e)
+
+    try:
+        for filename in sorted(os.listdir(user_dir)):
+            if not filename.lower().endswith('.zip'):
+                continue
+
+            archive_path = os.path.join(user_dir, filename)
+            if not os.path.isfile(archive_path):
+                continue
+
+            title_id = _normalize_save_title_id(filename[:-4])
+            if not title_id:
+                continue
+
+            try:
+                size = int(os.path.getsize(archive_path))
+            except Exception:
+                size = 0
+
+            title_name = title_id
+            icon_remote_url = ''
+            if titledb_loaded:
+                try:
+                    info = titles.get_game_info(title_id) or {}
+                    resolved_name = str(info.get('name') or '').strip()
+                    if resolved_name and resolved_name.lower() != 'unrecognized':
+                        title_name = resolved_name
+                    icon_remote_url = str(info.get('iconUrl') or '').strip()
+                except Exception as title_err:
+                    logger.debug('Failed title metadata lookup for save %s: %s', title_id, title_err)
+
+            download_url = f'/api/saves/download/{title_id}.zip'
+            icon_url = f'/api/shop/icon/{title_id}'
+            saves.append({
+                'title_id': title_id,
+                'titleId': title_id,
+                'app_id': title_id,
+                'name': title_name,
+                'title_name': title_name,
+                'titleName': title_name,
+                'size': size,
+                'icon_url': icon_url,
+                'iconUrl': icon_url,
+                'icon_remote_url': icon_remote_url,
+                'iconRemoteUrl': icon_remote_url,
+                'download_url': download_url,
+                'downloadUrl': download_url,
+            })
+    except Exception as e:
+        logger.error('Failed to list saves for user %s: %s', getattr(user, 'user', '?'), e)
+        return api_error('Failed to list saves.', 500)
+    finally:
+        try:
+            titles.release_titledb()
+        except Exception:
+            pass
+
+    return jsonify({'saves': saves})
+
+
+@app.post('/api/saves/upload/<title_id>')
+@save_sync_access
+def upload_save_api(title_id):
+    user = getattr(g, 'save_sync_user', None)
+    if user is None:
+        return api_error('Save sync authorization failed.', 403)
+
+    normalized_title_id = _save_sync_resolve_title_id(title_id)
+    if not normalized_title_id:
+        return api_error('Invalid title_id for save upload.', 400)
+
+    if 'file' not in request.files:
+        return api_error('No save archive provided.', 400)
+
+    uploaded_file = request.files.get('file')
+    if uploaded_file is None or not uploaded_file.filename:
+        return api_error('No save archive provided.', 400)
+
+    uploaded_file.seek(0, os.SEEK_END)
+    file_size = uploaded_file.tell()
+    uploaded_file.seek(0)
+
+    if file_size is None or file_size <= 0:
+        return api_error('Save archive is empty.', 400)
+    if file_size > MAX_SAVE_UPLOAD_SIZE:
+        limit_gb = MAX_SAVE_UPLOAD_SIZE // (1024 * 1024 * 1024)
+        return api_error(f'Save archive exceeds maximum limit of {limit_gb}GB.', 400)
+
+    user_dir = _save_sync_user_dir(user)
+    os.makedirs(user_dir, exist_ok=True)
+    archive_path = _save_sync_archive_path(user, normalized_title_id)
+    temp_path = archive_path + '.tmp'
+
+    try:
+        uploaded_file.save(temp_path)
+        if not zipfile.is_zipfile(temp_path):
+            os.remove(temp_path)
+            return api_error('Uploaded file is not a valid zip archive.', 400)
+
+        os.replace(temp_path, archive_path)
+    except Exception as e:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception:
+            pass
+        logger.error('Failed to save uploaded archive for user %s title %s: %s', getattr(user, 'user', '?'), normalized_title_id, e)
+        return api_error('Failed to store save archive.', 500)
+
+    return api_success({'title_id': normalized_title_id, 'size': int(file_size)}, message='Save uploaded successfully.')
+
+
+@app.get('/api/saves/download/<title_id>')
+@app.get('/api/saves/download/<title_id>.zip')
+@save_sync_access
+def download_save_api(title_id):
+    user = getattr(g, 'save_sync_user', None)
+    if user is None:
+        return api_error('Save sync authorization failed.', 403)
+
+    normalized_title_id = _normalize_save_title_id(title_id)
+    if not normalized_title_id:
+        return api_error('Invalid title_id for save download.', 400)
+
+    archive_path = _save_sync_archive_path(user, normalized_title_id)
+    if not os.path.isfile(archive_path):
+        return api_error('Save archive not found.', 404)
+
+    return send_from_directory(
+        os.path.dirname(archive_path),
+        os.path.basename(archive_path),
+        as_attachment=True,
+        download_name=f'{normalized_title_id}.zip',
+        mimetype='application/zip'
+    )
 
 
 @app.route('/api/titles', methods=['GET'])
