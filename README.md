@@ -100,6 +100,21 @@ In CyberFoil, set the Ownfoil eShop URL in Settings:
  - Username: username as created in Ownfoil settings (if the shop is Private)
  - Password: password as created in Ownfoil settings (if the shop is Private)
 
+## Save backups (Save Sync)
+Ownfoil supports per-user save backup management when the user has the **Backup** flag enabled:
+- Save archives are stored per user under `data/saves/<username>/`.
+- Multiple backup versions per title are supported.
+- Each uploaded version can include a note.
+- Backups can be downloaded or deleted from:
+  - CyberFoil `Saves` section (upload/download/delete),
+  - Ownfoil web page `Saves Files` (download/delete).
+
+Save sync API endpoints:
+- `GET /api/saves/list`
+- `POST /api/saves/upload/<title_id>`
+- `GET /api/saves/download/<title_id>/<save_id>.zip`
+- `DELETE /api/saves/delete/<title_id>/<save_id>` (also accepts `POST` for compatibility)
+
 # Usage
 Once Ownfoil is running you can access the Shop Web UI by navigating to the `http://<computer/server IP>:8465`.
 
@@ -218,7 +233,10 @@ Planned feature, in no particular order.
     - [ ] Automatically create NSP forwarders
  - Saves manager:
     - [ ] Automatically discover Switch device based on Tinfoil connection
-    - [ ] Only backup and serve saves based on the user/Switch
+    - [x] Per-user save backup storage and access control (Backup flag required)
+    - [x] Multiple backup versions per title (timestamp + note)
+    - [x] Download/delete save backups from both CyberFoil and Ownfoil web UI
+    - [ ] Only backup and serve saves based on the user/Switch pair
  - External services:
     - [x] Prowlarr integration for automatic update downloads (via torrent client)
     - [x] Automated update downloader pipeline (search -> download -> ingest)

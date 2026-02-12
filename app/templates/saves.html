@@ -36,12 +36,14 @@
                                     <thead>
                                         <tr>
                                             <th>Title</th>
+                                            <th>Saved</th>
+                                            <th>Note</th>
                                             <th>Size</th>
                                             <th class="text-end">Actions</th>
                                         </tr>
                                     </thead>
                                     <tbody id="savesTableBody">
-                                        <tr><td colspan="3" class="text-muted">Loading...</td></tr>
+                                        <tr><td colspan="5" class="text-muted">Loading...</td></tr>
                                     </tbody>
                                 </table>
                             </div>
@@ -81,6 +83,10 @@
 
     .save-icon-card .card-body {
         min-height: 92px;
+    }
+
+    .save-note-text {
+        max-width: 22rem;
     }
 </style>
 
@@ -129,10 +135,28 @@
 
     function getDownloadUrl(item, titleId) {
         let downloadUrl = (item['download_url'] || item['downloadUrl'] || '').toString();
+        const saveId = (item['save_id'] || item['saveId'] || '').toString();
         if (!downloadUrl && titleId) {
-            downloadUrl = `/api/saves/download/${encodeURIComponent(titleId)}.zip`;
+            if (saveId) {
+                downloadUrl = `/api/saves/download/${encodeURIComponent(titleId)}/${encodeURIComponent(saveId)}.zip`;
+            } else {
+                downloadUrl = `/api/saves/download/${encodeURIComponent(titleId)}.zip`;
+            }
         }
         return downloadUrl;
+    }
+
+    function getDeleteUrl(item, titleId) {
+        let deleteUrl = (item['delete_url'] || item['deleteUrl'] || '').toString();
+        const saveId = (item['save_id'] || item['saveId'] || '').toString();
+        if (!deleteUrl && titleId) {
+            if (saveId && saveId.toLowerCase() !== 'legacy') {
+                deleteUrl = `/api/saves/delete/${encodeURIComponent(titleId)}/${encodeURIComponent(saveId)}`;
+            } else {
+                deleteUrl = `/api/saves/delete/${encodeURIComponent(titleId)}`;
+            }
+        }
+        return deleteUrl;
     }
 
     function getIconUrl(item, titleId) {
@@ -145,6 +169,86 @@
 
     function getFallbackIconUrl(item) {
         return (item['icon_remote_url'] || item['iconRemoteUrl'] || '/static/placeholder-icon.svg').toString();
+    }
+
+    function getSaveNote(item) {
+        return (
+            item['note']
+            || item['save_note']
+            || item['saveNote']
+            || ''
+        ).toString();
+    }
+
+    function getSaveCreatedAt(item) {
+        return (
+            item['created_at']
+            || item['createdAt']
+            || ''
+        ).toString();
+    }
+
+    function formatSaveDate(value) {
+        const text = (value || '').toString().trim();
+        if (!text) return '-';
+        const dt = new Date(text);
+        if (!isNaN(dt.getTime())) {
+            return dt.toLocaleString();
+        }
+        return text;
+    }
+
+    function deleteSaveBackup(deleteUrl, titleName, createdAt, note, buttonEl) {
+        if (!deleteUrl) {
+            showSavesAlert('Delete URL is missing for this backup.', 'warning');
+            return;
+        }
+        const labelTitle = (titleName || 'this title').toString();
+        const labelDate = (createdAt || '').toString();
+        const labelNote = (note || '').toString();
+        let confirmText = `Delete this save backup for ${labelTitle}?`;
+        if (labelDate) {
+            confirmText += `\nSaved: ${labelDate}`;
+        }
+        if (labelNote) {
+            confirmText += `\nNote: ${labelNote}`;
+        }
+        confirmText += '\n\nThis cannot be undone.';
+        if (!window.confirm(confirmText)) {
+            return;
+        }
+
+        if (buttonEl && buttonEl.length) {
+            buttonEl.prop('disabled', true);
+        }
+
+        $.ajax({
+            url: deleteUrl,
+            type: 'DELETE',
+            dataType: 'json',
+        }).done(function (result) {
+            if (!result || result['success'] === false) {
+                const message = (result && result['message']) ? result['message'] : 'Failed to delete save backup.';
+                showSavesAlert(message, 'danger');
+                return;
+            }
+            showSavesAlert('Save backup deleted.', 'success');
+            loadSaves();
+        }).fail(function (xhr) {
+            let message = 'Failed to delete save backup.';
+            try {
+                if (xhr && xhr.responseJSON && xhr.responseJSON.message) {
+                    message = xhr.responseJSON.message;
+                }
+            } catch (e) {
+                // Ignore parse errors and keep default message.
+            }
+            showSavesAlert(message, 'danger');
+        }).always(function () {
+            if (buttonEl && buttonEl.length) {
+                buttonEl.prop('disabled', false);
+            }
+        });
     }
 
     function buildIconImage(className, titleName, iconUrl, fallbackIconUrl) {
@@ -185,15 +289,18 @@
         body.empty();
 
         if (!items.length) {
-            body.html('<tr><td colspan="3" class="text-muted">No save archives found for this account.</td></tr>');
+            body.html('<tr><td colspan="5" class="text-muted">No save archives found for this account.</td></tr>');
             return;
         }
 
         items.forEach((item) => {
             const titleId = getTitleId(item);
             const titleName = getTitleName(item, titleId);
+            const note = getSaveNote(item);
+            const createdAt = formatSaveDate(getSaveCreatedAt(item));
             const sizeText = formatBytes(item['size']);
             const downloadUrl = getDownloadUrl(item, titleId);
+            const deleteUrl = getDeleteUrl(item, titleId);
             const iconUrl = getIconUrl(item, titleId);
             const fallbackIconUrl = getFallbackIconUrl(item);
 
@@ -208,9 +315,14 @@
                             </div>
                         </div>
                     </td>
+                    <td class="small text-nowrap">${escapeHtml(createdAt)}</td>
+                    <td class="small text-muted save-note-text text-truncate" title="${escapeHtml(note || '-')}">${escapeHtml(note || '-')}</td>
                     <td class="small">${escapeHtml(sizeText)}</td>
                     <td class="text-end">
-                        ${downloadUrl ? `<a class="btn btn-outline-light btn-sm" href="${escapeHtml(downloadUrl)}"><i class="bi bi-download"></i> Download</a>` : '<span class="text-muted small">-</span>'}
+                        <div class="btn-group btn-group-sm" role="group">
+                            ${downloadUrl ? `<a class="btn btn-outline-light btn-sm" href="${escapeHtml(downloadUrl)}"><i class="bi bi-download"></i> Download</a>` : ''}
+                            ${deleteUrl ? `<button type="button" class="btn btn-outline-danger btn-sm delete-save-btn" data-delete-url="${escapeHtml(deleteUrl)}" data-title-name="${escapeHtml(titleName)}" data-created-at="${escapeHtml(createdAt)}" data-save-note="${escapeHtml(note || '')}"><i class="bi bi-trash"></i> Delete</button>` : ''}
+                        </div>
                     </td>
                 </tr>
             `);
@@ -230,8 +342,11 @@
         items.forEach((item) => {
             const titleId = getTitleId(item);
             const titleName = getTitleName(item, titleId);
+            const note = getSaveNote(item);
+            const createdAt = formatSaveDate(getSaveCreatedAt(item));
             const sizeText = formatBytes(item['size']);
             const downloadUrl = getDownloadUrl(item, titleId);
+            const deleteUrl = getDeleteUrl(item, titleId);
             const iconUrl = getIconUrl(item, titleId);
             const fallbackIconUrl = getFallbackIconUrl(item);
 
@@ -242,10 +357,15 @@
                         <div class="card-body p-2">
                             <div class="small fw-semibold text-truncate" title="${escapeHtml(titleName)}">${escapeHtml(titleName)}</div>
                             <div class="small text-muted font-monospace text-truncate mb-1" title="${escapeHtml(titleId || '-')}">${escapeHtml(titleId || '-')}</div>
+                            <div class="small text-muted text-truncate" title="${escapeHtml(createdAt)}">${escapeHtml(createdAt)}</div>
+                            <div class="small text-muted text-truncate" title="${escapeHtml(note || '-')}">${escapeHtml(note || '-')}</div>
                             <div class="small text-muted">${escapeHtml(sizeText)}</div>
                         </div>
                         <div class="card-footer p-2 text-end border-secondary">
-                            ${downloadUrl ? `<a class="btn btn-outline-light btn-sm" href="${escapeHtml(downloadUrl)}"><i class="bi bi-download"></i> Download</a>` : '<span class="text-muted small">-</span>'}
+                            <div class="btn-group btn-group-sm" role="group">
+                                ${downloadUrl ? `<a class="btn btn-outline-light btn-sm" href="${escapeHtml(downloadUrl)}"><i class="bi bi-download"></i> Download</a>` : ''}
+                                ${deleteUrl ? `<button type="button" class="btn btn-outline-danger btn-sm delete-save-btn" data-delete-url="${escapeHtml(deleteUrl)}" data-title-name="${escapeHtml(titleName)}" data-created-at="${escapeHtml(createdAt)}" data-save-note="${escapeHtml(note || '')}"><i class="bi bi-trash"></i> Delete</button>` : ''}
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -257,19 +377,19 @@
     function renderSaves(items) {
         renderSavesList(items);
         renderSavesIcons(items);
-        $('#savesStatus').text(`${items.length} save${items.length === 1 ? '' : 's'}`);
+        $('#savesStatus').text(`${items.length} save version${items.length === 1 ? '' : 's'}`);
     }
 
     function renderSavesError(message) {
         const safeMessage = escapeHtml(message || 'Failed to load saves.');
-        $('#savesTableBody').html(`<tr><td colspan="3" class="text-danger">${safeMessage}</td></tr>`);
+        $('#savesTableBody').html(`<tr><td colspan="5" class="text-danger">${safeMessage}</td></tr>`);
         $('#savesIconGrid').html(`<div class="col-12 text-danger">${safeMessage}</div>`);
         $('#savesStatus').text('');
     }
 
     function loadSaves() {
         $('#refreshSavesBtn').prop('disabled', true);
-        $('#savesTableBody').html('<tr><td colspan="3" class="text-muted">Loading...</td></tr>');
+        $('#savesTableBody').html('<tr><td colspan="5" class="text-muted">Loading...</td></tr>');
         $('#savesIconGrid').html('<div class="col-12 text-muted">Loading...</div>');
 
         $.getJSON('/api/saves/list', function (result) {
@@ -306,6 +426,14 @@
         });
         $('#viewIconsBtn').on('click', function () {
             setSavesView('icons');
+        });
+        $(document).on('click', '.delete-save-btn', function () {
+            const btn = $(this);
+            const deleteUrl = (btn.data('delete-url') || '').toString();
+            const titleName = (btn.data('title-name') || '').toString();
+            const createdAt = (btn.data('created-at') || '').toString();
+            const note = (btn.data('save-note') || '').toString();
+            deleteSaveBackup(deleteUrl, titleName, createdAt, note, btn);
         });
 
         let savedView = 'list';

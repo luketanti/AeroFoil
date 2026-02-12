@@ -1114,6 +1114,9 @@ MAX_LIBRARY_UPLOAD_SIZE = 64 * 1024 * 1024 * 1024  # 64GB for game files
 MAX_SAVE_UPLOAD_SIZE = 4 * 1024 * 1024 * 1024  # 4GB for save archives
 SAVE_SYNC_DIR = os.path.join(DATA_DIR, 'saves')
 MAX_TITLE_ID_LENGTH = 16
+MAX_SAVE_NOTE_LENGTH = 120
+MAX_SAVE_ID_LENGTH = 96
+SAVE_ID_RE = re.compile(r'^[A-Za-z0-9._-]+$')
 
 def validate_title_id(title_id):
     """Validate title_id format (should be 16 hex characters)."""
@@ -1198,8 +1201,266 @@ def _save_sync_user_dir(user):
     return os.path.join(SAVE_SYNC_DIR, user_key)
 
 
-def _save_sync_archive_path(user, title_id):
+def _normalize_save_id(raw_save_id):
+    save_id = secure_filename(str(raw_save_id or '').strip())
+    if save_id.lower().endswith('.zip'):
+        save_id = save_id[:-4]
+    if not save_id or len(save_id) > MAX_SAVE_ID_LENGTH:
+        return None
+    if not SAVE_ID_RE.match(save_id):
+        return None
+    return save_id
+
+
+def _normalize_save_note(raw_note):
+    note = ' '.join(str(raw_note or '').split()).strip()
+    if len(note) > MAX_SAVE_NOTE_LENGTH:
+        note = note[:MAX_SAVE_NOTE_LENGTH].rstrip()
+    return note
+
+
+def _save_sync_resolve_note():
+    for key in ('note', 'save_note', 'saveNote'):
+        value = request.form.get(key)
+        if value is not None:
+            return _normalize_save_note(value)
+    return ''
+
+
+def _save_sync_title_dir(user, title_id):
+    return os.path.join(_save_sync_user_dir(user), title_id)
+
+
+def _save_sync_archive_path(user, title_id, save_id=None):
+    if save_id:
+        return os.path.join(_save_sync_title_dir(user, title_id), f'{save_id}.zip')
+    # Legacy single-save path.
     return os.path.join(_save_sync_user_dir(user), f'{title_id}.zip')
+
+
+def _save_sync_metadata_path(user, title_id, save_id):
+    return os.path.join(_save_sync_title_dir(user, title_id), f'{save_id}.json')
+
+
+def _save_sync_format_created_at(created_ts):
+    try:
+        ts = int(created_ts or 0)
+    except Exception:
+        ts = 0
+    if ts <= 0:
+        ts = int(time.time())
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(ts))
+
+
+def _save_sync_parse_created_ts(raw_value):
+    if raw_value is None:
+        return 0
+    try:
+        import datetime as dt_mod
+
+        if isinstance(raw_value, (int, float)):
+            value = int(raw_value)
+            return value if value > 0 else 0
+        text = str(raw_value).strip()
+        if not text:
+            return 0
+        if text.isdigit():
+            value = int(text)
+            return value if value > 0 else 0
+        if text.endswith('Z'):
+            dt = dt_mod.datetime.strptime(text, '%Y-%m-%dT%H:%M:%SZ')
+            return int(dt.timestamp())
+        dt = dt_mod.datetime.fromisoformat(text)
+        return int(dt.timestamp())
+    except Exception:
+        return 0
+
+
+def _save_sync_generate_save_id(note=''):
+    timestamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+    nonce = secrets.token_hex(3)
+    note_token = secure_filename(note or '').strip('._-')
+    if note_token:
+        note_token = note_token[:32]
+        return f'{timestamp}_{nonce}_{note_token}'
+    return f'{timestamp}_{nonce}'
+
+
+def _save_sync_read_metadata(path):
+    try:
+        with open(path, 'r', encoding='utf-8') as handle:
+            data = json.load(handle)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_sync_write_metadata(path, data):
+    temp_path = path + '.tmp'
+    with open(temp_path, 'w', encoding='utf-8') as handle:
+        json.dump(data, handle, ensure_ascii=False, separators=(',', ':'))
+    os.replace(temp_path, path)
+
+
+def _save_sync_collect_versions_for_title(user, title_id):
+    versions = []
+    title_dir = _save_sync_title_dir(user, title_id)
+    if os.path.isdir(title_dir):
+        try:
+            for filename in sorted(os.listdir(title_dir)):
+                if not filename.lower().endswith('.zip'):
+                    continue
+                save_id = _normalize_save_id(filename[:-4])
+                if not save_id:
+                    continue
+                archive_path = os.path.join(title_dir, filename)
+                if not os.path.isfile(archive_path):
+                    continue
+
+                try:
+                    size = int(os.path.getsize(archive_path))
+                except Exception:
+                    size = 0
+
+                meta = _save_sync_read_metadata(_save_sync_metadata_path(user, title_id, save_id))
+                created_ts = _save_sync_parse_created_ts(meta.get('created_ts'))
+                if created_ts <= 0:
+                    created_ts = _save_sync_parse_created_ts(meta.get('createdAt'))
+                if created_ts <= 0:
+                    created_ts = _save_sync_parse_created_ts(meta.get('created_at'))
+                if created_ts <= 0:
+                    try:
+                        created_ts = int(os.path.getmtime(archive_path))
+                    except Exception:
+                        created_ts = int(time.time())
+
+                created_at = str(meta.get('created_at') or meta.get('createdAt') or '').strip()
+                if not created_at:
+                    created_at = _save_sync_format_created_at(created_ts)
+
+                note = _normalize_save_note(meta.get('note'))
+                versions.append({
+                    'title_id': title_id,
+                    'save_id': save_id,
+                    'size': size,
+                    'note': note,
+                    'created_ts': int(created_ts),
+                    'created_at': created_at,
+                    'download_url': f'/api/saves/download/{title_id}/{save_id}.zip',
+                    'delete_url': f'/api/saves/delete/{title_id}/{save_id}',
+                    'archive_path': archive_path,
+                    'legacy': False,
+                })
+        except Exception as e:
+            logger.warning('Failed listing versioned saves for title %s: %s', title_id, e)
+
+    legacy_archive = _save_sync_archive_path(user, title_id)
+    if os.path.isfile(legacy_archive):
+        try:
+            legacy_size = int(os.path.getsize(legacy_archive))
+        except Exception:
+            legacy_size = 0
+        try:
+            legacy_created_ts = int(os.path.getmtime(legacy_archive))
+        except Exception:
+            legacy_created_ts = int(time.time())
+        versions.append({
+            'title_id': title_id,
+            'save_id': 'legacy',
+            'size': legacy_size,
+            'note': '',
+            'created_ts': legacy_created_ts,
+            'created_at': _save_sync_format_created_at(legacy_created_ts),
+            'download_url': f'/api/saves/download/{title_id}.zip',
+            'delete_url': f'/api/saves/delete/{title_id}',
+            'archive_path': legacy_archive,
+            'legacy': True,
+        })
+
+    versions.sort(key=lambda item: (-(int(item.get('created_ts') or 0)), str(item.get('save_id') or '')))
+    return versions
+
+
+def _save_sync_collect_versions(user):
+    user_dir = _save_sync_user_dir(user)
+    os.makedirs(user_dir, exist_ok=True)
+
+    title_ids = set()
+    try:
+        for name in os.listdir(user_dir):
+            title_id = _normalize_save_title_id(name)
+            if not title_id:
+                continue
+            path = os.path.join(user_dir, name)
+            if os.path.isdir(path) or (os.path.isfile(path) and name.lower().endswith('.zip')):
+                title_ids.add(title_id)
+    except Exception as e:
+        logger.warning('Failed reading save sync directory for user %s: %s', getattr(user, 'user', '?'), e)
+
+    saves = []
+    for title_id in sorted(title_ids):
+        saves.extend(_save_sync_collect_versions_for_title(user, title_id))
+
+    saves.sort(key=lambda item: (str(item.get('title_id') or ''), -(int(item.get('created_ts') or 0)), str(item.get('save_id') or '')))
+    return saves
+
+
+def _save_sync_resolve_download_archive(user, title_id, save_id=None):
+    versions = _save_sync_collect_versions_for_title(user, title_id)
+    if not versions:
+        return None, 'Save archive not found.'
+    if save_id:
+        normalized_save_id = _normalize_save_id(save_id)
+        if not normalized_save_id:
+            return None, 'Invalid save_id for save download.'
+        for version in versions:
+            if str(version.get('save_id') or '') == normalized_save_id:
+                return version, None
+        return None, 'Save archive not found.'
+    return versions[0], None
+
+
+def _save_sync_delete_archive(user, title_id, save_id=None):
+    selected_archive, resolve_error = _save_sync_resolve_download_archive(user, title_id, save_id=save_id)
+    if selected_archive is None:
+        return None, resolve_error or 'Save archive not found.'
+
+    archive_path = str(selected_archive.get('archive_path') or '')
+    if not archive_path or not os.path.isfile(archive_path):
+        return None, 'Save archive not found.'
+
+    selected_save_id = str(selected_archive.get('save_id') or '').strip()
+    is_legacy = bool(selected_archive.get('legacy'))
+    try:
+        os.remove(archive_path)
+    except FileNotFoundError:
+        return None, 'Save archive not found.'
+    except Exception as e:
+        logger.error('Failed deleting save archive for user %s title %s save %s: %s', getattr(user, 'user', '?'), title_id, selected_save_id or '-', e)
+        return None, 'Failed to delete save archive.'
+
+    if not is_legacy and selected_save_id:
+        try:
+            metadata_path = _save_sync_metadata_path(user, title_id, selected_save_id)
+            if os.path.isfile(metadata_path):
+                os.remove(metadata_path)
+        except Exception as e:
+            logger.warning('Failed deleting save metadata for user %s title %s save %s: %s', getattr(user, 'user', '?'), title_id, selected_save_id, e)
+
+        title_dir = _save_sync_title_dir(user, title_id)
+        try:
+            if os.path.isdir(title_dir) and not os.listdir(title_dir):
+                os.rmdir(title_dir)
+        except Exception:
+            pass
+
+    return {
+        'title_id': title_id,
+        'save_id': selected_save_id or '',
+        'legacy': is_legacy,
+    }, None
 
 
 def _save_sync_resolve_title_id(route_title_id=None):
@@ -3815,9 +4076,6 @@ def list_saves_api():
     if user is None:
         return api_error('Save sync authorization failed.', 403)
 
-    user_dir = _save_sync_user_dir(user)
-    os.makedirs(user_dir, exist_ok=True)
-
     saves = []
     titledb_loaded = False
     try:
@@ -3826,51 +4084,62 @@ def list_saves_api():
         logger.warning('Unable to load TitleDB for save metadata: %s', e)
 
     try:
-        for filename in sorted(os.listdir(user_dir)):
-            if not filename.lower().endswith('.zip'):
-                continue
-
-            archive_path = os.path.join(user_dir, filename)
-            if not os.path.isfile(archive_path):
-                continue
-
-            title_id = _normalize_save_title_id(filename[:-4])
+        save_versions = _save_sync_collect_versions(user)
+        title_metadata = {}
+        for version in save_versions:
+            title_id = str(version.get('title_id') or '').strip().upper()
             if not title_id:
                 continue
 
-            try:
-                size = int(os.path.getsize(archive_path))
-            except Exception:
-                size = 0
+            cached_meta = title_metadata.get(title_id)
+            if cached_meta is None:
+                title_name = title_id
+                icon_remote_url = ''
+                if titledb_loaded:
+                    try:
+                        info = titles.get_game_info(title_id) or {}
+                        resolved_name = str(info.get('name') or '').strip()
+                        if resolved_name and resolved_name.lower() != 'unrecognized':
+                            title_name = resolved_name
+                        icon_remote_url = str(info.get('iconUrl') or '').strip()
+                    except Exception as title_err:
+                        logger.debug('Failed title metadata lookup for save %s: %s', title_id, title_err)
+                cached_meta = {'title_name': title_name, 'icon_remote_url': icon_remote_url}
+                title_metadata[title_id] = cached_meta
 
-            title_name = title_id
-            icon_remote_url = ''
-            if titledb_loaded:
-                try:
-                    info = titles.get_game_info(title_id) or {}
-                    resolved_name = str(info.get('name') or '').strip()
-                    if resolved_name and resolved_name.lower() != 'unrecognized':
-                        title_name = resolved_name
-                    icon_remote_url = str(info.get('iconUrl') or '').strip()
-                except Exception as title_err:
-                    logger.debug('Failed title metadata lookup for save %s: %s', title_id, title_err)
-
-            download_url = f'/api/saves/download/{title_id}.zip'
+            save_id = str(version.get('save_id') or '')
+            note = _normalize_save_note(version.get('note'))
+            created_ts = int(version.get('created_ts') or 0)
+            created_at = str(version.get('created_at') or '').strip() or _save_sync_format_created_at(created_ts)
+            size = int(version.get('size') or 0)
+            download_url = str(version.get('download_url') or '')
+            delete_url = str(version.get('delete_url') or '')
             icon_url = f'/api/shop/icon/{title_id}'
             saves.append({
                 'title_id': title_id,
                 'titleId': title_id,
                 'app_id': title_id,
-                'name': title_name,
-                'title_name': title_name,
-                'titleName': title_name,
+                'name': cached_meta['title_name'],
+                'title_name': cached_meta['title_name'],
+                'titleName': cached_meta['title_name'],
                 'size': size,
+                'save_id': save_id,
+                'saveId': save_id,
+                'note': note,
+                'save_note': note,
+                'saveNote': note,
+                'created_at': created_at,
+                'createdAt': created_at,
+                'created_ts': created_ts,
+                'createdTs': created_ts,
                 'icon_url': icon_url,
                 'iconUrl': icon_url,
-                'icon_remote_url': icon_remote_url,
-                'iconRemoteUrl': icon_remote_url,
+                'icon_remote_url': cached_meta['icon_remote_url'],
+                'iconRemoteUrl': cached_meta['icon_remote_url'],
                 'download_url': download_url,
                 'downloadUrl': download_url,
+                'delete_url': delete_url,
+                'deleteUrl': delete_url,
             })
     except Exception as e:
         logger.error('Failed to list saves for user %s: %s', getattr(user, 'user', '?'), e)
@@ -3912,9 +4181,11 @@ def upload_save_api(title_id):
         limit_gb = MAX_SAVE_UPLOAD_SIZE // (1024 * 1024 * 1024)
         return api_error(f'Save archive exceeds maximum limit of {limit_gb}GB.', 400)
 
-    user_dir = _save_sync_user_dir(user)
-    os.makedirs(user_dir, exist_ok=True)
-    archive_path = _save_sync_archive_path(user, normalized_title_id)
+    note = _save_sync_resolve_note()
+    save_id = _save_sync_generate_save_id(note)
+    title_dir = _save_sync_title_dir(user, normalized_title_id)
+    os.makedirs(title_dir, exist_ok=True)
+    archive_path = _save_sync_archive_path(user, normalized_title_id, save_id=save_id)
     temp_path = archive_path + '.tmp'
 
     try:
@@ -3933,13 +4204,46 @@ def upload_save_api(title_id):
         logger.error('Failed to save uploaded archive for user %s title %s: %s', getattr(user, 'user', '?'), normalized_title_id, e)
         return api_error('Failed to store save archive.', 500)
 
-    return api_success({'title_id': normalized_title_id, 'size': int(file_size)}, message='Save uploaded successfully.')
+    created_ts = int(time.time())
+    created_at = _save_sync_format_created_at(created_ts)
+    metadata = {
+        'title_id': normalized_title_id,
+        'save_id': save_id,
+        'created_at': created_at,
+        'created_ts': created_ts,
+        'note': note,
+        'uploaded_by': str(getattr(user, 'user', '') or ''),
+        'size': int(file_size),
+    }
+    try:
+        _save_sync_write_metadata(_save_sync_metadata_path(user, normalized_title_id, save_id), metadata)
+    except Exception as e:
+        logger.warning('Failed writing save metadata for user %s title %s save %s: %s', getattr(user, 'user', '?'), normalized_title_id, save_id, e)
+
+    return api_success({
+        'title_id': normalized_title_id,
+        'titleId': normalized_title_id,
+        'save_id': save_id,
+        'saveId': save_id,
+        'created_at': created_at,
+        'createdAt': created_at,
+        'created_ts': created_ts,
+        'createdTs': created_ts,
+        'note': note,
+        'size': int(file_size),
+        'download_url': f'/api/saves/download/{normalized_title_id}/{save_id}.zip',
+        'downloadUrl': f'/api/saves/download/{normalized_title_id}/{save_id}.zip',
+        'delete_url': f'/api/saves/delete/{normalized_title_id}/{save_id}',
+        'deleteUrl': f'/api/saves/delete/{normalized_title_id}/{save_id}',
+    }, message='Save uploaded successfully.')
 
 
+@app.get('/api/saves/download/<title_id>/<save_id>')
+@app.get('/api/saves/download/<title_id>/<save_id>.zip')
 @app.get('/api/saves/download/<title_id>')
 @app.get('/api/saves/download/<title_id>.zip')
 @save_sync_access
-def download_save_api(title_id):
+def download_save_api(title_id, save_id=None):
     user = getattr(g, 'save_sync_user', None)
     if user is None:
         return api_error('Save sync authorization failed.', 403)
@@ -3948,17 +4252,71 @@ def download_save_api(title_id):
     if not normalized_title_id:
         return api_error('Invalid title_id for save download.', 400)
 
-    archive_path = _save_sync_archive_path(user, normalized_title_id)
+    selected_archive, resolve_error = _save_sync_resolve_download_archive(user, normalized_title_id, save_id=save_id)
+    if selected_archive is None:
+        if resolve_error and str(resolve_error).lower().startswith('invalid'):
+            return api_error(resolve_error, 400)
+        return api_error(resolve_error or 'Save archive not found.', 404)
+
+    archive_path = str(selected_archive.get('archive_path') or '')
     if not os.path.isfile(archive_path):
         return api_error('Save archive not found.', 404)
+
+    selected_save_id = str(selected_archive.get('save_id') or '').strip()
+    if selected_save_id and selected_save_id != 'legacy':
+        download_name = f'{normalized_title_id}_{selected_save_id}.zip'
+    else:
+        download_name = f'{normalized_title_id}.zip'
 
     return send_from_directory(
         os.path.dirname(archive_path),
         os.path.basename(archive_path),
         as_attachment=True,
-        download_name=f'{normalized_title_id}.zip',
+        download_name=download_name,
         mimetype='application/zip'
     )
+
+
+@app.route('/api/saves/delete/<title_id>/<save_id>', methods=['DELETE', 'POST'])
+@app.route('/api/saves/delete/<title_id>/<save_id>.zip', methods=['DELETE', 'POST'])
+@app.route('/api/saves/delete/<title_id>', methods=['DELETE', 'POST'])
+@app.route('/api/saves/delete/<title_id>.zip', methods=['DELETE', 'POST'])
+@save_sync_access
+def delete_save_api(title_id, save_id=None):
+    user = getattr(g, 'save_sync_user', None)
+    if user is None:
+        return api_error('Save sync authorization failed.', 403)
+
+    normalized_title_id = _normalize_save_title_id(title_id)
+    if not normalized_title_id:
+        return api_error('Invalid title_id for save delete.', 400)
+
+    selected_save_id = None
+    if save_id is not None:
+        selected_save_id = _normalize_save_id(save_id)
+        if not selected_save_id:
+            return api_error('Invalid save_id for save delete.', 400)
+
+    deleted_info, delete_error = _save_sync_delete_archive(user, normalized_title_id, save_id=selected_save_id)
+    if deleted_info is None:
+        status = 404
+        error_text = str(delete_error or '')
+        if error_text.lower().startswith('invalid'):
+            status = 400
+        elif error_text and 'failed to delete' in error_text.lower():
+            status = 500
+        return api_error(delete_error or 'Save archive not found.', status)
+
+    deleted_save_id = str(deleted_info.get('save_id') or '')
+    is_legacy = bool(deleted_info.get('legacy'))
+    return api_success({
+        'title_id': normalized_title_id,
+        'titleId': normalized_title_id,
+        'save_id': deleted_save_id,
+        'saveId': deleted_save_id,
+        'legacy': is_legacy,
+        'deleted': True,
+    }, message='Save backup deleted successfully.')
 
 
 @app.route('/api/titles', methods=['GET'])
