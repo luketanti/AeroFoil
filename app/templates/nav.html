@@ -23,7 +23,7 @@
                 {% endif %}
                 {% if current_user.is_authenticated and current_user.has_backup_access() %}
                 <li class="nav-item">
-                    <a class="nav-link{% if title == 'Saves Files' %} active" aria-current="page"{% else %}"{% endif %}" href="/saves">Saves Files</a>
+                    <a class="nav-link{% if title == 'Save Data Backups' %} active" aria-current="page"{% else %}"{% endif %}" href="/saves">Save Data Backups</a>
                 </li>
                 {% endif %}
                 {% if current_user.is_admin or admin_account_created == false %}

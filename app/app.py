@@ -2603,7 +2603,7 @@ def requests_page():
 def saves_page():
     return render_template(
         'saves.html',
-        title='Saves Files',
+        title='Save Data Backups',
         admin_account_created=admin_account_created())
 
 
