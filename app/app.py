@@ -4939,16 +4939,6 @@ def shop_sections_api():
         limit = 50
 
     is_cyberfoil = _is_cyberfoil_request()
-    if is_cyberfoil:
-        payload = _build_shop_sections_payload(limit)
-        _log_access(
-            kind='shop_sections',
-            filename=request.full_path if request.query_string else request.path,
-            ok=True,
-            status_code=200,
-            duration_ms=int((time.time() - start_ts) * 1000),
-        )
-        return jsonify(payload)
 
     now = time.time()
     state_token = _get_titledb_aware_state_token()
@@ -4995,6 +4985,15 @@ def shop_sections_api():
         payload = _build_shop_sections_payload(limit)
         if SHOP_SECTIONS_CACHE_TTL_S is None or SHOP_SECTIONS_CACHE_TTL_S > 0:
             _store_shop_sections_cache(payload, limit, now, state_token, persist_disk=True)
+
+    if is_cyberfoil:
+        _log_access(
+            kind='shop_sections',
+            filename=request.full_path if request.query_string else request.path,
+            ok=True,
+            status_code=200,
+            duration_ms=int((time.time() - start_ts) * 1000),
+        )
 
     return jsonify(payload)
 
