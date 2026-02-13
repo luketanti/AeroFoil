@@ -5,6 +5,7 @@ from functools import wraps
 from app.db import *
 from flask_login import LoginManager
 from app.settings import load_settings, set_security_settings
+import hashlib
 
 import logging
 import threading
@@ -18,6 +19,9 @@ _recent_auth_log = {}
 _auth_ip_state_lock = threading.Lock()
 _auth_failed_attempts = {}
 _auth_ip_lockouts = {}
+_auth_failure_burst_lock = threading.Lock()
+_auth_failure_burst = {}
+_AUTH_FAILURE_BURST_WINDOW_S = 1.5
 
 
 def _auth_dedupe_allow(dedupe_key: str, window_s: int = 15) -> bool:
@@ -200,6 +204,100 @@ def _clear_auth_failures(client_ip):
     with _auth_ip_state_lock:
         _auth_failed_attempts.pop(client_ip, None)
         _auth_ip_lockouts.pop(client_ip, None)
+
+
+def _should_count_failure(client_ip, username=None, password=None):
+    """Collapse duplicate failed auth checks for the same credential burst.
+
+    Some clients probe multiple endpoints in parallel with identical bad creds.
+    Count that as a single failed attempt for lockout purposes.
+    """
+    ip = str(client_ip or '').strip()
+    if not ip:
+        return True
+    uname = str(username or '').strip().lower()
+    secret = str(password or '')
+    digest = hashlib.sha256(f"{uname}\x00{secret}".encode('utf-8', errors='ignore')).hexdigest()
+    key = f"{ip}|{digest}"
+    now = time.time()
+    with _auth_failure_burst_lock:
+        last = float(_auth_failure_burst.get(key) or 0.0)
+        if (now - last) < float(_AUTH_FAILURE_BURST_WINDOW_S):
+            return False
+        _auth_failure_burst[key] = now
+        if len(_auth_failure_burst) > 20000:
+            cutoff = now - float(_AUTH_FAILURE_BURST_WINDOW_S) * 4.0
+            keep = {
+                k: ts for k, ts in _auth_failure_burst.items()
+                if float(ts) >= cutoff
+            }
+            if len(keep) > 10000:
+                ordered = sorted(keep.items(), key=lambda kv: kv[1], reverse=True)[:10000]
+                keep = {k: v for k, v in ordered}
+            _auth_failure_burst.clear()
+            _auth_failure_burst.update(keep)
+    return True
+
+
+def _get_active_lockouts_snapshot():
+    settings = {}
+    try:
+        settings = load_settings()
+    except Exception:
+        settings = {}
+    config = _get_auth_protection_config(settings)
+    window_s = int(config.get('window_s') or 600)
+    now = time.time()
+
+    items = []
+    with _auth_ip_state_lock:
+        expired_ips = [
+            ip for ip, until in _auth_ip_lockouts.items()
+            if float(until or 0) <= now
+        ]
+        for ip in expired_ips:
+            _auth_ip_lockouts.pop(ip, None)
+
+        for ip, until in _auth_ip_lockouts.items():
+            remaining = int(max(1, round(float(until or 0) - now)))
+            attempts = [
+                ts for ts in (_auth_failed_attempts.get(ip) or [])
+                if float(ts) >= (now - float(window_s))
+            ]
+            _auth_failed_attempts[ip] = attempts
+            last_failed_at = int(max(attempts)) if attempts else None
+            items.append({
+                'ip': str(ip),
+                'remaining_seconds': remaining,
+                'locked_until': int(float(until or 0)),
+                'failed_attempts_recent': len(attempts),
+                'last_failed_at': last_failed_at,
+                'window_seconds': window_s,
+            })
+
+    items.sort(key=lambda item: int(item.get('remaining_seconds') or 0), reverse=True)
+    return items
+
+
+def _unlock_ip_lockout(ip_value):
+    ip = str(ip_value or '').strip()
+    if not ip:
+        return False
+    removed = False
+    with _auth_ip_state_lock:
+        if _auth_ip_lockouts.pop(ip, None) is not None:
+            removed = True
+        if _auth_failed_attempts.pop(ip, None) is not None:
+            removed = True
+    return removed
+
+
+def _unlock_all_ip_lockouts():
+    with _auth_ip_state_lock:
+        removed = len(_auth_ip_lockouts)
+        _auth_ip_lockouts.clear()
+        _auth_failed_attempts.clear()
+    return int(removed)
 
 
 def _log_login_event(kind: str, username: str = None, ok: bool = None, status_code: int = None, window_s: int = 10):
@@ -480,17 +578,19 @@ def basic_auth(request):
         success = False
         error = f'Unknown user "{username}".'
         _log_login_event('shop_auth_failed_unknown_user', username=username, ok=False, status_code=401, window_s=30)
-        lockout_triggered, _ = _record_auth_failure(client_ip, auth_config)
-        if lockout_triggered:
-            _log_login_event('shop_auth_lockout_activated', username=username, ok=False, status_code=429, window_s=10)
+        if _should_count_failure(client_ip, username=username, password=password):
+            lockout_triggered, _ = _record_auth_failure(client_ip, auth_config)
+            if lockout_triggered:
+                _log_login_event('shop_auth_lockout_activated', username=username, ok=False, status_code=429, window_s=10)
     
     elif not check_password_hash(user.password, password):
         success = False
         error = f'Incorrect password for user "{username}".'
         _log_login_event('shop_auth_failed_bad_password', username=username, ok=False, status_code=401, window_s=30)
-        lockout_triggered, _ = _record_auth_failure(client_ip, auth_config)
-        if lockout_triggered:
-            _log_login_event('shop_auth_lockout_activated', username=username, ok=False, status_code=429, window_s=10)
+        if _should_count_failure(client_ip, username=username, password=password):
+            lockout_triggered, _ = _record_auth_failure(client_ip, auth_config)
+            if lockout_triggered:
+                _log_login_event('shop_auth_lockout_activated', username=username, ok=False, status_code=429, window_s=10)
 
     elif getattr(user, 'frozen', False):
         success = False
@@ -607,18 +707,20 @@ def login():
     if not user:
         logger.warning(f'Incorrect login for user {username}')
         _log_login_event('login_failed_unknown_user', username=username, ok=False, status_code=401, window_s=15)
-        lockout_triggered, _ = _record_auth_failure(client_ip, auth_config)
-        if lockout_triggered:
-            _log_login_event('login_lockout_activated', username=username, ok=False, status_code=429, window_s=10)
+        if _should_count_failure(client_ip, username=username, password=password):
+            lockout_triggered, _ = _record_auth_failure(client_ip, auth_config)
+            if lockout_triggered:
+                _log_login_event('login_lockout_activated', username=username, ok=False, status_code=429, window_s=10)
         return redirect(url_for('auth.login')) # if the user doesn't exist or password is wrong, reload the page
 
     # take the user-supplied password, hash it, and compare it to the hashed password in the database
     if not check_password_hash(user.password, password):
         logger.warning(f'Incorrect login for user {username}')
         _log_login_event('login_failed_bad_password', username=username, ok=False, status_code=401, window_s=15)
-        lockout_triggered, _ = _record_auth_failure(client_ip, auth_config)
-        if lockout_triggered:
-            _log_login_event('login_lockout_activated', username=username, ok=False, status_code=429, window_s=10)
+        if _should_count_failure(client_ip, username=username, password=password):
+            lockout_triggered, _ = _record_auth_failure(client_ip, auth_config)
+            if lockout_triggered:
+                _log_login_event('login_lockout_activated', username=username, ok=False, status_code=429, window_s=10)
         return redirect(url_for('auth.login'))
 
     if getattr(user, 'frozen', False):
@@ -656,6 +758,42 @@ def get_users():
         ).all()
     ]
     return jsonify(all_users)
+
+
+@auth_blueprint.route('/api/auth/lockouts', methods=['GET'])
+@access_required('admin')
+def get_auth_lockouts():
+    try:
+        items = _get_active_lockouts_snapshot()
+        return jsonify({
+            'success': True,
+            'items': items,
+            'count': len(items),
+            'timestamp': int(time.time()),
+        })
+    except Exception as e:
+        logger.error(f'Failed to list auth lockouts: {e}')
+        return jsonify({'success': False, 'error': 'Failed to list auth lockouts.'}), 500
+
+
+@auth_blueprint.route('/api/auth/lockouts/unlock', methods=['POST'])
+@access_required('admin')
+def unlock_auth_lockout():
+    data = request.json or {}
+    ip = str(data.get('ip') or '').strip()
+    if not ip:
+        return jsonify({'success': False, 'error': 'Missing ip.'}), 400
+    removed = _unlock_ip_lockout(ip)
+    logger.info(f'Auth lockout unlock requested for {ip}: removed={removed}')
+    return jsonify({'success': True, 'ip': ip, 'removed': bool(removed)})
+
+
+@auth_blueprint.route('/api/auth/lockouts/unlock-all', methods=['POST'])
+@access_required('admin')
+def unlock_all_auth_lockouts():
+    removed = _unlock_all_ip_lockouts()
+    logger.info(f'Auth lockout unlock-all requested: removed={removed}')
+    return jsonify({'success': True, 'removed': int(removed)})
 
 
 @auth_blueprint.route('/api/user/freeze', methods=['PATCH'])

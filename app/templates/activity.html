@@ -413,6 +413,7 @@
                 <a class="nav-link" href="#" data-section="realtime"><i class="bi bi-activity"></i>Realtime</a>
                 <a class="nav-link" href="#" data-section="access"><i class="bi bi-clock-history"></i>Access History</a>
                 <a class="nav-link" href="#" data-section="clients"><i class="bi bi-phone"></i>Client History</a>
+                <a class="nav-link" href="#" data-section="lockouts"><i class="bi bi-shield-lock"></i>Lockouts</a>
             </nav>
         </div>
 
@@ -468,6 +469,12 @@
                             <div class="activity-kpi">
                                 <div class="activity-kpi-label">Client History Rows</div>
                                 <div class="activity-kpi-value" id="kpiClientHistoryRows">0</div>
+                            </div>
+                        </div>
+                        <div class="col-sm-6 col-xl-3">
+                            <div class="activity-kpi">
+                                <div class="activity-kpi-label">Locked IPs</div>
+                                <div class="activity-kpi-value" id="kpiLockedIps">0</div>
                             </div>
                         </div>
                         <div class="col-12">
@@ -665,6 +672,53 @@
                         </div>
                     </section>
                 </div>
+
+                <div class="activity-section-pane d-none" id="section-lockouts" data-section="lockouts">
+                    <section class="activity-section">
+                        <div class="activity-section-head">
+                            <div>
+                                <h5 class="mb-0">Login Lockouts</h5>
+                                <div class="activity-section-subtitle">Current temporary IP lockouts from failed authentication attempts</div>
+                            </div>
+                        </div>
+
+                        <div class="card activity-card">
+                            <div class="card-body">
+                                <div class="activity-toolbar">
+                                    <div>
+                                        <h6 class="card-title mb-0">Temporary lockouts <span class="badge text-bg-secondary ms-1" id="authLockoutsCountActivity">0</span></h6>
+                                        <div class="activity-section-subtitle">Unlock individual IPs or clear all temporary lockouts</div>
+                                    </div>
+                                    <div class="activity-toolbar-group">
+                                        <button type="button" class="btn btn-outline-secondary btn-sm" id="refreshAuthLockoutsBtnActivity">
+                                            <i class="bi bi-arrow-clockwise"></i> Refresh
+                                        </button>
+                                        <button type="button" class="btn btn-outline-danger btn-sm" id="unlockAllAuthLockoutsBtnActivity">
+                                            <i class="bi bi-unlock"></i> Unlock all
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div class="table-responsive mt-3 activity-scroll-full">
+                                    <table class="table table-sm table-striped align-middle activity-table">
+                                        <thead>
+                                            <tr>
+                                                <th scope="col">IP</th>
+                                                <th scope="col">Remaining</th>
+                                                <th scope="col">Last failed</th>
+                                                <th scope="col">Attempts</th>
+                                                <th scope="col">Action</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="authLockoutsBodyActivity">
+                                            <tr><td colspan="5" class="table-muted-empty">Loading...</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+                </div>
                 </div>
             </div>
         </div>
@@ -777,7 +831,7 @@
     }
 
     function showActivitySection(sectionName) {
-        const section = ['overview', 'realtime', 'access', 'clients'].includes(String(sectionName))
+        const section = ['overview', 'realtime', 'access', 'clients', 'lockouts'].includes(String(sectionName))
             ? String(sectionName)
             : 'overview';
         $('.activity-section-pane').addClass('d-none');
@@ -786,6 +840,9 @@
         $(`#activityNav .nav-link[data-section="${section}"]`).addClass('active');
         if (window.location.hash !== `#${section}`) {
             history.replaceState(null, '', `#${section}`);
+        }
+        if (section === 'lockouts') {
+            loadAuthLockouts();
         }
 
         if ($(window).width() < 768) {
@@ -1056,6 +1113,119 @@
         });
     }
 
+    function formatDurationSeconds(totalSeconds) {
+        let sec = parseInt(totalSeconds, 10);
+        if (!Number.isFinite(sec) || sec <= 0) {
+            return '0s';
+        }
+        const days = Math.floor(sec / 86400);
+        sec -= days * 86400;
+        const hours = Math.floor(sec / 3600);
+        sec -= hours * 3600;
+        const mins = Math.floor(sec / 60);
+        sec -= mins * 60;
+        const parts = [];
+        if (days > 0) {
+            parts.push(`${days}d`);
+        }
+        if (hours > 0) {
+            parts.push(`${hours}h`);
+        }
+        if (mins > 0) {
+            parts.push(`${mins}m`);
+        }
+        if (sec > 0 && parts.length < 2) {
+            parts.push(`${sec}s`);
+        }
+        return parts.join(' ');
+    }
+
+    function setAuthLockoutsPlaceholder(message) {
+        $('#authLockoutsBodyActivity').html(
+            `<tr><td colspan="5" class="table-muted-empty">${escapeHtml(message)}</td></tr>`
+        );
+    }
+
+    function renderAuthLockouts(items) {
+        const body = $('#authLockoutsBodyActivity');
+        const list = Array.isArray(items) ? items : [];
+        setText('authLockoutsCountActivity', list.length);
+        setText('kpiLockedIps', list.length);
+        if (!list.length) {
+            setAuthLockoutsPlaceholder('No temporary lockouts.');
+            return;
+        }
+
+        body.empty();
+        list.forEach(item => {
+            const ip = String(item?.ip || '').trim();
+            const row = $(
+                `<tr>
+                    <td class="mono-value">${escapeHtml(ip || '-')}</td>
+                    <td>${escapeHtml(formatDurationSeconds(item?.remaining_seconds || 0))}</td>
+                    <td>${escapeHtml(formatTime(item?.last_failed_at || 0))}</td>
+                    <td>${escapeHtml(String(item?.failed_attempts_recent ?? 0))}</td>
+                    <td>
+                        <button type="button" class="btn btn-outline-warning btn-sm unlock-auth-lockout-btn-activity" data-ip="${escapeHtml(ip)}">
+                            <i class="bi bi-unlock"></i> Unlock
+                        </button>
+                    </td>
+                </tr>`
+            );
+            body.append(row);
+        });
+    }
+
+    function loadAuthLockouts() {
+        $('#refreshAuthLockoutsBtnActivity').prop('disabled', true);
+        $.getJSON('/api/auth/lockouts', function (result) {
+            if (!result || result.success !== true) {
+                renderAuthLockouts([]);
+                setAuthLockoutsPlaceholder('Failed to load lockouts.');
+                return;
+            }
+            renderAuthLockouts(result.items);
+        }).fail(function () {
+            renderAuthLockouts([]);
+            setAuthLockoutsPlaceholder('Failed to load lockouts.');
+        }).always(function () {
+            $('#refreshAuthLockoutsBtnActivity').prop('disabled', false);
+        });
+    }
+
+    function unlockAuthLockout(ip) {
+        const value = String(ip || '').trim();
+        if (!value) {
+            return;
+        }
+        $.ajax({
+            url: '/api/auth/lockouts/unlock',
+            type: 'POST',
+            data: JSON.stringify({ ip: value }),
+            contentType: 'application/json',
+            complete: function () {
+                loadAuthLockouts();
+            }
+        });
+    }
+
+    function unlockAllAuthLockouts() {
+        if (!confirm('Unlock all temporarily locked IPs?')) {
+            return;
+        }
+        $('#unlockAllAuthLockoutsBtnActivity').prop('disabled', true);
+        $.ajax({
+            url: '/api/auth/lockouts/unlock-all',
+            type: 'POST',
+            data: JSON.stringify({}),
+            contentType: 'application/json',
+            complete: function () {
+                $('#unlockAllAuthLockoutsBtnActivity').prop('disabled', false);
+                loadAuthLockouts();
+            }
+        });
+    }
+
     function loadClientsHistory() {
         const limit = parseInt($('#clientsHistoryLimit').val() || '250', 10);
         $.getJSON(`/api/admin/clients-history?limit=${encodeURIComponent(limit)}`, function (result) {
@@ -1139,9 +1309,19 @@
         $('#refreshNowBtn').on('click', function () {
             loadActivity();
             loadClientsHistory();
+            loadAuthLockouts();
         });
         $('#activityLimit').on('change', loadActivity);
         $('#clientsHistoryLimit').on('change', loadClientsHistory);
+        $('#refreshAuthLockoutsBtnActivity').on('click', function () {
+            loadAuthLockouts();
+        });
+        $('#unlockAllAuthLockoutsBtnActivity').on('click', function () {
+            unlockAllAuthLockouts();
+        });
+        $(document).on('click', '.unlock-auth-lockout-btn-activity', function () {
+            unlockAuthLockout($(this).data('ip'));
+        });
 
         $('#clearClientsHistoryBtn').on('click', function () {
             if (!confirm('Clear the persisted client history log?')) {
@@ -1210,8 +1390,10 @@
         refreshSortIndicators();
         loadActivity();
         loadClientsHistory();
+        loadAuthLockouts();
         setInterval(loadActivity, 2500);
         setInterval(loadClientsHistory, 15000);
+        setInterval(loadAuthLockouts, 15000);
     });
 </script>
 
