@@ -3,6 +3,7 @@ flask==3.1.2
 Flask-Login==0.6.3
 Flask-Migrate==4.1.0
 flask-sqlalchemy==3.1.1
+waitress==3.0.2
 git+https://github.com/luketanti/nsz.git
 PyYAML==6.0.3
 requests==2.32.5

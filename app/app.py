@@ -49,6 +49,11 @@ import zipfile
 from app.db import add_access_event, get_access_events
 
 try:
+    from waitress import serve as waitress_serve
+except Exception:
+    waitress_serve = None
+
+try:
     from PIL import Image, ImageOps
 except Exception:
     Image = None
@@ -473,6 +478,23 @@ def _read_cache_ttl(env_key, default_value):
         return int(lowered)
     except ValueError:
         return default_value
+
+def _read_int_env(env_key, default_value, minimum=None, maximum=None):
+    raw = os.environ.get(env_key)
+    if raw is None:
+        return default_value
+    raw = str(raw).strip()
+    if not raw:
+        return default_value
+    try:
+        value = int(raw)
+    except ValueError:
+        return default_value
+    if minimum is not None:
+        value = max(int(minimum), value)
+    if maximum is not None:
+        value = min(int(maximum), value)
+    return value
 
 def _invalidate_shop_root_cache():
     with shop_root_cache_lock:
@@ -3196,9 +3218,11 @@ def admin_access_history_clear_api():
 def get_settings_api():
     reload_conf()
     settings = copy.deepcopy(app_settings)
+    settings.setdefault('shop', {})
     hauth_value = settings['shop'].get('hauth')
     settings['shop']['hauth_value'] = hauth_value or ''
     settings['shop']['hauth'] = bool(hauth_value)
+    settings['shop']['fast_transfer_mode'] = bool(settings['shop'].get('fast_transfer_mode'))
 
     # Surface the effective public key in the UI even if it isn't in settings.yaml yet.
     settings['shop']['public_key'] = settings['shop'].get('public_key') or TINFOIL_PUBLIC_KEY
@@ -4942,6 +4966,7 @@ def serve_game(id):
     filename = file_row.filename or os.path.basename(filepath)
     filedir = os.path.dirname(filepath)
     title_id = (file_row.title_id or '').strip().upper() or None
+    fast_transfer_mode = bool((app_settings.get('shop') or {}).get('fast_transfer_mode'))
 
     transfer_id = uuid.uuid4().hex
     meta = {
@@ -4980,6 +5005,12 @@ def serve_game(id):
         'ok': True,
         'finished': False,
     }
+    fast_mode_fallback_sent = 0
+    if fast_transfer_mode:
+        try:
+            fast_mode_fallback_sent = max(0, int(resp.headers.get('Content-Length') or 0))
+        except Exception:
+            fast_mode_fallback_sent = 0
 
     _finish_lock = threading.Lock()
 
@@ -4990,23 +5021,33 @@ def serve_game(id):
             state['finished'] = True
 
         code = getattr(resp, 'status_code', None) or status_code
+        bytes_sent = int(state.get('sent') or 0)
+        if fast_transfer_mode and bytes_sent <= 0 and fast_mode_fallback_sent > 0:
+            # Fast mode skips per-chunk accounting; use response length as fallback.
+            bytes_sent = int(fast_mode_fallback_sent)
         try:
             _transfer_session_finish(
                 session_key,
                 ok=bool(state.get('ok')),
                 status_code=int(code) if code is not None else None,
-                bytes_sent=int(state.get('sent') or 0),
+                bytes_sent=bytes_sent,
             )
         except Exception:
             try:
                 logger.exception('Failed to finalize transfer session')
             except Exception:
                 pass
+        finally:
+            with _active_transfers_lock:
+                _active_transfers.pop(transfer_id, None)
 
     def _on_close():
         _finish_once()
 
     resp.call_on_close(_on_close)
+
+    if fast_transfer_mode:
+        return resp
 
     def _generate_wrapped():
         try:
@@ -5027,8 +5068,6 @@ def serve_game(id):
         finally:
             # Ensure we close the session even if call_on_close doesn't fire.
             _finish_once()
-            with _active_transfers_lock:
-                _active_transfers.pop(transfer_id, None)
 
     resp.response = _generate_wrapped()
     resp.direct_passthrough = False
@@ -5512,13 +5551,53 @@ if __name__ == '__main__':
     init_users(app)
     init()
     logger.info('Initialization steps done, starting server...')
-    # Enable threading so admin activity polling keeps working during transfers.
-    app.run(debug=False, use_reloader=False, host="0.0.0.0", port=8465, threaded=True)
-    # Shutdown server
-    logger.info('Shutting down server...')
-    watcher.stop()
-    watcher_thread.join()
-    logger.debug('Watcher thread terminated.')
-    # Shutdown scheduler
-    app.scheduler.shutdown()
-    logger.debug('Scheduler terminated.')
+    host = (os.environ.get('OWNFOIL_HOST') or '0.0.0.0').strip() or '0.0.0.0'
+    port = _read_int_env('OWNFOIL_PORT', 8465, minimum=1, maximum=65535)
+    use_flask_dev_server = str(os.environ.get('OWNFOIL_USE_FLASK_DEV') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+    try:
+        if waitress_serve is not None and not use_flask_dev_server:
+            wsgi_threads = _read_int_env('OWNFOIL_WSGI_THREADS', 32, minimum=1, maximum=512)
+            wsgi_connection_limit = _read_int_env('OWNFOIL_WSGI_CONNECTION_LIMIT', 1000, minimum=1, maximum=100000)
+            wsgi_channel_timeout = _read_int_env('OWNFOIL_WSGI_CHANNEL_TIMEOUT_S', 120, minimum=5, maximum=3600)
+            wsgi_cleanup_interval = _read_int_env('OWNFOIL_WSGI_CLEANUP_INTERVAL_S', 30, minimum=1, maximum=600)
+            logger.info(
+                'Starting Waitress WSGI server on %s:%s (threads=%s, connection_limit=%s, channel_timeout=%ss)',
+                host,
+                port,
+                wsgi_threads,
+                wsgi_connection_limit,
+                wsgi_channel_timeout,
+            )
+            waitress_serve(
+                app,
+                host=host,
+                port=port,
+                threads=wsgi_threads,
+                connection_limit=wsgi_connection_limit,
+                channel_timeout=wsgi_channel_timeout,
+                cleanup_interval=wsgi_cleanup_interval,
+                ident='Ownfoil'
+            )
+        else:
+            if use_flask_dev_server:
+                logger.warning('OWNFOIL_USE_FLASK_DEV enabled: using Flask development server.')
+            elif waitress_serve is None:
+                logger.warning('Waitress is not available; falling back to Flask development server.')
+            # Threaded fallback keeps admin polling responsive during long transfers.
+            app.run(debug=False, use_reloader=False, host=host, port=port, threaded=True)
+    finally:
+        # Shutdown server
+        logger.info('Shutting down server...')
+        try:
+            watcher.stop()
+            watcher_thread.join()
+            logger.debug('Watcher thread terminated.')
+        except Exception:
+            logger.exception('Watcher shutdown failed')
+        # Shutdown scheduler
+        try:
+            app.scheduler.shutdown()
+            logger.debug('Scheduler terminated.')
+        except Exception:
+            logger.exception('Scheduler shutdown failed')

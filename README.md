@@ -83,6 +83,13 @@ This is usefull if you don't want to remember the `docker run` command and have 
 - `OWNFOIL_TRUSTED_PROXIES`: comma-separated proxy IPs/CIDRs (default: empty), for example `172.16.0.0/12,192.168.0.0/16`.
 - `SHOP_SECTIONS_CACHE_TTL_S`: cache TTL for `/api/shop/sections` (seconds). Use `none`/unset for rebuild-only (default), `0` to disable caching. Recommended: `none` for stable libraries, or `600`-`900` for periodic refresh.
 - `MEDIA_INDEX_TTL_S`: cache TTL for icon/banner media index (seconds). Use `none`/unset for rebuild-only (default), `0` to disable caching. Recommended: `none` or `600`-`900`.
+- `OWNFOIL_HOST`: bind host for the web server (default: `0.0.0.0`).
+- `OWNFOIL_PORT`: bind port for the web server (default: `8465`).
+- `OWNFOIL_WSGI_THREADS`: Waitress worker thread count (default: `32`).
+- `OWNFOIL_WSGI_CONNECTION_LIMIT`: max concurrent Waitress channels (default: `1000`).
+- `OWNFOIL_WSGI_CHANNEL_TIMEOUT_S`: idle channel timeout in seconds (default: `120`).
+- `OWNFOIL_WSGI_CLEANUP_INTERVAL_S`: Waitress cleanup interval in seconds (default: `30`).
+- `OWNFOIL_USE_FLASK_DEV`: set to `true`/`1` to force Flask dev server instead of Waitress.
 
 ## Using Python
 Clone the repository using `git`, install the dependencies and you're good to go:
@@ -93,6 +100,8 @@ $ pip install -r requirements.txt
 $ python app/app.py
 ```
 To update the app you will need to pull the latest commits.
+
+By default, `python app/app.py` runs Ownfoil with the Waitress WSGI server (production-oriented). Set `OWNFOIL_USE_FLASK_DEV=true` only if you need the Flask development server for debugging.
 
 ## CyberFoil setup
 In CyberFoil, set the Ownfoil eShop URL in Settings:
@@ -186,6 +195,7 @@ This is where you can also upload your `console keys` file to enable content ide
 In the `Settings` page under the `Shop` section is where you customize your Shop, like the message displayed when successfully accessing the shop from Tinfoil or if the shop is private or public.
 The `Encrypt shop` option only affects the Tinfoil payload; the web interface and admin UI remain accessible as normal.
 Encryption uses the Tinfoil public key and AES, and requires the `pycryptodome` dependency.
+`Fast transfer mode` prioritizes throughput for `/api/get_game` by skipping per-chunk transfer accounting; Activity live byte counters and exact transfer bytes may be less precise.
 
 # Deployment notes
 - Recommended volumes: `/games`, `/app/config`, and `/app/data`.

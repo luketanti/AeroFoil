@@ -345,6 +345,14 @@
                     <div id="encryptShopCheckHelp" class="form-text">Serve encrypted and compressed shop, so that only Tinfoil clients
                         can access the content. <strong>Strongly suggested to enable it for security</strong>.</div>
                 </div>
+                <div class="mb-3 form-check">
+                    <input type="checkbox" class="form-check-input" id="fastTransferModeCheck"
+                        aria-describedby="fastTransferModeCheckHelp">
+                    <label class="form-check-label" for="fastTransferModeCheck">Fast transfer mode</label>
+                    <div id="fastTransferModeCheckHelp" class="form-text">
+                        Prioritize throughput by skipping per-chunk transfer tracking. Activity live byte counters and exact transfer byte accounting may be less precise.
+                    </div>
+                </div>
 
                 <div class="mb-3">
                     <div class="d-flex justify-content-between align-items-center mb-2">
@@ -1059,6 +1067,7 @@
             hauth: $('#shopHauthInput').val(),
             public: getCheckboxStatus("publicShopCheck"),
             encrypt: getCheckboxStatus("encryptShopCheck"),
+            fast_transfer_mode: getCheckboxStatus("fastTransferModeCheck"),
             public_key: getInputVal("shopPublicKeyInput"),
             motd: $('#motdTextArea').val(),
         }
@@ -1473,6 +1482,7 @@
             setInputVal("motdTextArea", shopSettings['motd']);
             $("#publicShopCheck").prop("checked", shopSettings['public']);
             $("#encryptShopCheck").prop("checked", shopSettings['encrypt']);
+            $("#fastTransferModeCheck").prop("checked", !!shopSettings['fast_transfer_mode']);
             setInputVal("shopPublicKeyInput", shopSettings['public_key'] || '');
             if (!shopSettings['host']) {
                 $("#missingShopHostAlert").css('display', '');

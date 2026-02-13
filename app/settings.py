@@ -135,6 +135,19 @@ def _read_env_csv(key):
         return []
     return [item.strip() for item in raw.split(',') if item.strip()]
 
+def _coerce_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ('1', 'true', 'yes', 'on'):
+            return True
+        if lowered in ('0', 'false', 'no', 'off'):
+            return False
+    return bool(default)
+
 def load_keys(key_file=KEYS_FILE):
     valid, _ = validate_keys_file(key_file)
     return valid
@@ -216,6 +229,18 @@ def load_settings(force_reload=False):
             merged.update(settings.get('security', {}))
             settings['security'] = merged
 
+        if 'shop' not in settings:
+            settings['shop'] = DEFAULT_SETTINGS.get('shop', {})
+        else:
+            defaults = DEFAULT_SETTINGS.get('shop', {})
+            merged = defaults.copy()
+            merged.update(settings.get('shop', {}))
+            settings['shop'] = merged
+        settings['shop']['fast_transfer_mode'] = _coerce_bool(
+            settings['shop'].get('fast_transfer_mode'),
+            default=False,
+        )
+
         env_trust = _read_env_bool('OWNFOIL_TRUST_PROXY_HEADERS')
         if env_trust is not None:
             settings['security']['trust_proxy_headers'] = env_trust
@@ -285,6 +310,11 @@ def load_settings(force_reload=False):
     settings.setdefault('downloads', {})
     settings['downloads']['search_char_replacements'] = _normalize_download_search_char_replacements(
         settings['downloads'].get('search_char_replacements')
+    )
+    settings.setdefault('shop', {})
+    settings['shop']['fast_transfer_mode'] = _coerce_bool(
+        settings['shop'].get('fast_transfer_mode'),
+        default=False,
     )
     
     # Update cache
@@ -419,6 +449,7 @@ def set_shop_settings(data):
     shop_host = data['host']
     if '://' in shop_host:
         data['host'] = shop_host.split('://')[-1]
+    data['fast_transfer_mode'] = _coerce_bool(data.get('fast_transfer_mode'), default=False)
     settings['shop'].update(data)
     with open(CONFIG_FILE, 'w') as yaml_file:
         yaml.dump(settings, yaml_file)
