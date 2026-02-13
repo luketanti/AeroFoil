@@ -4,179 +4,667 @@
 {% include 'nav.html' %}
 
 <style>
-    .activity-scroll {
-        max-height: 260px;
+    :root {
+        --activity-accent: var(--bs-primary);
+        --activity-border: var(--bs-border-color);
+        --activity-muted: var(--bs-secondary-color);
+        --activity-surface-1: var(--bs-body-bg);
+        --activity-surface-2: var(--bs-tertiary-bg);
+        --activity-surface-3: var(--bs-secondary-bg);
+        --activity-nav-h: 56px;
+    }
+
+    .activity-body {
+        padding-left: 0;
+        padding-right: 0;
+        height: calc(100dvh - var(--activity-nav-h));
+        overflow: hidden;
+    }
+
+    .activity-shell-row {
+        height: 100%;
+        min-height: 0;
+    }
+
+    #activitySidebar {
+        min-height: 100%;
+        height: 100%;
+        position: sticky;
+        top: var(--activity-nav-h);
         overflow-y: auto;
+        background-color: rgba(26, 30, 34, 0.98) !important;
+        border-right: 1px solid rgba(255, 255, 255, 0.1) !important;
+    }
+
+    #activitySidebar .d-flex {
+        border-bottom-color: rgba(255, 255, 255, 0.1) !important;
+    }
+
+    .activity-main-col {
+        height: 100%;
+        overflow: hidden;
+    }
+
+    @supports not (height: 100dvh) {
+        .activity-body {
+            height: calc(100vh - var(--activity-nav-h));
+        }
+    }
+
+    @media (min-width: 768px) {
+        html,
+        body {
+            overflow-y: hidden;
+        }
+    }
+
+    @media (max-width: 767.98px) {
+        html,
+        body {
+            overflow-y: auto;
+        }
+    }
+
+    .activity-main-inner {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        padding-top: 0.75rem;
+        padding-bottom: 0.75rem;
+    }
+
+    .activity-pane-wrap {
+        min-height: 0;
+        flex: 1 1 auto;
+        overflow: hidden;
+    }
+
+    #activityNav .nav-link {
+        color: rgba(255, 255, 255, 0.75);
+        padding: 0.75rem 1rem;
+        border-radius: 0.375rem;
+        margin-bottom: 0.25rem;
+        transition: all 0.2s ease;
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+    }
+
+    #activityNav .nav-link:hover {
+        color: rgba(255, 255, 255, 0.95);
+        background-color: rgba(255, 255, 255, 0.08);
+    }
+
+    #activityNav .nav-link.active {
+        color: #fff;
+        background-color: rgba(13, 110, 253, 0.25);
+        font-weight: 500;
+    }
+
+    #activityNav .nav-link i {
+        width: 16px;
+        text-align: center;
+        flex-shrink: 0;
+    }
+
+    .activity-header {
+        border: 1px solid var(--activity-border);
+        border-radius: 16px;
+        padding: 1rem 1.1rem;
+        background: var(--activity-surface-2);
+    }
+
+    .activity-subtitle {
+        color: var(--activity-muted);
+    }
+
+    .activity-kpi {
+        border: 1px solid var(--activity-border);
+        border-radius: 14px;
+        background: var(--activity-surface-2);
+        padding: 0.8rem 1rem;
+        min-height: 82px;
+    }
+
+    .activity-kpi-label {
+        color: var(--activity-muted);
+        font-size: 0.8rem;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+    }
+
+    .activity-kpi-value {
+        font-size: 1.55rem;
+        font-weight: 700;
+        color: var(--bs-body-color);
+        line-height: 1.15;
+    }
+
+    .activity-section {
+        border: 1px solid var(--activity-border);
+        border-radius: 16px;
+        background: var(--activity-surface-1);
+        padding: 1rem;
+    }
+
+    .activity-section-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.4rem 1rem;
+        margin-bottom: 0.85rem;
+    }
+
+    .activity-section-subtitle {
+        color: var(--activity-muted);
+        font-size: 0.85rem;
+    }
+
+    .activity-card {
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+    }
+
+    .activity-card .card-body {
+        padding: 0;
+    }
+
+    .activity-scroll {
+        max-height: 290px;
+        overflow-y: auto;
+    }
+
+    .activity-scroll-lg {
+        max-height: 430px;
+        overflow-y: auto;
+    }
+
+    .activity-scroll-full {
+        max-height: max(280px, calc(100dvh - 320px));
+        overflow-y: auto;
+    }
+
+    @supports not (height: 100dvh) {
+        .activity-scroll-full {
+            max-height: max(280px, calc(100vh - 320px));
+            overflow-y: auto;
+        }
+    }
+
+    .activity-table {
+        margin-bottom: 0;
+    }
+
+    .activity-table thead th {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        background: var(--activity-surface-3);
+        border-bottom: 1px solid var(--activity-border);
+        white-space: nowrap;
+    }
+
+    .activity-table td {
+        vertical-align: top;
+    }
+
+    .activity-toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+    }
+
+    .activity-toolbar-group {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.4rem;
     }
 
     th.sortable {
         cursor: pointer;
         user-select: none;
+        position: relative;
+        padding-right: 1.1rem;
+    }
+
+    th.sortable::after {
+        content: "\\2195";
+        position: absolute;
+        right: 0.2rem;
+        top: 50%;
+        transform: translateY(-52%);
+        font-size: 0.73rem;
+        color: var(--activity-muted);
+    }
+
+    th.sortable.sorted-asc::after {
+        content: "\\2191";
+        color: var(--activity-accent);
+    }
+
+    th.sortable.sorted-desc::after {
+        content: "\\2193";
+        color: var(--activity-accent);
+    }
+
+    .kind-badge {
+        font-size: 0.72rem;
+        letter-spacing: 0.02em;
+    }
+
+    .client-detail-stack {
+        display: grid;
+        gap: 0.2rem;
+    }
+
+    .client-kv {
+        display: grid;
+        grid-template-columns: 68px minmax(0, 1fr);
+        gap: 0.35rem;
+        align-items: start;
+        font-size: 0.78rem;
+    }
+
+    .client-k {
+        color: var(--activity-muted);
+        font-weight: 600;
+    }
+
+    .client-v {
+        word-break: break-all;
+        color: var(--bs-body-color);
+    }
+
+    .mono-value {
+        font-family: Consolas, "Courier New", monospace;
+        font-size: 0.73rem;
+    }
+
+    .table-muted-empty {
+        color: var(--activity-muted);
+    }
+
+    .activity-section-pane {
+        animation: activityFadeIn 0.18s ease-in;
+        height: 100%;
+        overflow: hidden;
+    }
+
+    .activity-section-pane > .activity-section {
+        height: 100%;
+    }
+
+    @keyframes activityFadeIn {
+        from {
+            opacity: 0;
+            transform: translateY(8px);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+
+    @media (max-width: 767.98px) {
+        .activity-body {
+            height: auto;
+        }
+
+        .activity-header {
+            padding: 0.85rem;
+        }
+
+        .activity-section {
+            padding: 0.75rem;
+        }
+
+        .activity-scroll,
+        .activity-scroll-lg {
+            max-height: 300px;
+        }
+
+        .activity-scroll-full {
+            max-height: max(240px, calc(100dvh - 360px));
+            overflow-y: auto;
+        }
+
+        @supports not (height: 100dvh) {
+            .activity-scroll-full {
+                max-height: max(240px, calc(100vh - 360px));
+                overflow-y: auto;
+            }
+        }
+
+        #activitySidebar {
+            position: fixed;
+            top: var(--activity-nav-h);
+            left: -100%;
+            width: 280px;
+            height: calc(100dvh - var(--activity-nav-h));
+            z-index: 1040;
+            transition: left 0.3s ease;
+            box-shadow: 2px 0 8px rgba(0, 0, 0, 0.3);
+        }
+
+        #activitySidebar.show {
+            left: 0;
+        }
+
+        body.activity-sidebar-open::before {
+            content: '';
+            position: fixed;
+            top: var(--activity-nav-h);
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1039;
+        }
+
+        .activity-main-col {
+            height: auto;
+            overflow: visible;
+        }
+
+        .activity-body {
+            overflow: visible;
+        }
+
+        .activity-main-inner {
+            height: auto;
+            display: block;
+            padding-top: 0.75rem;
+            padding-bottom: 0.75rem;
+        }
+
+        .activity-pane-wrap {
+            min-height: initial;
+            overflow: visible;
+        }
+
+        .activity-section-pane {
+            height: auto;
+            overflow: visible;
+        }
+
+        .activity-section-pane > .activity-section {
+            height: auto;
+        }
     }
 </style>
 
-<div class="container-fluid mt-3">
-    <div class="d-flex align-items-center justify-content-between mb-2">
-        <div>
-            <h2 class="mb-0">Activity</h2>
-            <div class="text-muted small">Live transfers, connected clients, and access history</div>
-        </div>
-        <div class="d-flex gap-2">
-            <button type="button" class="btn btn-outline-secondary btn-sm" id="refreshNowBtn">
-                <i class="bi bi-arrow-clockwise"></i> Refresh
-            </button>
-        </div>
-    </div>
-
-    <div id="activityAlert" class="alert alert-danger d-none" role="alert"></div>
-
-    <div class="row g-3">
-        <div class="col-xl-6">
-            <div class="card">
-                <div class="card-body">
-                    <div class="d-flex align-items-center justify-content-between">
-                        <h5 class="card-title mb-0">Live transfers</h5>
-                        <span class="badge text-bg-secondary" id="liveTransfersCount">0</span>
-                    </div>
-                    <div class="table-responsive mt-3 activity-scroll">
-                        <table class="table table-sm table-striped align-middle mb-0">
-                            <thead>
-                                <tr>
-                                    <th scope="col">Started</th>
-                                    <th scope="col">User</th>
-                                    <th scope="col">Remote</th>
-                                    <th scope="col">Title</th>
-                                    <th scope="col">File</th>
-                                    <th scope="col">Sent</th>
-                                </tr>
-                            </thead>
-                            <tbody id="liveTransfersBody">
-                                <tr><td colspan="6" class="text-muted">Loading...</td></tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
+<div class="activity-body">
+    <div class="row g-0 activity-shell-row">
+        <div class="col-md-3 col-lg-2 border-end" id="activitySidebar">
+            <div class="d-flex align-items-center justify-content-between p-3 border-bottom">
+                <h5 class="mb-0">Activity</h5>
+                <button class="btn btn-sm d-md-none" type="button" id="activitySidebarToggle" aria-label="Toggle activity sidebar">
+                    <i class="bi bi-list"></i>
+                </button>
             </div>
+            <nav class="nav flex-column p-2" id="activityNav">
+                <a class="nav-link active" href="#" data-section="overview"><i class="bi bi-grid-1x2"></i>Overview</a>
+                <a class="nav-link" href="#" data-section="realtime"><i class="bi bi-activity"></i>Realtime</a>
+                <a class="nav-link" href="#" data-section="access"><i class="bi bi-clock-history"></i>Access History</a>
+                <a class="nav-link" href="#" data-section="clients"><i class="bi bi-phone"></i>Client History</a>
+            </nav>
         </div>
 
-        <div class="col-xl-6">
-            <div class="card">
-                <div class="card-body">
-                    <div class="d-flex align-items-center justify-content-between">
-                        <h5 class="card-title mb-0">Connected clients</h5>
-                        <span class="badge text-bg-secondary" id="connectedClientsCount">0</span>
-                    </div>
-                    <div class="table-responsive mt-3 activity-scroll">
-                        <table class="table table-sm table-striped align-middle mb-0">
-                            <thead>
-                                <tr>
-                                    <th scope="col">Last seen</th>
-                                    <th scope="col">User</th>
-                                    <th scope="col">Remote</th>
-                                    <th scope="col">User-Agent</th>
-                                </tr>
-                            </thead>
-                            <tbody id="connectedClientsBody">
-                                <tr><td colspan="4" class="text-muted">Loading...</td></tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
+        <div class="col-md-9 col-lg-10 activity-main-col">
+            <div class="d-md-none p-3 border-bottom">
+                <button class="btn btn-outline-secondary" type="button" id="activitySidebarToggleMobile" aria-label="Toggle activity sidebar">
+                    <i class="bi bi-list"></i> Sections
+                </button>
             </div>
-        </div>
 
-        <div class="col-12">
-            <div class="card">
-                <div class="card-body">
-                    <div class="d-flex align-items-center justify-content-between">
+            <div class="container-fluid activity-main-inner">
+                <div class="activity-header">
+                    <div class="d-flex flex-wrap align-items-start justify-content-between gap-2">
                         <div>
-                            <h5 class="card-title mb-0">Access history</h5>
-                            <div class="text-muted small">Recent transfers and shop activity</div>
+                            <h2 class="mb-0">Activity</h2>
+                            <div class="activity-subtitle small">Realtime client and transfer monitoring with persistent audit logs</div>
                         </div>
-                        <div class="d-flex align-items-center gap-2">
-                            <button type="button" class="btn btn-outline-danger btn-sm" id="clearAccessHistoryBtn">
-                                <i class="bi bi-trash"></i> Clear log
+                        <div class="d-flex flex-wrap align-items-center gap-2">
+                            <span class="badge text-bg-secondary" id="lastRefreshLabel">Last update: -</span>
+                            <span class="badge text-bg-secondary">Live: 2.5s</span>
+                            <span class="badge text-bg-secondary">History: 15s</span>
+                            <button type="button" class="btn btn-outline-primary btn-sm" id="refreshNowBtn">
+                                <i class="bi bi-arrow-clockwise"></i> Refresh now
                             </button>
-                            <button type="button" class="btn btn-outline-secondary btn-sm" id="exportAccessHistoryBtn">
-                                <i class="bi bi-download"></i> Export CSV
-                            </button>
-                            <input
-                                id="accessSearch"
-                                class="form-control form-control-sm"
-                                style="width: 260px;"
-                                placeholder="Search (user, title, file, ip, kind)"
-                                autocomplete="off"
-                            />
-                            <label class="text-muted small" for="activityLimit">Rows</label>
-                            <select id="activityLimit" class="form-select form-select-sm" style="width: 90px;">
-                                <option value="50">50</option>
-                                <option value="100" selected>100</option>
-                                <option value="250">250</option>
-                            </select>
                         </div>
-                    </div>
-                    <div class="table-responsive mt-3">
-                        <table class="table table-sm table-striped align-middle mb-0">
-                            <thead>
-                                <tr>
-                                    <th scope="col" class="sortable" data-sort-key="at">When</th>
-                                    <th scope="col" class="sortable" data-sort-key="kind">Kind</th>
-                                    <th scope="col" class="sortable" data-sort-key="user">User</th>
-                                    <th scope="col" class="sortable" data-sort-key="remote_addr">Remote</th>
-                                    <th scope="col" class="sortable" data-sort-key="title_id">Title</th>
-                                    <th scope="col" class="sortable" data-sort-key="filename">File</th>
-                                    <th scope="col" class="sortable" data-sort-key="bytes_sent">Bytes</th>
-                                    <th scope="col" class="sortable" data-sort-key="ok">Status</th>
-                                </tr>
-                            </thead>
-                            <tbody id="accessHistoryBody">
-                                <tr><td colspan="8" class="text-muted">Loading...</td></tr>
-                            </tbody>
-                        </table>
                     </div>
                 </div>
-            </div>
-        </div>
 
-        <div class="col-12">
-            <div class="card">
-                <div class="card-body">
-                    <div class="d-flex align-items-center justify-content-between">
-                        <div>
-                            <h5 class="card-title mb-0">Client history</h5>
-                            <div class="text-muted small">Persisted log of connected clients</div>
+                <div id="activityAlert" class="alert alert-danger d-none mt-3 mb-0" role="alert"></div>
+
+                <div class="activity-pane-wrap">
+                <div class="activity-section-pane" id="section-overview" data-section="overview">
+                    <div class="row g-3">
+                        <div class="col-sm-6 col-xl-3">
+                            <div class="activity-kpi">
+                                <div class="activity-kpi-label">Live Transfers</div>
+                                <div class="activity-kpi-value" id="kpiLiveTransfers">0</div>
+                            </div>
                         </div>
-                        <div class="d-flex align-items-center gap-2">
-                            <button type="button" class="btn btn-outline-danger btn-sm" id="clearClientsHistoryBtn">
-                                <i class="bi bi-trash"></i> Clear log
-                            </button>
-                            <button type="button" class="btn btn-outline-secondary btn-sm" id="exportClientsHistoryBtn">
-                                <i class="bi bi-download"></i> Export CSV
-                            </button>
-                            <label class="text-muted small" for="clientsHistoryLimit">Rows</label>
-                            <select id="clientsHistoryLimit" class="form-select form-select-sm" style="width: 90px;">
-                                <option value="100">100</option>
-                                <option value="250" selected>250</option>
-                                <option value="500">500</option>
-                                <option value="2000">2000</option>
-                            </select>
+                        <div class="col-sm-6 col-xl-3">
+                            <div class="activity-kpi">
+                                <div class="activity-kpi-label">Connected Clients</div>
+                                <div class="activity-kpi-value" id="kpiConnectedClients">0</div>
+                            </div>
+                        </div>
+                        <div class="col-sm-6 col-xl-3">
+                            <div class="activity-kpi">
+                                <div class="activity-kpi-label">Access Rows</div>
+                                <div class="activity-kpi-value" id="kpiAccessRows">0</div>
+                            </div>
+                        </div>
+                        <div class="col-sm-6 col-xl-3">
+                            <div class="activity-kpi">
+                                <div class="activity-kpi-label">Client History Rows</div>
+                                <div class="activity-kpi-value" id="kpiClientHistoryRows">0</div>
+                            </div>
+                        </div>
+                        <div class="col-12">
+                            <div class="activity-section">
+                                <div class="activity-section-head mb-0">
+                                    <div>
+                                        <h5 class="mb-0">Overview</h5>
+                                        <div class="activity-section-subtitle">Use the left sidebar to focus on one data set at a time</div>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
-                    <div class="table-responsive mt-3 activity-scroll">
-                        <table class="table table-sm table-striped align-middle mb-0">
-                            <thead>
-                                <tr>
-                                    <th scope="col">When</th>
-                                    <th scope="col">User</th>
-                                    <th scope="col">Remote</th>
-                                    <th scope="col">User-Agent</th>
-                                </tr>
-                            </thead>
-                            <tbody id="clientsHistoryBody">
-                                <tr><td colspan="4" class="text-muted">Loading...</td></tr>
-                            </tbody>
-                        </table>
-                    </div>
+                </div>
+
+                <div class="activity-section-pane d-none" id="section-realtime" data-section="realtime">
+                    <section class="activity-section">
+                        <div class="activity-section-head">
+                            <div>
+                                <h5 class="mb-0">Realtime Monitor</h5>
+                                <div class="activity-section-subtitle">Current transfer sessions and recently seen clients</div>
+                            </div>
+                        </div>
+
+                        <div class="row g-3">
+                            <div class="col-xl-6">
+                                <div class="card activity-card">
+                                    <div class="card-body">
+                                        <div class="d-flex align-items-center justify-content-between">
+                                            <h6 class="card-title mb-0">Live transfers</h6>
+                                            <span class="badge text-bg-secondary" id="liveTransfersCount">0</span>
+                                        </div>
+                                        <div class="table-responsive mt-3 activity-scroll-full">
+                                            <table class="table table-sm table-striped align-middle activity-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th scope="col">Started</th>
+                                                        <th scope="col">User</th>
+                                                        <th scope="col">Remote</th>
+                                                        <th scope="col">Title</th>
+                                                        <th scope="col">File</th>
+                                                        <th scope="col">Sent</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody id="liveTransfersBody">
+                                                    <tr><td colspan="6" class="table-muted-empty">Loading...</td></tr>
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="col-xl-6">
+                                <div class="card activity-card">
+                                    <div class="card-body">
+                                        <div class="d-flex align-items-center justify-content-between">
+                                            <h6 class="card-title mb-0">Connected clients</h6>
+                                            <span class="badge text-bg-secondary" id="connectedClientsCount">0</span>
+                                        </div>
+                                        <div class="table-responsive mt-3 activity-scroll-full">
+                                            <table class="table table-sm table-striped align-middle activity-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th scope="col">Last seen</th>
+                                                        <th scope="col">User</th>
+                                                        <th scope="col">Remote</th>
+                                                        <th scope="col">User-Agent</th>
+                                                        <th scope="col">Client details</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody id="connectedClientsBody">
+                                                    <tr><td colspan="5" class="table-muted-empty">Loading...</td></tr>
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+
+                <div class="activity-section-pane d-none" id="section-access" data-section="access">
+                    <section class="activity-section">
+                        <div class="activity-section-head">
+                            <div>
+                                <h5 class="mb-0">Access History</h5>
+                                <div class="activity-section-subtitle">Searchable and sortable recent transfer/shop activity</div>
+                            </div>
+                        </div>
+
+                        <div class="card activity-card">
+                            <div class="card-body">
+                                <div class="activity-toolbar">
+                                    <div>
+                                        <h6 class="card-title mb-0">Access history <span class="badge text-bg-secondary ms-1" id="accessHistoryCount">0</span></h6>
+                                        <div class="activity-section-subtitle">Recent transfers and shop activity</div>
+                                    </div>
+                                    <div class="activity-toolbar-group">
+                                        <button type="button" class="btn btn-outline-danger btn-sm" id="clearAccessHistoryBtn">
+                                            <i class="bi bi-trash"></i> Clear log
+                                        </button>
+                                        <button type="button" class="btn btn-outline-secondary btn-sm" id="exportAccessHistoryBtn">
+                                            <i class="bi bi-download"></i> Export CSV
+                                        </button>
+                                        <input
+                                            id="accessSearch"
+                                            class="form-control form-control-sm"
+                                            style="width: 260px;"
+                                            placeholder="Search by user, title, file, IP, kind"
+                                            autocomplete="off"
+                                        />
+                                        <label class="text-muted small mb-0" for="activityLimit">Rows</label>
+                                        <select id="activityLimit" class="form-select form-select-sm" style="width: 90px;">
+                                            <option value="50">50</option>
+                                            <option value="100" selected>100</option>
+                                            <option value="250">250</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="table-responsive mt-3 activity-scroll-full">
+                                    <table class="table table-sm table-striped align-middle activity-table">
+                                        <thead>
+                                            <tr>
+                                                <th scope="col" class="sortable" data-sort-key="at">When</th>
+                                                <th scope="col" class="sortable" data-sort-key="kind">Kind</th>
+                                                <th scope="col" class="sortable" data-sort-key="user">User</th>
+                                                <th scope="col" class="sortable" data-sort-key="remote_addr">Remote</th>
+                                                <th scope="col" class="sortable" data-sort-key="title_id">Title</th>
+                                                <th scope="col" class="sortable" data-sort-key="filename">File</th>
+                                                <th scope="col" class="sortable" data-sort-key="bytes_sent">Bytes</th>
+                                                <th scope="col" class="sortable" data-sort-key="ok">Status</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="accessHistoryBody">
+                                            <tr><td colspan="8" class="table-muted-empty">Loading...</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+
+                <div class="activity-section-pane d-none" id="section-clients" data-section="clients">
+                    <section class="activity-section">
+                        <div class="activity-section-head">
+                            <div>
+                                <h5 class="mb-0">Client History</h5>
+                                <div class="activity-section-subtitle">Persisted log of connected clients and metadata</div>
+                            </div>
+                        </div>
+
+                        <div class="card activity-card">
+                            <div class="card-body">
+                                <div class="activity-toolbar">
+                                    <div>
+                                        <h6 class="card-title mb-0">Client history <span class="badge text-bg-secondary ms-1" id="clientHistoryCount">0</span></h6>
+                                        <div class="activity-section-subtitle">Persisted log of connected clients</div>
+                                    </div>
+                                    <div class="activity-toolbar-group">
+                                        <button type="button" class="btn btn-outline-danger btn-sm" id="clearClientsHistoryBtn">
+                                            <i class="bi bi-trash"></i> Clear log
+                                        </button>
+                                        <button type="button" class="btn btn-outline-secondary btn-sm" id="exportClientsHistoryBtn">
+                                            <i class="bi bi-download"></i> Export CSV
+                                        </button>
+                                        <label class="text-muted small mb-0" for="clientsHistoryLimit">Rows</label>
+                                        <select id="clientsHistoryLimit" class="form-select form-select-sm" style="width: 90px;">
+                                            <option value="100">100</option>
+                                            <option value="250" selected>250</option>
+                                            <option value="500">500</option>
+                                            <option value="2000">2000</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="table-responsive mt-3 activity-scroll-full">
+                                    <table class="table table-sm table-striped align-middle activity-table">
+                                        <thead>
+                                            <tr>
+                                                <th scope="col">When</th>
+                                                <th scope="col">User</th>
+                                                <th scope="col">Remote</th>
+                                                <th scope="col">User-Agent</th>
+                                                <th scope="col">Client details</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="clientsHistoryBody">
+                                            <tr><td colspan="5" class="table-muted-empty">Loading...</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+                </div>
                 </div>
             </div>
         </div>
@@ -222,22 +710,103 @@
             .replaceAll("'", '&#39;');
     }
 
+    function setText(id, value) {
+        const el = document.getElementById(id);
+        if (!el) {
+            return;
+        }
+        el.textContent = String(value ?? '');
+    }
+
+    let lastActivityRefreshAt = null;
+    let lastClientsRefreshAt = null;
+
+    function updateLastRefreshLabel() {
+        const latest = Math.max(lastActivityRefreshAt || 0, lastClientsRefreshAt || 0);
+        if (!latest) {
+            setText('lastRefreshLabel', 'Last update: -');
+            return;
+        }
+        const asSeconds = Math.floor(latest / 1000);
+        setText('lastRefreshLabel', `Last update: ${formatTime(asSeconds)}`);
+    }
+
+    function updateActivityLayoutMetrics() {
+        const nav = document.querySelector('nav.navbar');
+        const navHeight = Math.max(40, Math.round(nav?.getBoundingClientRect?.().height || 56));
+        document.documentElement.style.setProperty('--activity-nav-h', `${navHeight}px`);
+    }
+
     function showError(message) {
         const el = $('#activityAlert');
         el.text(message || 'Failed to load activity.').removeClass('d-none');
+    }
+
+    function renderClientDetails(item) {
+        const fields = [
+            ['Theme', item?.theme],
+            ['UID', item?.uid],
+            ['Version', item?.version],
+            ['Revision', item?.revision],
+            ['Language', item?.language],
+            ['HAUTH', item?.hauth],
+            ['UAUTH', item?.uauth],
+        ];
+        const lines = [];
+        fields.forEach(([label, raw]) => {
+            const value = String(raw ?? '').trim();
+            if (!value) {
+                return;
+            }
+            const isCodeValue = ['UID', 'HAUTH', 'UAUTH'].includes(label);
+            lines.push(
+                `<div class="client-kv">`
+                + `<span class="client-k">${label}</span>`
+                + `<span class="client-v ${isCodeValue ? 'mono-value' : ''}">${escapeHtml(value)}</span>`
+                + `</div>`
+            );
+        });
+        if (!lines.length) {
+            return '<span class="text-muted">-</span>';
+        }
+        return `<div class="client-detail-stack">${lines.join('')}</div>`;
     }
 
     function hideError() {
         $('#activityAlert').addClass('d-none').text('');
     }
 
+    function showActivitySection(sectionName) {
+        const section = ['overview', 'realtime', 'access', 'clients'].includes(String(sectionName))
+            ? String(sectionName)
+            : 'overview';
+        $('.activity-section-pane').addClass('d-none');
+        $(`#section-${section}`).removeClass('d-none');
+        $('#activityNav .nav-link').removeClass('active');
+        $(`#activityNav .nav-link[data-section="${section}"]`).addClass('active');
+        if (window.location.hash !== `#${section}`) {
+            history.replaceState(null, '', `#${section}`);
+        }
+
+        if ($(window).width() < 768) {
+            $('#activitySidebar').removeClass('show');
+            $('body').removeClass('activity-sidebar-open');
+        }
+    }
+
+    function toggleActivitySidebar() {
+        $('#activitySidebar').toggleClass('show');
+        $('body').toggleClass('activity-sidebar-open', $('#activitySidebar').hasClass('show'));
+    }
+
     function renderLiveTransfers(items) {
         const body = $('#liveTransfersBody');
         const list = Array.isArray(items) ? items : [];
-        $('#liveTransfersCount').text(list.length);
+        setText('liveTransfersCount', list.length);
+        setText('kpiLiveTransfers', list.length);
 
         if (!list.length) {
-            body.html('<tr><td colspan="6" class="text-muted">No active transfers.</td></tr>');
+            body.html('<tr><td colspan="6" class="table-muted-empty">No active transfers.</td></tr>');
             return;
         }
 
@@ -249,7 +818,7 @@
                     <td>${escapeHtml(item.user || '-')}</td>
                     <td>${escapeHtml(item.remote_addr || '-')}</td>
                     <td>${escapeHtml(item.title_id || '-')}${item.title_name ? ` <span class="text-muted">(${escapeHtml(item.title_name)})</span>` : ''}</td>
-                    <td class="text-truncate" style="max-width: 280px;">${escapeHtml(item.filename || '-') }</td>
+                    <td class="text-truncate" style="max-width: 300px;">${escapeHtml(item.filename || '-') }</td>
                     <td>${escapeHtml(formatBytes(item.bytes_sent))}</td>
                 </tr>`
             );
@@ -286,6 +855,16 @@
             return '';
         }
         return value;
+    }
+
+    function refreshSortIndicators() {
+        $('th.sortable').each(function () {
+            const th = $(this);
+            th.removeClass('sorted-asc sorted-desc');
+            if (String(th.data('sort-key')) === String(accessHistorySortKey)) {
+                th.addClass(accessHistorySortDir === 'asc' ? 'sorted-asc' : 'sorted-desc');
+            }
+        });
     }
 
     function applyAccessHistoryView() {
@@ -326,6 +905,7 @@
         });
 
         accessHistoryRendered = list;
+        refreshSortIndicators();
         renderAccessHistory(list);
     }
 
@@ -372,10 +952,11 @@
     function renderConnectedClients(items) {
         const body = $('#connectedClientsBody');
         const list = Array.isArray(items) ? items : [];
-        $('#connectedClientsCount').text(list.length);
+        setText('connectedClientsCount', list.length);
+        setText('kpiConnectedClients', list.length);
 
         if (!list.length) {
-            body.html('<tr><td colspan="4" class="text-muted">No recent clients.</td></tr>');
+            body.html('<tr><td colspan="5" class="table-muted-empty">No recent clients.</td></tr>');
             return;
         }
 
@@ -387,24 +968,49 @@
                     <td>${escapeHtml(item.user || '-')}</td>
                     <td>${escapeHtml(item.remote_addr || '-')}</td>
                     <td class="text-truncate" style="max-width: 520px;">${escapeHtml(item.user_agent || '-')}</td>
+                    <td style="min-width: 280px;">${renderClientDetails(item)}</td>
                 </tr>`
             );
             body.append(row);
         });
     }
 
+    function kindBadgeClass(kind) {
+        const normalized = String(kind || '').toLowerCase();
+        if (normalized === 'transfer') {
+            return 'text-bg-primary';
+        }
+        if (normalized === 'shop' || normalized === 'shop_sections' || normalized === 'shop_media') {
+            return 'text-bg-info';
+        }
+        if (normalized === 'client_seen') {
+            return 'text-bg-secondary';
+        }
+        if (normalized.includes('error') || normalized.includes('failed')) {
+            return 'text-bg-danger';
+        }
+        return 'text-bg-light border text-dark';
+    }
+
     function renderAccessHistory(items) {
         const body = $('#accessHistoryBody');
         const list = Array.isArray(items) ? items : [];
+        setText('accessHistoryCount', list.length);
+        setText('kpiAccessRows', list.length);
         if (!list.length) {
-            body.html('<tr><td colspan="8" class="text-muted">No history yet.</td></tr>');
+            const msg = (accessHistoryQuery || '').trim()
+                ? 'No history rows match your search.'
+                : 'No history yet.';
+            body.html(`<tr><td colspan="8" class="table-muted-empty">${escapeHtml(msg)}</td></tr>`);
             return;
         }
         body.empty();
         list.forEach(item => {
-            const statusBadge = item.ok === true
-                ? '<span class="badge text-bg-success">OK</span>'
-                : (item.ok === false ? '<span class="badge text-bg-danger">Fail</span>' : '<span class="badge text-bg-secondary">-</span>');
+            const statusText = item.ok === true ? 'OK' : (item.ok === false ? 'Fail' : '-');
+            const statusClass = item.ok === true
+                ? 'text-bg-success'
+                : (item.ok === false ? 'text-bg-danger' : 'text-bg-secondary');
+            const statusCodeLabel = item.status_code ? ` ${escapeHtml(item.status_code)}` : '';
 
             const bytesLabel = item.kind === 'transfer'
                 ? formatBytes(item.bytes_sent)
@@ -412,13 +1018,13 @@
             const row = $(
                 `<tr>
                     <td>${escapeHtml(formatTime(item.at))}</td>
-                    <td>${escapeHtml(item.kind || '-')}</td>
+                    <td><span class="badge kind-badge ${kindBadgeClass(item.kind)}">${escapeHtml(item.kind || '-')}</span></td>
                     <td>${escapeHtml(item.user || '-')}</td>
                     <td>${escapeHtml(item.remote_addr || '-')}</td>
                     <td>${escapeHtml(item.title_id || '-')}${item.title_name ? ` <span class="text-muted">(${escapeHtml(item.title_name)})</span>` : ''}</td>
                     <td class="text-truncate" style="max-width: 420px;">${escapeHtml(item.filename || '-') }</td>
                     <td>${escapeHtml(bytesLabel)}</td>
-                    <td>${statusBadge}</td>
+                    <td><span class="badge ${statusClass}">${statusText}${statusCodeLabel}</span></td>
                 </tr>`
             );
             body.append(row);
@@ -428,8 +1034,10 @@
     function renderClientsHistory(items) {
         const body = $('#clientsHistoryBody');
         const list = Array.isArray(items) ? items : [];
+        setText('clientHistoryCount', list.length);
+        setText('kpiClientHistoryRows', list.length);
         if (!list.length) {
-            body.html('<tr><td colspan="4" class="text-muted">No client history yet.</td></tr>');
+            body.html('<tr><td colspan="5" class="table-muted-empty">No client history yet.</td></tr>');
             return;
         }
 
@@ -441,6 +1049,7 @@
                     <td>${escapeHtml(item.user || '-')}</td>
                     <td>${escapeHtml(item.remote_addr || '-')}</td>
                     <td class="text-truncate" style="max-width: 520px;">${escapeHtml(item.user_agent || '-')}</td>
+                    <td style="min-width: 280px;">${renderClientDetails(item)}</td>
                 </tr>`
             );
             body.append(row);
@@ -448,13 +1057,15 @@
     }
 
     function loadClientsHistory() {
-        const limit = parseInt($('#clientsHistoryLimit').val() || '250');
+        const limit = parseInt($('#clientsHistoryLimit').val() || '250', 10);
         $.getJSON(`/api/admin/clients-history?limit=${encodeURIComponent(limit)}`, function (result) {
             if (!result || result.success !== true) {
                 renderClientsHistory([]);
                 return;
             }
             renderClientsHistory(result.history);
+            lastClientsRefreshAt = Date.now();
+            updateLastRefreshLabel();
         }).fail(function () {
             renderClientsHistory([]);
         });
@@ -462,7 +1073,7 @@
 
     function loadActivity() {
         hideError();
-        const limit = parseInt($('#activityLimit').val() || '100');
+        const limit = parseInt($('#activityLimit').val() || '100', 10);
         $.getJSON(`/api/admin/activity?limit=${encodeURIComponent(limit)}`, function (result) {
             if (!result || result.success !== true) {
                 showError(result?.message || 'Failed to load activity.');
@@ -475,12 +1086,56 @@
             renderConnectedClients(result.connected_clients);
             accessHistoryAll = Array.isArray(result.access_history) ? result.access_history : [];
             applyAccessHistoryView();
+            lastActivityRefreshAt = Date.now();
+            updateLastRefreshLabel();
         }).fail(function () {
             showError('Failed to load activity.');
         });
     }
 
     $(document).ready(function () {
+        updateActivityLayoutMetrics();
+        $(window).on('resize', updateActivityLayoutMetrics);
+
+        const navbarCollapseEl = document.getElementById('navbarNav');
+        if (navbarCollapseEl) {
+            navbarCollapseEl.addEventListener('shown.bs.collapse', updateActivityLayoutMetrics);
+            navbarCollapseEl.addEventListener('hidden.bs.collapse', updateActivityLayoutMetrics);
+        }
+
+        $('#activityNav .nav-link').on('click', function (e) {
+            e.preventDefault();
+            showActivitySection($(this).data('section'));
+        });
+
+        $('#activitySidebarToggle, #activitySidebarToggleMobile').on('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            toggleActivitySidebar();
+        });
+
+        $(document).on('click', function (e) {
+            if ($(window).width() >= 768 || !$('#activitySidebar').hasClass('show')) {
+                return;
+            }
+            if (
+                !$(e.target).closest('#activitySidebar').length
+                && !$(e.target).is('#activitySidebarToggle')
+                && !$(e.target).is('#activitySidebarToggleMobile')
+                && !$(e.target).closest('#activitySidebarToggleMobile').length
+            ) {
+                $('#activitySidebar').removeClass('show');
+                $('body').removeClass('activity-sidebar-open');
+            }
+        });
+
+        $(window).on('hashchange', function () {
+            const target = String(window.location.hash || '').replace('#', '');
+            if (target) {
+                showActivitySection(target);
+            }
+        });
+
         $('#refreshNowBtn').on('click', function () {
             loadActivity();
             loadClientsHistory();
@@ -506,7 +1161,7 @@
         });
 
         $('#exportClientsHistoryBtn').on('click', function () {
-            const limit = parseInt($('#clientsHistoryLimit').val() || '250');
+            const limit = parseInt($('#clientsHistoryLimit').val() || '250', 10);
             window.location.href = `/api/admin/clients-history.csv?limit=${encodeURIComponent(limit)}`;
         });
 
@@ -550,6 +1205,9 @@
             applyAccessHistoryView();
         });
 
+        const initialSection = String(window.location.hash || '').replace('#', '') || 'overview';
+        showActivitySection(initialSection);
+        refreshSortIndicators();
         loadActivity();
         loadClientsHistory();
         setInterval(loadActivity, 2500);

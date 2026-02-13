@@ -1652,6 +1652,8 @@ _connected_clients = {}
 _recent_access_lock = threading.Lock()
 _recent_access = {}
 
+_CLIENT_SEEN_META_PREFIX = 'client_meta:'
+
 _transfer_sessions_lock = threading.Lock()
 _transfer_sessions = {}
 
@@ -1705,7 +1707,98 @@ def _client_key():
     user = _get_request_user() or '-'
     remote = _effective_remote_addr() or '-'
     ua = request.headers.get('User-Agent') or '-'
-    return f"{user}|{remote}|{ua}"[:512]
+    uid = ''
+    try:
+        if all(header in request.headers for header in TINFOIL_HEADERS):
+            uid = (request.headers.get('Uid') or '').strip()
+    except Exception:
+        uid = ''
+    return f"{user}|{remote}|{ua}|{uid}"[:512]
+
+
+def _extract_tinfoil_client_meta():
+    try:
+        if not all(header in request.headers for header in TINFOIL_HEADERS):
+            return {}
+    except Exception:
+        return {}
+
+    def _val(name, max_len=256):
+        try:
+            return str(request.headers.get(name) or '').strip()[:max_len]
+        except Exception:
+            return ''
+
+    out = {
+        'theme': _val('Theme', 128),
+        'uid': _val('Uid', 128),
+        'version': _val('Version', 64),
+        'revision': _val('Revision', 64),
+        'language': _val('Language', 64),
+        'hauth': _val('Hauth', 256),
+        'uauth': _val('Uauth', 256),
+    }
+    return {k: v for k, v in out.items() if v}
+
+
+def _encode_client_seen_meta(meta):
+    if not isinstance(meta, dict) or not meta:
+        return None
+    payload = {}
+    for key in ('theme', 'uid', 'version', 'revision', 'language', 'hauth', 'uauth'):
+        try:
+            value = str(meta.get(key) or '').strip()
+        except Exception:
+            value = ''
+        if value:
+            payload[key] = value[:256]
+    if not payload:
+        return None
+    try:
+        return _CLIENT_SEEN_META_PREFIX + json.dumps(payload, separators=(',', ':'))
+    except Exception:
+        return None
+
+
+def _decode_client_seen_meta(raw):
+    try:
+        text = str(raw or '')
+    except Exception:
+        return {}
+    if not text.startswith(_CLIENT_SEEN_META_PREFIX):
+        return {}
+    try:
+        data = json.loads(text[len(_CLIENT_SEEN_META_PREFIX):])
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    out = {}
+    for key in ('theme', 'uid', 'version', 'revision', 'language', 'hauth', 'uauth'):
+        try:
+            value = str(data.get(key) or '').strip()
+        except Exception:
+            value = ''
+        if value:
+            out[key] = value[:256]
+    return out
+
+
+def _attach_client_meta(items):
+    for item in (items or []):
+        if not isinstance(item, dict):
+            continue
+
+        decoded = _decode_client_seen_meta(item.get('filename'))
+        for key in ('theme', 'uid', 'version', 'revision', 'language', 'hauth', 'uauth'):
+            value = item.get(key)
+            if value in (None, ''):
+                value = decoded.get(key)
+            if value in (None, ''):
+                value = ''
+            item[key] = value
+    return items
 
 
 def _touch_client():
@@ -1723,6 +1816,9 @@ def _touch_client():
         'remote_addr': remote,
         'user_agent': request.headers.get('User-Agent'),
     }
+    tinfoil_meta = _extract_tinfoil_client_meta()
+    if tinfoil_meta:
+        meta.update(tinfoil_meta)
     key = _client_key()
     with _connected_clients_lock:
         existing = _connected_clients.get(key) or {}
@@ -1739,6 +1835,7 @@ def _touch_client():
             user=meta.get('user'),
             remote_addr=meta.get('remote_addr'),
             user_agent=meta.get('user_agent'),
+            filename=_encode_client_seen_meta(tinfoil_meta),
             ok=True,
             status_code=200,
         )
@@ -2942,6 +3039,7 @@ def admin_activity_api():
                 _connected_clients[k] = v
 
     clients = sorted(clients, key=lambda item: item.get('last_seen_at', 0), reverse=True)[:250]
+    _attach_client_meta(clients)
 
     # Recent access events.
     history_error = None
@@ -3007,6 +3105,7 @@ def admin_clients_history_api():
     limit = max(1, min(limit, 2000))
     try:
         history = get_access_events(limit=limit, kinds=['client_seen'])
+        _attach_client_meta(history)
         return jsonify({'success': True, 'history': history})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e), 'history': []}), 500
@@ -3024,6 +3123,7 @@ def admin_clients_history_csv_api():
 
     try:
         items = get_access_events(limit=limit, kinds=['client_seen'])
+        _attach_client_meta(items)
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -3033,7 +3133,7 @@ def admin_clients_history_csv_api():
 
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator='\n')
-    writer.writerow(['at', 'user', 'remote_addr', 'user_agent'])
+    writer.writerow(['at', 'user', 'remote_addr', 'user_agent', 'theme', 'uid', 'version', 'revision', 'language', 'hauth', 'uauth'])
     for item in (items or []):
         at = item.get('at')
         at_iso = ''
@@ -3047,6 +3147,13 @@ def admin_clients_history_csv_api():
             item.get('user') or '',
             item.get('remote_addr') or '',
             item.get('user_agent') or '',
+            item.get('theme') or '',
+            item.get('uid') or '',
+            item.get('version') or '',
+            item.get('revision') or '',
+            item.get('language') or '',
+            item.get('hauth') or '',
+            item.get('uauth') or '',
         ])
 
     csv_text = buf.getvalue()
