@@ -39,7 +39,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Measure Cyberfoil-style shop loading by requesting / and /api/shop/sections."
     )
-    parser.add_argument("--base-url", default="http://127.0.0.1:8465", help="Ownfoil base URL.")
+    parser.add_argument("--base-url", default="http://127.0.0.1:8465", help="AeroFoil base URL.")
     parser.add_argument("--username", default="", help="HTTP Basic auth username (required for private shop).")
     parser.add_argument("--password", default="", help="HTTP Basic auth password.")
     parser.add_argument("--runs", type=int, default=5, help="Measured runs.")
@@ -56,7 +56,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--fresh-session-per-run", action="store_true", help="Do not reuse HTTP session between runs.")
     parser.add_argument("--json", action="store_true", dest="json_output", help="Output machine-readable JSON.")
 
-    # Tinfoil/Cyberfoil marker headers expected by Ownfoil.
+    # Tinfoil/Cyberfoil marker headers expected by AeroFoil.
     parser.add_argument("--user-agent", default="Cyberfoil/1.0 (benchmark)", help="User-Agent header value.")
     parser.add_argument("--theme", default="Dark", help="Theme header value.")
     parser.add_argument("--uid", default=f"bench-{uuid.uuid4().hex[:16]}", help="Uid header value.")
@@ -365,3 +365,4 @@ if __name__ == "__main__":
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1)
+

@@ -393,10 +393,14 @@ def load_settings(force_reload=False):
             default=False,
         )
 
-        env_trust = _read_env_bool('OWNFOIL_TRUST_PROXY_HEADERS')
+        env_trust = _read_env_bool('AEROFOIL_TRUST_PROXY_HEADERS')
+        if env_trust is None:
+            env_trust = _read_env_bool('OWNFOIL_TRUST_PROXY_HEADERS')
         if env_trust is not None:
             settings['security']['trust_proxy_headers'] = env_trust
-        env_proxies = _read_env_csv('OWNFOIL_TRUSTED_PROXIES')
+        env_proxies = _read_env_csv('AEROFOIL_TRUSTED_PROXIES')
+        if env_proxies is None:
+            env_proxies = _read_env_csv('OWNFOIL_TRUSTED_PROXIES')
         if env_proxies is not None:
             settings['security']['trusted_proxies'] = env_proxies
         settings['security'] = _normalize_security_settings(settings.get('security'))
@@ -444,10 +448,14 @@ def load_settings(force_reload=False):
 
     else:
         settings = DEFAULT_SETTINGS
-        env_trust = _read_env_bool('OWNFOIL_TRUST_PROXY_HEADERS')
+        env_trust = _read_env_bool('AEROFOIL_TRUST_PROXY_HEADERS')
+        if env_trust is None:
+            env_trust = _read_env_bool('OWNFOIL_TRUST_PROXY_HEADERS')
         if env_trust is not None:
             settings['security']['trust_proxy_headers'] = env_trust
-        env_proxies = _read_env_csv('OWNFOIL_TRUSTED_PROXIES')
+        env_proxies = _read_env_csv('AEROFOIL_TRUSTED_PROXIES')
+        if env_proxies is None:
+            env_proxies = _read_env_csv('OWNFOIL_TRUSTED_PROXIES')
         if env_proxies is not None:
             settings['security']['trusted_proxies'] = env_proxies
         settings['security'] = _normalize_security_settings(settings.get('security'))

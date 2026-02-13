@@ -32,7 +32,7 @@ def get_alembic_cfg():
     return cfg
 
 def get_current_db_version():
-    engine = create_engine(OWNFOIL_DB)
+    engine = create_engine(AEROFOIL_DB)
     with engine.connect() as connection:
         context = MigrationContext.configure(connection)
         current_rev = context.get_current_revision()

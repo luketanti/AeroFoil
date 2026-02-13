@@ -70,7 +70,7 @@ class SettingsKeysCacheTests(unittest.TestCase):
         self.patcher.stop()
 
     def _write_temp_keys_file(self, data):
-        fd, path = tempfile.mkstemp(prefix='ownfoil_keys_', suffix='.txt')
+        fd, path = tempfile.mkstemp(prefix='aerofoil_keys_', suffix='.txt')
         os.close(fd)
         with open(path, 'wb') as handle:
             handle.write(data)
@@ -105,3 +105,4 @@ class SettingsKeysCacheTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+

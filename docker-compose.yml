@@ -1,9 +1,9 @@
 version: "3"
 
 services:
-  ownfoil:
-    container_name: ownfoil
-    image: luketanti/ownfoil:latest
+  aerofoil:
+    container_name: aerofoil
+    image: luketanti/aerofoil:latest
     environment:
       # For write permission in config directory
       - PUID=1000
@@ -20,3 +20,4 @@ services:
       - ./data:/app/data
     ports:
       - "8465:8465"
+

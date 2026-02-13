@@ -478,7 +478,7 @@ def _check_completed(torrent_cfg, scan_cb=None, post_cb=None):
             unmatched_count += 1
         if unmatched_count:
             logger.info(
-                "Ignored %s completed torrent(s) not tracked by Ownfoil pending state.",
+                "Ignored %s completed torrent(s) not tracked by AeroFoil pending state.",
                 unmatched_count
             )
 

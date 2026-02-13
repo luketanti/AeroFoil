@@ -1,1 +1,1 @@
-"""OwnFoil application package."""
+"""AeroFoil application package."""

@@ -477,6 +477,15 @@
     let jobPollTimer = null;
     let lastLogCount = 0;
     let showVerboseOutput = false;
+    const manageJobPollingKeys = ['aerofoilJobPolling', 'ownfoilJobPolling'];
+
+    function enableJobPollingStorage() {
+        localStorage.setItem('aerofoilJobPolling', 'true');
+    }
+
+    function clearJobPollingStorage() {
+        manageJobPollingKeys.forEach((key) => localStorage.removeItem(key));
+    }
     function getThreadsValue() {
         const val = $('#convertThreadsInput').val();
         return val ? parseInt(val, 10) : null;
@@ -506,7 +515,7 @@
         activeJobId = jobId;
         showManageAlert(startMessage, 'info');
         lastLogCount = 0;
-        localStorage.setItem('ownfoilJobPolling', 'true');
+        enableJobPollingStorage();
         if (showVerboseOutput && resetOutput) {
             showManageOutput([startMessage]);
         } else if (resetOutput) {
@@ -529,7 +538,7 @@
             : $('#convertVerbose').is(':checked');
         activeJobId = job['id'];
         lastLogCount = 0;
-        localStorage.setItem('ownfoilJobPolling', 'true');
+        enableJobPollingStorage();
         const progress = job['progress'] || {};
         updateProgressDisplay(
             progress['done'] || 0,
@@ -586,7 +595,7 @@
                 clearInterval(jobPollTimer);
                 jobPollTimer = null;
                 $('#cancelJobBtn').prop('disabled', true);
-                localStorage.removeItem('ownfoilJobPolling');
+                clearJobPollingStorage();
                 if (job['status'] === 'success') {
                     showManageAlert('Conversion complete.', 'success');
                 } else {
@@ -636,7 +645,7 @@
                 if (result['success']) {
                     showManageAlert('Job cancelled.', 'warning');
                     $('#cancelJobBtn').prop('disabled', true);
-                    localStorage.removeItem('ownfoilJobPolling');
+                    clearJobPollingStorage();
                 }
             }
         });
@@ -993,3 +1002,4 @@
 </script>
 
 {% endblock %}
+

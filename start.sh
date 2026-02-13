@@ -52,6 +52,7 @@ done
 
 export USER_ADMIN_NAME="$ADMIN_USER"
 export USER_ADMIN_PASSWORD="$ADMIN_PASSWORD"
-export OWNFOIL_SECRET_KEY="$FLASK_KEY"
+export AEROFOIL_SECRET_KEY="$FLASK_KEY"
 
 exec python app/app.py
+

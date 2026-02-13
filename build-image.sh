@@ -7,10 +7,11 @@ VERSION=$(git describe --tags --always 2>/dev/null || echo dev)
 if [ "$MODE" = "dev" ]; then
   VERSION="${VERSION}-dev"
   DOCKERFILE="Dockerfile.dev"
-  TAG="ownfoil:dev"
+  TAG="aerofoil:dev"
 else
   DOCKERFILE="Dockerfile"
-  TAG="ownfoil:latest"
+  TAG="aerofoil:latest"
 fi
 
-docker build --build-arg OWNFOIL_VERSION="${VERSION}" -f "${DOCKERFILE}" -t "${TAG}" .
+docker build --build-arg AEROFOIL_VERSION="${VERSION}" -f "${DOCKERFILE}" -t "${TAG}" .
+

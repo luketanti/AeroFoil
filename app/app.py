@@ -251,7 +251,7 @@ def init():
         interval=timedelta(minutes=5)
     )
 
-    # Fast completion monitor: only does work while Ownfoil has pending downloads.
+    # Fast completion monitor: only does work while AeroFoil has pending downloads.
     app.scheduler.add_job(
         job_id='downloads_pending_monitor_job',
         func=downloads_pending_job,
@@ -1615,12 +1615,12 @@ def on_library_change(events):
 
 def create_app():
     app = Flask(__name__)
-    app.config["SQLALCHEMY_DATABASE_URI"] = OWNFOIL_DB
+    app.config["SQLALCHEMY_DATABASE_URI"] = AEROFOIL_DB
     # Generate secret key from environment variable or create random one
-    secret_key = os.getenv('OWNFOIL_SECRET_KEY')
+    secret_key = os.getenv('AEROFOIL_SECRET_KEY') or os.getenv('OWNFOIL_SECRET_KEY')
     if not secret_key:
         secret_key = secrets.token_hex(32)
-        logger.warning('SECRET_KEY not set in environment. Generated random key. Set OWNFOIL_SECRET_KEY for production.')
+        logger.warning('SECRET_KEY not set in environment. Generated random key. Set AEROFOIL_SECRET_KEY for production.')
     app.config['SECRET_KEY'] = secret_key
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
@@ -1701,6 +1701,8 @@ def _effective_remote_addr():
     # Use trusted proxy config to resolve the true client IP.
     # Cache in `g` so multiple log calls per request are consistent and cheap.
     try:
+        if has_request_context() and hasattr(g, '_aerofoil_effective_remote_addr'):
+            return g._aerofoil_effective_remote_addr
         if has_request_context() and hasattr(g, '_ownfoil_effective_remote_addr'):
             return g._ownfoil_effective_remote_addr
     except Exception:
@@ -1719,7 +1721,7 @@ def _effective_remote_addr():
     remote = (remote or (request.remote_addr or '-') or '-').strip()
     try:
         if has_request_context():
-            g._ownfoil_effective_remote_addr = remote
+            g._aerofoil_effective_remote_addr = remote
     except Exception:
         pass
     return remote
@@ -3395,7 +3397,7 @@ def prefetch_media_icons_api():
     missing = 0
     failed = 0
     failures = []
-    headers = {'User-Agent': 'Ownfoil/1.0'}
+    headers = {'User-Agent': 'AeroFoil/1.0'}
 
     titles.load_titledb()
     try:
@@ -3472,7 +3474,7 @@ def prefetch_media_banners_api():
     missing = 0
     failed = 0
     failures = []
-    headers = {'User-Agent': 'Ownfoil/1.0'}
+    headers = {'User-Agent': 'AeroFoil/1.0'}
 
     titles.load_titledb()
     try:
@@ -5562,21 +5564,21 @@ def scan_library():
         scan_library_path(library.path) # Only scan, identification will be done globally
 
 if __name__ == '__main__':
-    logger.info('Starting initialization of Ownfoil...')
+    logger.info('Starting initialization of AeroFoil...')
     init_db(app)
     init_users(app)
     init()
     logger.info('Initialization steps done, starting server...')
-    host = (os.environ.get('OWNFOIL_HOST') or '0.0.0.0').strip() or '0.0.0.0'
-    port = _read_int_env('OWNFOIL_PORT', 8465, minimum=1, maximum=65535)
-    use_flask_dev_server = str(os.environ.get('OWNFOIL_USE_FLASK_DEV') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+    host = (os.environ.get('AEROFOIL_HOST') or os.environ.get('OWNFOIL_HOST') or '0.0.0.0').strip() or '0.0.0.0'
+    port = _read_int_env('AEROFOIL_PORT', _read_int_env('OWNFOIL_PORT', 8465, minimum=1, maximum=65535), minimum=1, maximum=65535)
+    use_flask_dev_server = str(os.environ.get('AEROFOIL_USE_FLASK_DEV') or os.environ.get('OWNFOIL_USE_FLASK_DEV') or '').strip().lower() in ('1', 'true', 'yes', 'on')
 
     try:
         if waitress_serve is not None and not use_flask_dev_server:
-            wsgi_threads = _read_int_env('OWNFOIL_WSGI_THREADS', 32, minimum=1, maximum=512)
-            wsgi_connection_limit = _read_int_env('OWNFOIL_WSGI_CONNECTION_LIMIT', 1000, minimum=1, maximum=100000)
-            wsgi_channel_timeout = _read_int_env('OWNFOIL_WSGI_CHANNEL_TIMEOUT_S', 120, minimum=5, maximum=3600)
-            wsgi_cleanup_interval = _read_int_env('OWNFOIL_WSGI_CLEANUP_INTERVAL_S', 30, minimum=1, maximum=600)
+            wsgi_threads = _read_int_env('AEROFOIL_WSGI_THREADS', _read_int_env('OWNFOIL_WSGI_THREADS', 32, minimum=1, maximum=512), minimum=1, maximum=512)
+            wsgi_connection_limit = _read_int_env('AEROFOIL_WSGI_CONNECTION_LIMIT', _read_int_env('OWNFOIL_WSGI_CONNECTION_LIMIT', 1000, minimum=1, maximum=100000), minimum=1, maximum=100000)
+            wsgi_channel_timeout = _read_int_env('AEROFOIL_WSGI_CHANNEL_TIMEOUT_S', _read_int_env('OWNFOIL_WSGI_CHANNEL_TIMEOUT_S', 120, minimum=5, maximum=3600), minimum=5, maximum=3600)
+            wsgi_cleanup_interval = _read_int_env('AEROFOIL_WSGI_CLEANUP_INTERVAL_S', _read_int_env('OWNFOIL_WSGI_CLEANUP_INTERVAL_S', 30, minimum=1, maximum=600), minimum=1, maximum=600)
             logger.info(
                 'Starting Waitress WSGI server on %s:%s (threads=%s, connection_limit=%s, channel_timeout=%ss)',
                 host,
@@ -5593,11 +5595,11 @@ if __name__ == '__main__':
                 connection_limit=wsgi_connection_limit,
                 channel_timeout=wsgi_channel_timeout,
                 cleanup_interval=wsgi_cleanup_interval,
-                ident='Ownfoil'
+                ident='AeroFoil'
             )
         else:
             if use_flask_dev_server:
-                logger.warning('OWNFOIL_USE_FLASK_DEV enabled: using Flask development server.')
+                logger.warning('AEROFOIL_USE_FLASK_DEV enabled: using Flask development server.')
             elif waitress_serve is None:
                 logger.warning('Waitress is not available; falling back to Flask development server.')
             # Threaded fallback keeps admin polling responsive during long transfers.

@@ -39,7 +39,7 @@ jobs:
           # Extract version from tag (removes 'v' prefix)
           VERSION=${GITHUB_REF#refs/tags/v}
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "ownfoil_version=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "aerofoil_version=v$VERSION" >> "$GITHUB_OUTPUT"
           
           # Extract major and minor versions for additional tags
           MAJOR=$(echo $VERSION | cut -d. -f1)
@@ -58,13 +58,13 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           build-args: |
-            OWNFOIL_VERSION=${{ steps.meta.outputs.ownfoil_version }}
+            AEROFOIL_VERSION=${{ steps.meta.outputs.aerofoil_version }}
           tags: |
-            luketanti/ownfoil:latest
-            luketanti/ownfoil:${{ steps.meta.outputs.version }}
-            luketanti/ownfoil:${{ steps.meta.outputs.major }}
-            luketanti/ownfoil:${{ steps.meta.outputs.minor }}
-            luketanti/ownfoil:sha-${{ steps.meta.outputs.sha_tag }}
+            luketanti/aerofoil:latest
+            luketanti/aerofoil:${{ steps.meta.outputs.version }}
+            luketanti/aerofoil:${{ steps.meta.outputs.major }}
+            luketanti/aerofoil:${{ steps.meta.outputs.minor }}
+            luketanti/aerofoil:sha-${{ steps.meta.outputs.sha_tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
@@ -80,11 +80,11 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Tag | Image |" >> $GITHUB_STEP_SUMMARY
           echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Latest | \`luketanti/ownfoil:latest\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Full Version | \`luketanti/ownfoil:${{ steps.meta.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Major Version | \`luketanti/ownfoil:${{ steps.meta.outputs.major }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Minor Version | \`luketanti/ownfoil:${{ steps.meta.outputs.minor }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| SHA | \`luketanti/ownfoil:sha-${{ steps.meta.outputs.sha_tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Latest | \`luketanti/aerofoil:latest\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Full Version | \`luketanti/aerofoil:${{ steps.meta.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Major Version | \`luketanti/aerofoil:${{ steps.meta.outputs.major }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Minor Version | \`luketanti/aerofoil:${{ steps.meta.outputs.minor }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| SHA | \`luketanti/aerofoil:sha-${{ steps.meta.outputs.sha_tag }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 🏗️ Build Details:" >> $GITHUB_STEP_SUMMARY
           echo "- **Platforms**: linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
@@ -95,10 +95,10 @@ jobs:
           echo "### 📥 Pull Commands:" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
           echo "# Pull latest" >> $GITHUB_STEP_SUMMARY
-          echo "docker pull luketanti/ownfoil:latest" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull luketanti/aerofoil:latest" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "# Pull specific version" >> $GITHUB_STEP_SUMMARY
-          echo "docker pull luketanti/ownfoil:${{ steps.meta.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull luketanti/aerofoil:${{ steps.meta.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
       - name: Build Failed Notification

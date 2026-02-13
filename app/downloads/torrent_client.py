@@ -9,7 +9,56 @@ from urllib.parse import urlencode
 import requests
 
 logger = logging.getLogger("downloads.qbittorrent")
-OWNFOIL_MANAGED_TAG = "ownfoil"
+AEROFOIL_MANAGED_TAG = "aerofoil"
+LEGACY_OWNFOIL_MANAGED_TAG = "ownfoil"
+MANAGED_TAGS = (AEROFOIL_MANAGED_TAG, LEGACY_OWNFOIL_MANAGED_TAG)
+DOWNLOADS_USER_AGENT = "AeroFoil/Downloads"
+
+
+def _normalize_labels(values):
+    out = []
+    for value in values or []:
+        text = str(value or "").strip()
+        if text:
+            out.append(text)
+    return out
+
+
+def _parse_qbittorrent_tags(raw_tags):
+    return _normalize_labels((raw_tags or "").split(","))
+
+
+def _is_managed_label_value(label):
+    text = str(label or "").strip()
+    return text in MANAGED_TAGS
+
+
+def _has_managed_qbittorrent_tag(raw_tags):
+    return any(_is_managed_label_value(tag) for tag in _parse_qbittorrent_tags(raw_tags))
+
+
+def _has_managed_transmission_labels(labels):
+    return any(_is_managed_label_value(label) for label in _normalize_labels(labels))
+
+
+def _fetch_qbittorrent_managed_items(session, base, timeout_seconds, extra_params=None):
+    params_base = dict(extra_params or {})
+    items = []
+    seen_hashes = set()
+    for managed_tag in MANAGED_TAGS:
+        params = dict(params_base)
+        params["tag"] = managed_tag
+        resp = session.get(f"{base}/api/v2/torrents/info", params=params, timeout=timeout_seconds)
+        if resp.status_code != 200:
+            continue
+        for item in (resp.json() or []):
+            torrent_hash = str(item.get("hash") or "").strip().lower()
+            if torrent_hash and torrent_hash in seen_hashes:
+                continue
+            if torrent_hash:
+                seen_hashes.add(torrent_hash)
+            items.append(item)
+    return items
 
 
 def test_torrent_client(client_type, url, username=None, password=None, timeout_seconds=10):
@@ -76,7 +125,7 @@ def remove_torrent(client_type, url, torrent_hash, username=None, password=None,
 def _test_qbittorrent(url, username=None, password=None, timeout_seconds=10):
     base = url.rstrip("/")
     session = requests.Session()
-    session.headers.update({"User-Agent": "Ownfoil/Downloads"})
+    session.headers.update({"User-Agent": "AeroFoil/Downloads"})
     if username or password:
         login_resp = session.post(
             f"{base}/api/v2/auth/login",
@@ -94,7 +143,7 @@ def _test_qbittorrent(url, username=None, password=None, timeout_seconds=10):
 def _test_transmission(url, username=None, password=None, timeout_seconds=10):
     base = url.rstrip("/")
     session = requests.Session()
-    session.headers.update({"User-Agent": "Ownfoil/Downloads"})
+    session.headers.update({"User-Agent": "AeroFoil/Downloads"})
     if username or password:
         session.auth = (username or "", password or "")
 
@@ -121,7 +170,7 @@ def _test_transmission(url, username=None, password=None, timeout_seconds=10):
 def _deluge_json_rpc(url, password, method, params=None, timeout_seconds=10):
     base = url.rstrip("/")
     session = requests.Session()
-    session.headers.update({"User-Agent": "Ownfoil/Downloads"})
+    session.headers.update({"User-Agent": "AeroFoil/Downloads"})
     if password is None:
         password = ""
     payload = {
@@ -242,7 +291,7 @@ def _add_deluge(url, password, download_url, category, download_path, timeout_se
 def _add_qbittorrent(url, username, password, download_url, category, download_path, timeout_seconds, expected_name, update_only, exclude_russian, expected_update_number, expected_version):
     base = url.rstrip("/")
     session = requests.Session()
-    session.headers.update({"User-Agent": "Ownfoil/Downloads"})
+    session.headers.update({"User-Agent": "AeroFoil/Downloads"})
     if username or password:
         login_resp = session.post(
             f"{base}/api/v2/auth/login",
@@ -265,7 +314,7 @@ def _add_qbittorrent(url, username, password, download_url, category, download_p
             )
             if not keep_ids:
                 return False, "No matching update version found in torrent.", None
-        temp_tag = f"ownfoil_update_{int(time.time())}_{secrets.token_hex(3)}"
+        temp_tag = f"aerofoil_update_{int(time.time())}_{secrets.token_hex(3)}"
     if category:
         data["category"] = category
     tags = _build_qbittorrent_tags(category, temp_tag)
@@ -330,7 +379,7 @@ def _add_qbittorrent(url, username, password, download_url, category, download_p
 def _add_transmission(url, username, password, download_url, category, download_path, timeout_seconds, expected_name, update_only, exclude_russian, expected_update_number, expected_version):
     base = url.rstrip("/")
     session = requests.Session()
-    session.headers.update({"User-Agent": "Ownfoil/Downloads"})
+    session.headers.update({"User-Agent": "AeroFoil/Downloads"})
     if username or password:
         session.auth = (username or "", password or "")
 
@@ -350,7 +399,7 @@ def _add_transmission(url, username, password, download_url, category, download_
     payload = {"method": "torrent-add", "arguments": {"filename": download_url}}
     if update_only:
         payload["arguments"]["paused"] = True
-    labels = [OWNFOIL_MANAGED_TAG]
+    labels = [AEROFOIL_MANAGED_TAG]
     if category:
         labels.append(category)
     payload["arguments"]["labels"] = list(dict.fromkeys(labels))
@@ -456,7 +505,7 @@ def _qb_is_active(item):
 def _list_active_qbittorrent(url, username, password, category, download_path, timeout_seconds):
     base = url.rstrip("/")
     session = requests.Session()
-    session.headers.update({"User-Agent": "Ownfoil/Downloads"})
+    session.headers.update({"User-Agent": "AeroFoil/Downloads"})
     if username or password:
         login_resp = session.post(
             f"{base}/api/v2/auth/login",
@@ -466,17 +515,19 @@ def _list_active_qbittorrent(url, username, password, category, download_path, t
         if login_resp.status_code != 200 or login_resp.text.strip() not in ("Ok.", ""):
             return []
 
-    resp = session.get(
-        f"{base}/api/v2/torrents/info",
-        params={"tag": OWNFOIL_MANAGED_TAG, "sort": "dlspeed", "reverse": "true"},
-        timeout=timeout_seconds,
+    items = _fetch_qbittorrent_managed_items(
+        session,
+        base,
+        timeout_seconds,
+        extra_params={"sort": "dlspeed", "reverse": "true"},
     )
-    if resp.status_code != 200:
+    if not items:
         return []
-    items = resp.json() or []
     active = []
     for item in items:
-        tags = [tag.strip() for tag in (item.get("tags") or "").split(",") if tag.strip()]
+        tags = _parse_qbittorrent_tags(item.get("tags"))
+        if not _has_managed_qbittorrent_tag(item.get("tags")):
+            continue
         if category and item.get("category") != category and category not in tags:
             continue
         content_path = item.get("content_path")
@@ -519,7 +570,7 @@ _TRANSMISSION_STATUS = {
 def _list_active_transmission(url, username, password, category, download_path, timeout_seconds):
     base = url.rstrip("/")
     session = requests.Session()
-    session.headers.update({"User-Agent": "Ownfoil/Downloads"})
+    session.headers.update({"User-Agent": "AeroFoil/Downloads"})
     if username or password:
         session.auth = (username or "", password or "")
 
@@ -544,8 +595,8 @@ def _list_active_transmission(url, username, password, category, download_path, 
     torrents = resp.json().get("arguments", {}).get("torrents", []) or []
     active = []
     for torrent in torrents:
-        labels = torrent.get("labels") or []
-        if OWNFOIL_MANAGED_TAG not in labels:
+        labels = _normalize_labels(torrent.get("labels"))
+        if not _has_managed_transmission_labels(labels):
             continue
         if category and category not in labels:
             continue
@@ -632,7 +683,7 @@ def _list_active_deluge(url, password, category, download_path, timeout_seconds)
 def _list_completed_qbittorrent(url, username, password, category, download_path, timeout_seconds):
     base = url.rstrip("/")
     session = requests.Session()
-    session.headers.update({"User-Agent": "Ownfoil/Downloads"})
+    session.headers.update({"User-Agent": "AeroFoil/Downloads"})
     if username or password:
         login_resp = session.post(
             f"{base}/api/v2/auth/login",
@@ -650,13 +701,25 @@ def _list_completed_qbittorrent(url, username, password, category, download_path
             return []
         return resp.json() or []
 
-    items = fetch_with_params({"tag": OWNFOIL_MANAGED_TAG})
+    items = []
+    seen_hashes = set()
+    for managed_tag in MANAGED_TAGS:
+        chunk = fetch_with_params({"tag": managed_tag})
+        for item in chunk:
+            torrent_hash = str(item.get("hash") or "").strip().lower()
+            if torrent_hash and torrent_hash in seen_hashes:
+                continue
+            if torrent_hash:
+                seen_hashes.add(torrent_hash)
+            items.append(item)
     if not items:
         return []
     completed = []
     for item in items:
         if item.get("progress") == 1:
-            tags = [tag.strip() for tag in (item.get("tags") or "").split(",") if tag.strip()]
+            tags = _parse_qbittorrent_tags(item.get("tags"))
+            if not _has_managed_qbittorrent_tag(item.get("tags")):
+                continue
             if category and item.get("category") != category and category not in tags:
                 continue
             torrent_hash = item.get("hash")
@@ -679,7 +742,7 @@ def _list_completed_qbittorrent(url, username, password, category, download_path
 def _list_completed_transmission(url, username, password, category, download_path, timeout_seconds):
     base = url.rstrip("/")
     session = requests.Session()
-    session.headers.update({"User-Agent": "Ownfoil/Downloads"})
+    session.headers.update({"User-Agent": "AeroFoil/Downloads"})
     if username or password:
         session.auth = (username or "", password or "")
 
@@ -700,8 +763,8 @@ def _list_completed_transmission(url, username, password, category, download_pat
     for torrent in torrents:
         if torrent.get("percentDone") != 1:
             continue
-        labels = torrent.get("labels") or []
-        if OWNFOIL_MANAGED_TAG not in labels:
+        labels = _normalize_labels(torrent.get("labels"))
+        if not _has_managed_transmission_labels(labels):
             continue
         if category and category not in labels:
             continue
@@ -764,20 +827,26 @@ def _list_completed_deluge(url, password, category, download_path, timeout_secon
 
 def _build_deluge_managed_label(category):
     if category:
-        return f"{OWNFOIL_MANAGED_TAG}:{category}"
-    return OWNFOIL_MANAGED_TAG
+        return f"{AEROFOIL_MANAGED_TAG}:{category}"
+    return AEROFOIL_MANAGED_TAG
 
 
 def _is_deluge_managed_label(label):
     if not label:
         return False
-    return label == OWNFOIL_MANAGED_TAG or label.startswith(f"{OWNFOIL_MANAGED_TAG}:")
+    label = str(label).strip()
+    if not label:
+        return False
+    for managed_tag in MANAGED_TAGS:
+        if label == managed_tag or label.startswith(f"{managed_tag}:"):
+            return True
+    return False
 
 
 def _remove_qbittorrent(url, username, password, torrent_hash, timeout_seconds):
     base = url.rstrip("/")
     session = requests.Session()
-    session.headers.update({"User-Agent": "Ownfoil/Downloads"})
+    session.headers.update({"User-Agent": "AeroFoil/Downloads"})
     if username or password:
         login_resp = session.post(
             f"{base}/api/v2/auth/login",
@@ -810,7 +879,7 @@ def _remove_qbittorrent_with_session(session, base, torrent_hash, timeout_second
 def _remove_transmission(url, username, password, torrent_hash, timeout_seconds):
     base = url.rstrip("/")
     session = requests.Session()
-    session.headers.update({"User-Agent": "Ownfoil/Downloads"})
+    session.headers.update({"User-Agent": "AeroFoil/Downloads"})
     if username or password:
         session.auth = (username or "", password or "")
 
@@ -1055,14 +1124,14 @@ def _bdecode_skip(data, idx):
 
 
 def _find_qbittorrent_hash_by_infohash(session, base, infohash_v1, category, added_after, timeout_seconds):
-    resp = session.get(
-        f"{base}/api/v2/torrents/info",
-        params={"tag": OWNFOIL_MANAGED_TAG, "sort": "added_on", "reverse": "true"},
-        timeout=timeout_seconds,
+    items = _fetch_qbittorrent_managed_items(
+        session,
+        base,
+        timeout_seconds,
+        extra_params={"sort": "added_on", "reverse": "true"},
     )
-    if resp.status_code != 200:
+    if not items:
         return None
-    items = resp.json() or []
     matches = []
     candidates = []
     for item in items:
@@ -1107,7 +1176,7 @@ def _normalize_hash(session, base, torrent_hash, timeout_seconds):
 
 
 def _build_qbittorrent_tags(category, temp_tag):
-    tags = [OWNFOIL_MANAGED_TAG]
+    tags = [AEROFOIL_MANAGED_TAG]
     if category:
         tags.append(category)
     if temp_tag:
@@ -1173,11 +1242,18 @@ def _find_recent_qbittorrent_hash(session, base, expected_name, category, timeou
             return []
         return resp.json() or []
 
-    candidates = fetch({"tag": OWNFOIL_MANAGED_TAG, "sort": "added_on", "reverse": "true", "limit": 20})
+    candidates = _fetch_qbittorrent_managed_items(
+        session,
+        base,
+        timeout_seconds,
+        extra_params={"sort": "added_on", "reverse": "true", "limit": 20},
+    )
 
     matches = []
     for item in candidates:
-        tags = [tag.strip() for tag in (item.get("tags") or "").split(",") if tag.strip()]
+        tags = _parse_qbittorrent_tags(item.get("tags"))
+        if not _has_managed_qbittorrent_tag(item.get("tags")):
+            continue
         if category and item.get("category") != category and category not in tags:
             continue
         name = (item.get("name") or "").lower()

@@ -4,7 +4,15 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(APP_DIR)
 DATA_DIR = os.path.join(APP_DIR, 'data')
 CONFIG_DIR = os.path.join(APP_DIR, 'config')
-DB_FILE = os.path.join(CONFIG_DIR, 'ownfoil.db')
+_legacy_db_file = os.path.join(CONFIG_DIR, 'ownfoil.db')
+_default_db_file = os.path.join(CONFIG_DIR, 'aerofoil.db')
+_configured_db_file = os.environ.get('AEROFOIL_DB_FILE') or os.environ.get('OWNFOIL_DB_FILE')
+if _configured_db_file:
+    DB_FILE = _configured_db_file
+elif os.path.exists(_legacy_db_file) and not os.path.exists(_default_db_file):
+    DB_FILE = _legacy_db_file
+else:
+    DB_FILE = _default_db_file
 CONFIG_FILE = os.path.join(CONFIG_DIR, 'settings.yaml')
 KEYS_FILE = os.path.join(CONFIG_DIR, 'keys.txt')
 CACHE_DIR = os.path.join(DATA_DIR, 'cache')
@@ -14,7 +22,7 @@ ALEMBIC_DIR = os.path.join(APP_DIR, 'migrations')
 ALEMBIC_CONF = os.path.join(ALEMBIC_DIR, 'alembic.ini')
 TITLEDB_DIR = os.path.join(DATA_DIR, 'titledb')
 TITLEDB_URL = 'https://github.com/blawar/titledb.git'
-TITLEDB_ARTEFACTS_URL = 'https://nightly.link/luketanti/ownfoil/workflows/region_titles/master/titledb.zip'
+TITLEDB_ARTEFACTS_URL = 'https://nightly.link/luketanti/aerofoil/workflows/region_titles/master/titledb.zip'
 TITLEDB_DESCRIPTIONS_BASE_URL = 'https://raw.githubusercontent.com/blawar/titledb/master'
 TITLEDB_DESCRIPTIONS_DEFAULT_FILE = 'US.en.json'
 TITLEDB_DEFAULT_FILES = [
@@ -24,9 +32,11 @@ TITLEDB_DEFAULT_FILES = [
     'languages.json',
 ]
 
-APP_VERSION = os.environ.get('OWNFOIL_VERSION') or os.environ.get('APP_VERSION') or 'dev'
+APP_VERSION = os.environ.get('AEROFOIL_VERSION') or os.environ.get('OWNFOIL_VERSION') or os.environ.get('APP_VERSION') or 'dev'
 
-OWNFOIL_DB = 'sqlite:///' + DB_FILE
+AEROFOIL_DB = 'sqlite:///' + DB_FILE
+# Backward-compatible alias for older imports.
+OWNFOIL_DB = AEROFOIL_DB
 
 DEFAULT_SETTINGS = {
     "security": {
@@ -36,7 +46,7 @@ DEFAULT_SETTINGS = {
         # When no admin exists yet, only allow bootstrap endpoints from private networks.
         "bootstrap_private_networks_only": True,
         # If running behind a reverse proxy (eg Nginx Proxy Manager), list its IP/CIDR here
-        # so OwnFoil can safely trust X-Forwarded-For.
+        # so AeroFoil can safely trust X-Forwarded-For.
         # Examples: ["172.18.0.0/16", "192.168.1.10"]
         "trusted_proxies": [],
         # When true, use X-Forwarded-For only if request.remote_addr is trusted.
@@ -110,7 +120,7 @@ DEFAULT_SETTINGS = {
             "url": "",
             "username": "",
             "password": "",
-            "category": "ownfoil",
+            "category": "aerofoil",
             "download_path": ""
         }
     },

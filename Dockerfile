@@ -2,8 +2,8 @@ FROM python:3.11-alpine
 
 # Install platform-specific build dependencies
 ARG TARGETPLATFORM
-ARG OWNFOIL_VERSION
-ENV OWNFOIL_VERSION=$OWNFOIL_VERSION
+ARG AEROFOIL_VERSION
+ENV AEROFOIL_VERSION=$AEROFOIL_VERSION
 RUN apk update && apk add --no-cache bash sudo \
     git \
     && if [ "$TARGETPLATFORM" = "linux/arm/v6" ] || [ "$TARGETPLATFORM" = "linux/arm/v7" ]; then \
@@ -31,3 +31,4 @@ RUN mkdir -p /app/data
 WORKDIR /app
 
 ENTRYPOINT [ "/app/run.sh" ]
+

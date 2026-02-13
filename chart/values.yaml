@@ -1,7 +1,7 @@
 replicas: 1
 
 image: 
-  repository: a1ex4/ownfoil
+  repository: a1ex4/aerofoil
   tag: latest
 
 service:
@@ -37,10 +37,11 @@ persistence:
 ingress:
   enabled: true
   tls: true
-  host: ownfoil.example.org
+  host: aerofoil.example.org
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt
     nginx.ingress.kubernetes.io/proxy-body-size: 15G
     kubernetes.io/ingress.class: nginx
+
 
 
