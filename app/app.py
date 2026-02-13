@@ -1,42 +1,57 @@
+import os
+import sys
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(APP_DIR)
+if PROJECT_DIR not in sys.path:
+    sys.path.insert(0, PROJECT_DIR)
+
 from flask import Flask, render_template, request, redirect, url_for, jsonify, send_from_directory, Response, has_app_context, has_request_context, g
-from flask_login import LoginManager
+from flask_login import LoginManager, current_user
 from werkzeug.utils import secure_filename
-from sqlalchemy import func
-from sqlalchemy.orm import joinedload
-from scheduler import init_scheduler
+from werkzeug.security import check_password_hash
+from sqlalchemy import func, and_, or_, case, literal
+from app.scheduler import init_scheduler
 from functools import wraps
-from file_watcher import Watcher
+from app.file_watcher import Watcher
 import threading
 import logging
-import sys
 import copy
 import flask.cli
 from datetime import timedelta, datetime
 flask.cli.show_server_banner = lambda *args: None
-from constants import *
-from settings import *
-from downloads import ProwlarrClient, test_torrent_client, run_downloads_job, manual_search_update, queue_download_url, search_update_options, check_completed_downloads, get_downloads_state
-from library import organize_library, delete_older_updates
-from db import *
-from shop import *
-from auth import *
-from auth import _effective_client_ip
-import titles
-from utils import *
-from library import *
-from library import _get_nsz_exe, _ensure_unique_path
-import titledb
-from title_requests import create_title_request, list_requests
+from app.constants import *
+from app.settings import *
+from app.downloads import ProwlarrClient, test_torrent_client, run_downloads_job, manual_search_update, queue_download_url, search_update_options, check_completed_downloads, get_downloads_state, get_active_downloads
+from app.library import organize_library, delete_older_updates, delete_duplicates
+from app.db import *
+from app.shop import *
+from app.auth import *
+from app.auth import _effective_client_ip
+from app import titles
+from app.utils import *
+from app.library import *
+from app.library import _get_nsz_runner, _ensure_unique_path
+from app import titledb
+from app.title_requests import create_title_request, list_requests
 import requests
-import os
 import re
+import unicodedata
 import threading
 import time
 import uuid
 import re
 import secrets
+import gc
+import ctypes
+import zipfile
 
-from db import add_access_event, get_access_events
+from app.db import add_access_event, get_access_events
+
+try:
+    from waitress import serve as waitress_serve
+except Exception:
+    waitress_serve = None
 
 try:
     from PIL import Image, ImageOps
@@ -59,6 +74,25 @@ _ICON_SIZE = (300, 300)
 _BANNER_SIZE = (920, 520)
 _WEB_ICON_SIZE = (300, 300)
 _WEB_BANNER_SIZE = (640, 360)
+try:
+    _libc = ctypes.CDLL("libc.so.6")
+    _malloc_trim = getattr(_libc, "malloc_trim", None)
+    if _malloc_trim is not None:
+        _malloc_trim.argtypes = [ctypes.c_size_t]
+        _malloc_trim.restype = ctypes.c_int
+except Exception:
+    _malloc_trim = None
+
+def _release_process_memory():
+    try:
+        gc.collect()
+    except Exception:
+        pass
+    if _malloc_trim is not None:
+        try:
+            _malloc_trim(0)
+        except Exception:
+            pass
 
 def _media_variant_dirname(media_kind, size_override=None):
     if media_kind == 'icon':
@@ -109,6 +143,8 @@ def _get_web_media_size(media_kind):
     return _WEB_ICON_SIZE if media_kind == 'icon' else _WEB_BANNER_SIZE
 
 def _maybe_expire_media_cache_index(now=None):
+    if MEDIA_INDEX_TTL_S is None:
+        return
     if MEDIA_INDEX_TTL_S <= 0:
         with _media_cache_lock:
             _media_cache_index['icon'].clear()
@@ -129,7 +165,8 @@ def _get_cached_media_filename(cache_dir, title_id, media_kind='icon'):
     title_id = (title_id or '').upper()
     if not title_id:
         return None
-    if MEDIA_INDEX_TTL_S > 0:
+    cache_enabled = MEDIA_INDEX_TTL_S is None or MEDIA_INDEX_TTL_S > 0
+    if cache_enabled:
         with _media_cache_lock:
             cached_name = _media_cache_index.get(media_kind, {}).get(title_id)
         if cached_name:
@@ -142,7 +179,7 @@ def _get_cached_media_filename(cache_dir, title_id, media_kind='icon'):
     try:
         for name in os.listdir(cache_dir):
             if name.startswith(f"{title_id}."):
-                if MEDIA_INDEX_TTL_S > 0:
+                if cache_enabled:
                     with _media_cache_lock:
                         _media_cache_index.setdefault(media_kind, {})[title_id] = name
                 return name
@@ -155,7 +192,7 @@ def _remember_cached_media_filename(title_id, filename, media_kind='icon'):
     if not title_id or not filename:
         return
     _maybe_expire_media_cache_index()
-    if MEDIA_INDEX_TTL_S <= 0:
+    if MEDIA_INDEX_TTL_S is not None and MEDIA_INDEX_TTL_S <= 0:
         return
     with _media_cache_lock:
         _media_cache_index.setdefault(media_kind, {})[title_id] = filename
@@ -201,6 +238,9 @@ def init():
     def downloads_job():
         run_downloads_job(scan_cb=scan_library, post_cb=post_library_change)
 
+    def downloads_pending_job():
+        check_completed_downloads(scan_cb=scan_library, post_cb=post_library_change)
+
     def maintenance_job():
         run_library_maintenance()
 
@@ -211,6 +251,13 @@ def init():
         interval=timedelta(minutes=5)
     )
 
+    # Fast completion monitor: only does work while AeroFoil has pending downloads.
+    app.scheduler.add_job(
+        job_id='downloads_pending_monitor_job',
+        func=downloads_pending_job,
+        interval=timedelta(seconds=30),
+        log_level='debug'
+    )
     maintenance_interval_minutes = _get_maintenance_interval_minutes(app_settings)
     app.scheduler.add_job(
         job_id=LIBRARY_MAINTENANCE_JOB_ID,
@@ -249,6 +296,15 @@ def init():
                     start_date=datetime.now().replace(microsecond=0) + timedelta(minutes=5)
                 )
                 return
+        if _is_conversion_running():
+            logger.info("Skipping scheduled library scan: conversion job is running. Rescheduling in 5 minutes.")
+            app.scheduler.add_job(
+                job_id=f'scan_library_rescheduled_{datetime.now().timestamp()}',
+                func=scan_library_job,
+                run_once=True,
+                start_date=datetime.now().replace(microsecond=0) + timedelta(minutes=5)
+            )
+            return
         logger.info("Starting scheduled library scan job...")
         global scan_in_progress
         with scan_lock:
@@ -296,6 +352,9 @@ def _get_maintenance_interval_minutes(settings):
 
 def run_library_maintenance():
     try:
+        if _is_conversion_running():
+            logger.info("Skipping scheduled library maintenance: conversion job is running.")
+            return
         current_settings = load_settings()
         library_cfg = current_settings.get('library', {})
         if not library_cfg.get('auto_maintenance', False):
@@ -313,6 +372,8 @@ def run_library_maintenance():
             logger.warning("Library maintenance reported errors: %s", results.get('errors'))
     except Exception as e:
         logger.error("Error during library maintenance job: %s", e)
+    finally:
+        _release_process_memory()
 
 def _reschedule_library_maintenance(app):
     try:
@@ -365,17 +426,327 @@ library_rebuild_lock = threading.Lock()
 shop_sections_cache = {
     'limit': None,
     'timestamp': 0,
+    'state_token': None,
     'payload': None
 }
 shop_sections_cache_lock = threading.Lock()
 shop_sections_refresh_lock = threading.Lock()
 shop_sections_refresh_running = False
+shop_root_cache_lock = threading.Lock()
+shop_root_cache = {
+    'state_token': None,
+    'files': None,
+    'encrypted': {},
+}
+_SHOP_ROOT_ENCRYPTED_CACHE_LIMIT = 8
+_TITLES_METADATA_CACHE_VERSION = 2
+titles_metadata_cache_lock = threading.Lock()
+titles_metadata_cache = {
+    'version': _TITLES_METADATA_CACHE_VERSION,
+    'state_token': None,
+    'genres': [],
+    'title_name_map': {},
+    'genre_title_ids': {},
+    'unrecognized_title_ids': set(),
+}
+request_settings_sync_lock = threading.Lock()
+request_settings_last_sync_ts = 0.0
+missing_files_sweep_lock = threading.Lock()
+missing_files_last_run_ts = 0.0
+
+
+def _is_conversion_running():
+    with conversion_jobs_lock:
+        for job in conversion_jobs.values():
+            kind = str(job.get('kind') or '')
+            status = str(job.get('status') or '')
+            if kind.startswith('convert') and status == 'running':
+                return True
+    return False
+
+def _read_cache_ttl(env_key, default_value):
+    raw = os.environ.get(env_key)
+    if raw is None:
+        return default_value
+    raw = str(raw).strip()
+    if not raw:
+        return default_value
+    lowered = raw.lower()
+    if lowered in ('none', 'null', 'off'):
+        return None
+    try:
+        return int(lowered)
+    except ValueError:
+        return default_value
+
+def _read_int_env(env_key, default_value, minimum=None, maximum=None):
+    raw = os.environ.get(env_key)
+    if raw is None:
+        return default_value
+    raw = str(raw).strip()
+    if not raw:
+        return default_value
+    try:
+        value = int(raw)
+    except ValueError:
+        return default_value
+    if minimum is not None:
+        value = max(int(minimum), value)
+    if maximum is not None:
+        value = min(int(maximum), value)
+    return value
+
+def _invalidate_shop_root_cache():
+    with shop_root_cache_lock:
+        shop_root_cache['state_token'] = None
+        shop_root_cache['files'] = None
+        shop_root_cache['encrypted'] = {}
+
+def _get_titledb_aware_state_token():
+    library_token = str(get_library_cache_state_token() or '')
+    try:
+        titledb_token = str(titles.get_titledb_cache_token() or 'missing')
+    except Exception:
+        titledb_token = 'missing'
+    return f"{library_token}::{titledb_token}"
+
+def _get_cached_shop_files():
+    state_token = get_library_cache_state_token()
+    with shop_root_cache_lock:
+        if (
+            shop_root_cache.get('state_token') == state_token
+            and isinstance(shop_root_cache.get('files'), list)
+        ):
+            return list(shop_root_cache['files'])
+
+    rows = db.session.query(Files.id, Files.filename, Files.size).all()
+    files_payload = [
+        {
+            "url": f"/api/get_game/{row.id}#{row.filename}",
+            "size": int(row.size or 0),
+        }
+        for row in rows
+    ]
+
+    with shop_root_cache_lock:
+        shop_root_cache['state_token'] = state_token
+        shop_root_cache['files'] = files_payload
+        shop_root_cache['encrypted'] = {}
+    return list(files_payload)
+
+def _get_cached_encrypted_shop_payload(shop_payload, public_key, verified_host):
+    state_token = get_library_cache_state_token()
+    motd = str(shop_payload.get("success") or "")
+    referrer = str(shop_payload.get("referrer") or verified_host or "")
+    cache_key = (state_token, motd, str(public_key or ''), referrer)
+
+    with shop_root_cache_lock:
+        encrypted_cache = shop_root_cache.setdefault('encrypted', {})
+        cached = encrypted_cache.get(cache_key)
+        if isinstance(cached, (bytes, bytearray)):
+            return bytes(cached)
+
+    payload = encrypt_shop(shop_payload, public_key_pem=public_key, compression_level=6)
+    with shop_root_cache_lock:
+        encrypted_cache = shop_root_cache.setdefault('encrypted', {})
+        encrypted_cache[cache_key] = payload
+        if len(encrypted_cache) > _SHOP_ROOT_ENCRYPTED_CACHE_LIMIT:
+            ordered_keys = list(encrypted_cache.keys())[-_SHOP_ROOT_ENCRYPTED_CACHE_LIMIT:]
+            shop_root_cache['encrypted'] = {k: encrypted_cache[k] for k in ordered_keys}
+    return payload
+
+def _is_titledb_unrecognized(info):
+    try:
+        name_value = str((info or {}).get('name') or '').strip().lower()
+        id_value = str((info or {}).get('id') or '').strip().lower()
+        return name_value == 'unrecognized' or 'not found in titledb' in id_value
+    except Exception:
+        return True
+
+def _split_genres_value(raw):
+    parts = []
+    for segment in str(raw or '').split(','):
+        cleaned = re.sub(r'^[\s\[\]\'"`]+|[\s\[\]\'"`]+$', '', str(segment or '').strip()).strip()
+        if cleaned:
+            parts.append(cleaned)
+    seen = set()
+    out = []
+    for part in parts:
+        key = part.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(part)
+    return out
+
+def _normalize_library_search_text(text):
+    value = str(text or '')
+    try:
+        value = unicodedata.normalize('NFKD', value)
+        value = value.encode('ascii', 'ignore').decode('ascii')
+    except Exception:
+        pass
+    value = re.sub(r"[^A-Za-z0-9\s]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip().lower()
+
+def _search_matches_normalized_text(query_normalized, field_value):
+    hay = _normalize_library_search_text(field_value)
+    if not hay:
+        return False
+    if query_normalized in hay:
+        return True
+
+    # Handle spacing/symbol differences (e.g. "you update" vs "youupdate").
+    query_compact = query_normalized.replace(' ', '')
+    hay_compact = hay.replace(' ', '')
+    if query_compact and query_compact in hay_compact:
+        return True
+
+    # Token-aware fallback so all query terms must be present.
+    terms = [t for t in query_normalized.split(' ') if t]
+    if terms and all(term in hay for term in terms):
+        return True
+    return False
+
+def _build_titles_metadata_cache():
+    genres_map = {}
+    genre_title_ids = {}
+    title_name_map = {}
+    unrecognized_title_ids = set()
+
+    with titles.titledb_session() as titledb_loaded:
+        if not titledb_loaded:
+            return {
+                'genres': [],
+                'title_name_map': {},
+                'genre_title_ids': {},
+                'unrecognized_title_ids': set(),
+            }
+
+        title_ids = [row.title_id for row in db.session.query(Titles.title_id).all() if row.title_id]
+        for tid in title_ids:
+            normalized_tid = str(tid or '').strip().upper()
+            if not normalized_tid:
+                continue
+            info = titles.get_game_info(normalized_tid) or {}
+            name = str(info.get('name') or '').strip()
+            title_name_map[normalized_tid] = _normalize_library_search_text(name)
+            if _is_titledb_unrecognized(info):
+                unrecognized_title_ids.add(normalized_tid)
+            for genre in _split_genres_value(info.get('category') or ''):
+                lowered = genre.lower()
+                if lowered not in genres_map:
+                    genres_map[lowered] = genre
+                genre_title_ids.setdefault(lowered, set()).add(normalized_tid)
+
+    genres = sorted(genres_map.values(), key=lambda item: str(item).lower())
+    return {
+        'genres': genres,
+        'title_name_map': title_name_map,
+        'genre_title_ids': genre_title_ids,
+        'unrecognized_title_ids': unrecognized_title_ids,
+    }
+
+def _get_cached_titles_metadata():
+    state_token = _get_titledb_aware_state_token()
+    with titles_metadata_cache_lock:
+        if (
+            titles_metadata_cache.get('state_token') == state_token
+            and int(titles_metadata_cache.get('version') or 0) == _TITLES_METADATA_CACHE_VERSION
+        ):
+            return {
+                'genres': list(titles_metadata_cache.get('genres') or []),
+                'title_name_map': dict(titles_metadata_cache.get('title_name_map') or {}),
+                'genre_title_ids': {
+                    str(k): set(v or set())
+                    for k, v in (titles_metadata_cache.get('genre_title_ids') or {}).items()
+                },
+                'unrecognized_title_ids': set(titles_metadata_cache.get('unrecognized_title_ids') or set()),
+            }
+
+    fresh = _build_titles_metadata_cache()
+    with titles_metadata_cache_lock:
+        titles_metadata_cache['version'] = _TITLES_METADATA_CACHE_VERSION
+        titles_metadata_cache['state_token'] = state_token
+        titles_metadata_cache['genres'] = list(fresh.get('genres') or [])
+        titles_metadata_cache['title_name_map'] = dict(fresh.get('title_name_map') or {})
+        titles_metadata_cache['genre_title_ids'] = {
+            str(k): set(v or set())
+            for k, v in (fresh.get('genre_title_ids') or {}).items()
+        }
+        titles_metadata_cache['unrecognized_title_ids'] = set(fresh.get('unrecognized_title_ids') or set())
+    return fresh
+
+def _get_cached_library_genres():
+    metadata = _get_cached_titles_metadata()
+    return list(metadata.get('genres') or [])
+
+def _get_discovery_sections(limit=12):
+    try:
+        limit = max(1, int(limit))
+    except Exception:
+        limit = 12
+
+    now = time.time()
+    state_token = _get_titledb_aware_state_token()
+    payload = None
+    with shop_sections_cache_lock:
+        cache_enabled = SHOP_SECTIONS_CACHE_TTL_S is None or SHOP_SECTIONS_CACHE_TTL_S > 0
+        cache_valid = True
+        if SHOP_SECTIONS_CACHE_TTL_S is not None:
+            cache_valid = (now - float(shop_sections_cache.get('timestamp') or 0)) <= SHOP_SECTIONS_CACHE_TTL_S
+        cache_hit = (
+            cache_enabled
+            and shop_sections_cache['payload'] is not None
+            and shop_sections_cache.get('state_token') == state_token
+            and cache_valid
+        )
+        if cache_hit:
+            payload = shop_sections_cache['payload']
+
+    if payload is None:
+        if SHOP_SECTIONS_CACHE_TTL_S is None or SHOP_SECTIONS_CACHE_TTL_S > 0:
+            disk_cache = _load_shop_sections_cache_from_disk()
+            if (
+                disk_cache
+                and disk_cache.get('limit') == max(limit, 50)
+                and str(disk_cache.get('state_token') or '') == state_token
+            ):
+                disk_payload = disk_cache.get('payload')
+                disk_ts = float(disk_cache.get('timestamp') or 0)
+                disk_ok = True
+                if SHOP_SECTIONS_CACHE_TTL_S is not None:
+                    disk_ok = (now - disk_ts) <= SHOP_SECTIONS_CACHE_TTL_S
+                if disk_payload and disk_ok:
+                    payload = disk_payload
+                    _store_shop_sections_cache(payload, max(limit, 50), disk_ts, state_token, persist_disk=False)
+
+    if payload is None:
+        payload = _build_shop_sections_payload(max(limit, 50))
+        if SHOP_SECTIONS_CACHE_TTL_S is None or SHOP_SECTIONS_CACHE_TTL_S > 0:
+            _store_shop_sections_cache(payload, max(limit, 50), now, state_token, persist_disk=True)
+
+    sections = payload.get('sections') if isinstance(payload, dict) else []
+    newest = []
+    recommended = []
+    for section in sections or []:
+        if section.get('id') == 'new':
+            newest = list(section.get('items') or [])[:limit]
+        elif section.get('id') == 'recommended':
+            recommended = list(section.get('items') or [])[:limit]
+    return newest, recommended
 
 # ===== CACHE TTLs (seconds) =====
 # Make these short if you want the Web UI caches to free memory frequently.
 # Set to 0 to disable in-memory caching entirely.
-SHOP_SECTIONS_CACHE_TTL_S = 60
-MEDIA_INDEX_TTL_S = 120
+# Set to None to disable expiry (cache refreshes on library rebuild).
+SHOP_SECTIONS_CACHE_TTL_S = _read_cache_ttl('SHOP_SECTIONS_CACHE_TTL_S', None)
+SHOP_SECTIONS_ALL_ITEMS_CAP = _read_cache_ttl('SHOP_SECTIONS_ALL_ITEMS_CAP', 300)
+SHOP_SECTIONS_ALL_ITEMS_CAP_NO_TITLEDB = _read_cache_ttl('SHOP_SECTIONS_ALL_ITEMS_CAP_NO_TITLEDB', 120)
+SHOP_SECTIONS_MAX_IN_MEMORY_BYTES = _read_cache_ttl('SHOP_SECTIONS_MAX_IN_MEMORY_BYTES', 4 * 1024 * 1024)
+MEDIA_INDEX_TTL_S = _read_cache_ttl('MEDIA_INDEX_TTL_S', None)
+REQUEST_SETTINGS_SYNC_INTERVAL_S = _read_cache_ttl('REQUEST_SETTINGS_SYNC_INTERVAL_S', 5)
+MISSING_FILES_SWEEP_INTERVAL_S = _read_cache_ttl('MISSING_FILES_SWEEP_INTERVAL_S', 21600)
 # ===============================
 
 def _load_shop_sections_cache_from_disk():
@@ -393,13 +764,14 @@ def _load_shop_sections_cache_from_disk():
         return None
     return data
 
-def _save_shop_sections_cache_to_disk(payload, limit, timestamp):
+def _save_shop_sections_cache_to_disk(payload, limit, timestamp, state_token=None):
     cache_path = SHOP_SECTIONS_CACHE_FILE
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     data = {
         'payload': payload,
         'limit': limit,
-        'timestamp': timestamp
+        'timestamp': timestamp,
+        'state_token': state_token,
     }
     try:
         with open(cache_path, 'w', encoding='utf-8') as handle:
@@ -407,94 +779,267 @@ def _save_shop_sections_cache_to_disk(payload, limit, timestamp):
     except Exception:
         pass
 
-def _build_shop_sections_payload(limit):
-    titles.load_titledb()
+def _estimate_json_size_bytes(payload):
     try:
-        apps = Apps.query.options(
-            joinedload(Apps.files),
-            joinedload(Apps.title)
-        ).filter_by(owned=True).all()
+        return len(json.dumps(payload, separators=(',', ':')).encode('utf-8'))
+    except Exception:
+        return None
 
-        def _safe_int(value, default=0):
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                return default
+def _store_shop_sections_cache(payload, limit, timestamp, state_token, persist_disk=True):
+    cache_payload = payload
+    if '::missing' in str(state_token or ''):
+        # Keep cold-boot payload on disk only; avoid retaining large placeholder payloads in RAM.
+        cache_payload = None
 
-        def _select_file(app):
-            if not app.files:
+    max_bytes = SHOP_SECTIONS_MAX_IN_MEMORY_BYTES
+    if cache_payload is not None and max_bytes is not None:
+        try:
+            max_bytes = max(0, int(max_bytes))
+            payload_size = _estimate_json_size_bytes(cache_payload)
+            if payload_size is not None and payload_size > max_bytes:
+                logger.info(
+                    "Skipping in-memory shop sections cache (%s bytes > %s bytes); using disk cache only.",
+                    payload_size,
+                    max_bytes
+                )
+                cache_payload = None
+        except Exception:
+            pass
+
+    with shop_sections_cache_lock:
+        if cache_payload is None:
+            shop_sections_cache['payload'] = None
+            shop_sections_cache['limit'] = None
+            shop_sections_cache['timestamp'] = 0
+            shop_sections_cache['state_token'] = None
+        else:
+            shop_sections_cache['payload'] = cache_payload
+            shop_sections_cache['limit'] = limit
+            shop_sections_cache['timestamp'] = timestamp
+            shop_sections_cache['state_token'] = state_token
+
+    if persist_disk:
+        _save_shop_sections_cache_to_disk(payload, limit, timestamp, state_token=state_token)
+
+def _summarize_shop_sections_payload(payload):
+    summary = {
+        'valid': isinstance(payload, dict),
+        'size_bytes': _estimate_json_size_bytes(payload),
+        'sections': []
+    }
+    if not isinstance(payload, dict):
+        return summary
+    sections = payload.get('sections')
+    if not isinstance(sections, list):
+        return summary
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        items = section.get('items') or []
+        total = section.get('total')
+        try:
+            total = int(total) if total is not None else len(items)
+        except Exception:
+            total = len(items)
+        summary['sections'].append({
+            'id': section.get('id'),
+            'title': section.get('title'),
+            'items': len(items) if isinstance(items, list) else 0,
+            'total': total,
+            'truncated': bool(section.get('truncated'))
+        })
+    return summary
+
+def _read_proc_meminfo_bytes():
+    values = {}
+    try:
+        with open('/proc/self/status', 'r', encoding='utf-8') as fh:
+            for line in fh:
+                if line.startswith('VmRSS:') or line.startswith('VmSize:'):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        key = parts[0].rstrip(':')
+                        values[key] = int(parts[1]) * 1024
+    except Exception:
+        pass
+    return {
+        'rss_bytes': values.get('VmRSS'),
+        'vms_bytes': values.get('VmSize')
+    }
+
+def _build_shop_sections_payload(limit):
+    try:
+        limit = int(limit or 50)
+    except (TypeError, ValueError):
+        limit = 50
+    limit = max(1, limit)
+    ranked_files = (
+        db.session.query(
+            app_files.c.app_id.label('app_pk'),
+            Files.id.label('file_id'),
+            Files.filename.label('filename'),
+            func.coalesce(Files.size, 0).label('size'),
+            func.coalesce(Files.download_count, 0).label('download_count'),
+            func.row_number().over(
+                partition_by=app_files.c.app_id,
+                order_by=(Files.size.desc(), Files.id.desc())
+            ).label('row_rank')
+        )
+        .join(Files, Files.id == app_files.c.file_id)
+        .subquery()
+    )
+    best_files = (
+        db.session.query(
+            ranked_files.c.app_pk,
+            ranked_files.c.file_id,
+            ranked_files.c.filename,
+            ranked_files.c.size,
+            ranked_files.c.download_count,
+        )
+        .filter(ranked_files.c.row_rank == 1)
+        .subquery()
+    )
+    rows = (
+        db.session.query(
+            Apps.id.label('app_pk'),
+            Apps.app_id.label('app_id'),
+            Apps.app_version.label('app_version'),
+            Apps.app_type.label('app_type'),
+            Titles.title_id.label('title_id'),
+            best_files.c.file_id.label('file_id'),
+            best_files.c.filename.label('filename'),
+            best_files.c.size.label('size'),
+            best_files.c.download_count.label('download_count'),
+        )
+        .outerjoin(Titles, Apps.title_id == Titles.id)
+        .outerjoin(best_files, best_files.c.app_pk == Apps.id)
+        .filter(Apps.owned.is_(True))
+        .filter(best_files.c.file_id.isnot(None))
+        .all()
+    )
+
+    def _safe_int(value, default=0):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    info_cache = {}
+
+    with titles.titledb_session() as titledb_loaded:
+        def _get_info(lookup_id):
+            if not titledb_loaded:
+                return {}
+            key = (lookup_id or '').strip().upper()
+            if not key:
+                return {}
+            if key not in info_cache:
+                info_cache[key] = titles.get_game_info(key) or {}
+            return info_cache[key]
+
+        def _build_item(row):
+            title_id = (row.title_id or '').strip().upper() or None
+            app_id = str(row.app_id or '').strip().upper()
+            if not app_id:
                 return None
-            return max(app.files, key=lambda f: f.size or 0)
 
-        def _build_item(app):
-            file_obj = _select_file(app)
-            if not file_obj:
-                return None
-            title_id = app.title.title_id if app.title else None
-            base_info = titles.get_game_info(title_id) if title_id else None
-            app_info = None
-            if app.app_type == APP_TYPE_DLC:
-                app_info = titles.get_game_info(app.app_id)
-            name = (app_info or base_info or {}).get('name') or app.app_id
-            title_name = (base_info or {}).get('name') or name
-            icon_url = f'/api/shop/icon/{title_id}' if title_id else ''
+            base_info = _get_info(title_id) if title_id else {}
+            app_info = base_info
+            if row.app_type == APP_TYPE_DLC:
+                app_info = _get_info(app_id) or base_info
+
+            if titledb_loaded:
+                name = (app_info or {}).get('name') or app_id
+                title_name = (base_info or {}).get('name') or name
+                category = (base_info or {}).get('category', '')
+            else:
+                name = title_id or app_id
+                title_name = title_id or name
+                category = ''
             return {
                 'name': name,
                 'title_name': title_name,
                 'title_id': title_id,
-                'app_id': app.app_id,
-                'app_version': app.app_version,
-                'app_type': app.app_type,
-                'category': (base_info or {}).get('category', ''),
-                'icon_url': icon_url,
-                'url': f'/api/get_game/{file_obj.id}#{file_obj.filename}',
-                'size': file_obj.size or 0,
-                'file_id': file_obj.id,
-                'filename': file_obj.filename,
-                'download_count': file_obj.download_count or 0
+                'app_id': app_id,
+                'app_version': row.app_version,
+                'app_type': row.app_type,
+                'category': category,
+                'icon_url': f'/api/shop/icon/{title_id}' if title_id else '',
+                'url': f"/api/get_game/{int(row.file_id)}#{row.filename}",
+                'size': int(row.size or 0),
+                'file_id': int(row.file_id),
+                'filename': row.filename,
+                'download_count': int(row.download_count or 0)
             }
 
-        base_apps = [app for app in apps if app.app_type == APP_TYPE_BASE]
-        update_apps = [app for app in apps if app.app_type == APP_TYPE_UPD]
-        dlc_apps = [app for app in apps if app.app_type == APP_TYPE_DLC]
-
-        base_items = [item for item in (_build_item(app) for app in base_apps) if item]
+        base_items = [
+            item for item in (_build_item(row) for row in rows if row.app_type == APP_TYPE_BASE)
+            if item
+        ]
         base_items.sort(key=lambda item: item['file_id'], reverse=True)
-        new_items = base_items[:limit]
+        discovery_limit = 40
+        new_items = base_items[:discovery_limit]
 
-        recommended_items = sorted(base_items, key=lambda item: item['download_count'], reverse=True)[:limit]
+        recommended_items = sorted(base_items, key=lambda item: item['download_count'], reverse=True)[:discovery_limit]
         if not any(item['download_count'] for item in recommended_items):
-            recommended_items = new_items[:limit]
+            recommended_items = new_items[:discovery_limit]
 
-        latest_available_update_by_title = {}
-        for app in update_apps:
-            title_id = app.title.title_id if app.title else None
+        all_limit = None
+        if SHOP_SECTIONS_ALL_ITEMS_CAP is not None:
+            cap_value = int(SHOP_SECTIONS_ALL_ITEMS_CAP)
+            if not titledb_loaded and SHOP_SECTIONS_ALL_ITEMS_CAP_NO_TITLEDB is not None:
+                cap_value = min(cap_value, int(SHOP_SECTIONS_ALL_ITEMS_CAP_NO_TITLEDB))
+            all_limit = max(limit, cap_value)
+
+        updates_dlc_limit = all_limit if all_limit is not None else limit
+
+        latest_update_by_title_id = {}
+        for row in rows:
+            if row.app_type != APP_TYPE_UPD:
+                continue
+            title_id = (row.title_id or '').strip().upper()
             if not title_id:
                 continue
-            version = _safe_int(app.app_version)
-            current_available = latest_available_update_by_title.get(title_id)
-            if not current_available or version > current_available['version']:
-                latest_available_update_by_title[title_id] = {'version': version, 'app': app}
-
-        update_items_full = []
-        for title_id, available in latest_available_update_by_title.items():
-            item = _build_item(available['app'])
-            if item:
-                update_items_full.append(item)
-        update_items_full.sort(key=lambda item: _safe_int(item['app_version']), reverse=True)
-        update_items = update_items_full
-
-        dlc_by_id = {}
-        for app in dlc_apps:
-            version = _safe_int(app.app_version)
-            current = dlc_by_id.get(app.app_id)
+            version = _safe_int(row.app_version)
+            current = latest_update_by_title_id.get(title_id)
             if not current or version > current['version']:
-                dlc_by_id[app.app_id] = {'version': version, 'app': app}
-        dlc_items_full = [item for item in (_build_item(entry['app']) for entry in dlc_by_id.values()) if item]
-        dlc_items_full.sort(key=lambda item: _safe_int(item['app_version']), reverse=True)
-        dlc_items = dlc_items_full[:limit]
+                latest_update_by_title_id[title_id] = {'version': version, 'row': row}
 
-        all_items = sorted(base_items + update_items_full + dlc_items_full, key=lambda item: item['name'].lower())
+        update_items_full = [
+            item
+            for item in (_build_item(entry['row']) for entry in latest_update_by_title_id.values())
+            if item
+        ]
+        update_items_full.sort(key=lambda item: _safe_int(item['app_version']), reverse=True)
+        update_items = update_items_full[:updates_dlc_limit]
+
+        latest_dlc_by_app_id = {}
+        for row in rows:
+            if row.app_type != APP_TYPE_DLC:
+                continue
+            app_id = str(row.app_id or '').strip().upper()
+            if not app_id:
+                continue
+            version = _safe_int(row.app_version)
+            current = latest_dlc_by_app_id.get(app_id)
+            if not current or version > current['version']:
+                latest_dlc_by_app_id[app_id] = {'version': version, 'row': row}
+
+        dlc_items_full = [
+            item
+            for item in (_build_item(entry['row']) for entry in latest_dlc_by_app_id.values())
+            if item
+        ]
+        dlc_items_full.sort(key=lambda item: _safe_int(item['app_version']), reverse=True)
+        dlc_items = dlc_items_full[:updates_dlc_limit]
+
+        all_total = len(base_items) + len(update_items_full) + len(dlc_items_full)
+        all_items = sorted(
+            base_items + update_items_full + dlc_items_full,
+            key=lambda item: str(item.get('name') or '').lower()
+        )
+        if all_limit is not None:
+            all_items = all_items[:all_limit]
 
         return {
             'sections': [
@@ -502,12 +1047,15 @@ def _build_shop_sections_payload(limit):
                 {'id': 'recommended', 'title': 'Recommended', 'items': recommended_items},
                 {'id': 'updates', 'title': 'Updates', 'items': update_items},
                 {'id': 'dlc', 'title': 'DLC', 'items': dlc_items},
-                {'id': 'all', 'title': 'All', 'items': all_items}
+                {
+                    'id': 'all',
+                    'title': 'All',
+                    'items': all_items,
+                    'total': all_total,
+                    'truncated': len(all_items) < all_total
+                }
             ]
         }
-    finally:
-        titles.identification_in_progress_count -= 1
-        titles.unload_titledb()
 
 def _refresh_shop_sections_cache(limit):
     global shop_sections_refresh_running
@@ -521,12 +1069,9 @@ def _refresh_shop_sections_cache(limit):
         try:
             with app.app_context():
                 now = time.time()
+                state_token = _get_titledb_aware_state_token()
                 payload = _build_shop_sections_payload(limit)
-                with shop_sections_cache_lock:
-                    shop_sections_cache['payload'] = payload
-                    shop_sections_cache['limit'] = limit
-                    shop_sections_cache['timestamp'] = now
-                _save_shop_sections_cache_to_disk(payload, limit, now)
+                _store_shop_sections_cache(payload, limit, now, state_token, persist_disk=True)
         finally:
             with shop_sections_refresh_lock:
                 shop_sections_refresh_running = False
@@ -588,7 +1133,12 @@ def api_success(data=None, message=None):
 # Input validation constants and helpers
 MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100MB for keys.txt files
 MAX_LIBRARY_UPLOAD_SIZE = 64 * 1024 * 1024 * 1024  # 64GB for game files
+MAX_SAVE_UPLOAD_SIZE = 4 * 1024 * 1024 * 1024  # 4GB for save archives
+SAVE_SYNC_DIR = os.path.join(DATA_DIR, 'saves')
 MAX_TITLE_ID_LENGTH = 16
+MAX_SAVE_NOTE_LENGTH = 120
+MAX_SAVE_ID_LENGTH = 96
+SAVE_ID_RE = re.compile(r'^[A-Za-z0-9._-]+$')
 
 def validate_title_id(title_id):
     """Validate title_id format (should be 16 hex characters)."""
@@ -617,6 +1167,352 @@ def validate_library_file_size(file_size):
         return False, f"File size exceeds maximum limit of {MAX_LIBRARY_UPLOAD_SIZE // (1024*1024*1024)}GB"
     return True, None
 
+
+def _normalize_save_title_id(raw_title_id):
+    title_id = str(raw_title_id or '').strip().upper()
+    if title_id.startswith('0X'):
+        title_id = title_id[2:]
+    if title_id.endswith('.ZIP'):
+        title_id = title_id[:-4]
+    if len(title_id) != MAX_TITLE_ID_LENGTH:
+        return None
+    if not all(c in '0123456789ABCDEF' for c in title_id):
+        return None
+    return title_id
+
+
+def _resolve_save_sync_user():
+    user = None
+    try:
+        if current_user.is_authenticated:
+            user = current_user
+    except Exception:
+        user = None
+
+    if user is None:
+        auth = request.authorization
+        if not auth or not auth.username or not auth.password:
+            return None, 'Save sync requires username/password authentication.', 401
+
+        user = User.query.filter_by(user=auth.username).first()
+        if user is None or not check_password_hash(user.password, auth.password):
+            return None, 'Invalid save sync credentials.', 401
+
+        if bool(getattr(user, 'frozen', False)):
+            message = (getattr(user, 'frozen_message', None) or '').strip() or 'Account is frozen.'
+            return None, message, 403
+
+        if not user.has_shop_access():
+            return None, f'User "{auth.username}" does not have access to the shop.', 403
+
+    if not bool(getattr(user, 'backup_access', False)):
+        return None, 'Backup access is required for save sync.', 403
+
+    return user, None, None
+
+
+def _save_sync_user_dir(user):
+    user_name = str(getattr(user, 'user', '') or '').strip()
+    user_key = secure_filename(user_name)
+    user_id = getattr(user, 'id', None)
+    if not user_key and user_id is not None:
+        user_key = secure_filename(str(user_id))
+    if not user_key:
+        user_key = 'unknown'
+
+    return os.path.join(SAVE_SYNC_DIR, user_key)
+
+
+def _normalize_save_id(raw_save_id):
+    save_id = secure_filename(str(raw_save_id or '').strip())
+    if save_id.lower().endswith('.zip'):
+        save_id = save_id[:-4]
+    if not save_id or len(save_id) > MAX_SAVE_ID_LENGTH:
+        return None
+    if not SAVE_ID_RE.match(save_id):
+        return None
+    return save_id
+
+
+def _normalize_save_note(raw_note):
+    note = ' '.join(str(raw_note or '').split()).strip()
+    if len(note) > MAX_SAVE_NOTE_LENGTH:
+        note = note[:MAX_SAVE_NOTE_LENGTH].rstrip()
+    return note
+
+
+def _save_sync_resolve_note():
+    for key in ('note', 'save_note', 'saveNote'):
+        value = request.form.get(key)
+        if value is not None:
+            return _normalize_save_note(value)
+    return ''
+
+
+def _save_sync_title_dir(user, title_id):
+    return os.path.join(_save_sync_user_dir(user), title_id)
+
+
+def _save_sync_archive_path(user, title_id, save_id=None):
+    if save_id:
+        return os.path.join(_save_sync_title_dir(user, title_id), f'{save_id}.zip')
+    # Legacy single-save path.
+    return os.path.join(_save_sync_user_dir(user), f'{title_id}.zip')
+
+
+def _save_sync_metadata_path(user, title_id, save_id):
+    return os.path.join(_save_sync_title_dir(user, title_id), f'{save_id}.json')
+
+
+def _save_sync_format_created_at(created_ts):
+    try:
+        ts = int(created_ts or 0)
+    except Exception:
+        ts = 0
+    if ts <= 0:
+        ts = int(time.time())
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(ts))
+
+
+def _save_sync_parse_created_ts(raw_value):
+    if raw_value is None:
+        return 0
+    try:
+        import datetime as dt_mod
+
+        if isinstance(raw_value, (int, float)):
+            value = int(raw_value)
+            return value if value > 0 else 0
+        text = str(raw_value).strip()
+        if not text:
+            return 0
+        if text.isdigit():
+            value = int(text)
+            return value if value > 0 else 0
+        if text.endswith('Z'):
+            dt = dt_mod.datetime.strptime(text, '%Y-%m-%dT%H:%M:%SZ')
+            return int(dt.timestamp())
+        dt = dt_mod.datetime.fromisoformat(text)
+        return int(dt.timestamp())
+    except Exception:
+        return 0
+
+
+def _save_sync_generate_save_id(note=''):
+    timestamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+    nonce = secrets.token_hex(3)
+    note_token = secure_filename(note or '').strip('._-')
+    if note_token:
+        note_token = note_token[:32]
+        return f'{timestamp}_{nonce}_{note_token}'
+    return f'{timestamp}_{nonce}'
+
+
+def _save_sync_read_metadata(path):
+    try:
+        with open(path, 'r', encoding='utf-8') as handle:
+            data = json.load(handle)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_sync_write_metadata(path, data):
+    temp_path = path + '.tmp'
+    with open(temp_path, 'w', encoding='utf-8') as handle:
+        json.dump(data, handle, ensure_ascii=False, separators=(',', ':'))
+    os.replace(temp_path, path)
+
+
+def _save_sync_collect_versions_for_title(user, title_id):
+    versions = []
+    title_dir = _save_sync_title_dir(user, title_id)
+    if os.path.isdir(title_dir):
+        try:
+            for filename in sorted(os.listdir(title_dir)):
+                if not filename.lower().endswith('.zip'):
+                    continue
+                save_id = _normalize_save_id(filename[:-4])
+                if not save_id:
+                    continue
+                archive_path = os.path.join(title_dir, filename)
+                if not os.path.isfile(archive_path):
+                    continue
+
+                try:
+                    size = int(os.path.getsize(archive_path))
+                except Exception:
+                    size = 0
+
+                meta = _save_sync_read_metadata(_save_sync_metadata_path(user, title_id, save_id))
+                created_ts = _save_sync_parse_created_ts(meta.get('created_ts'))
+                if created_ts <= 0:
+                    created_ts = _save_sync_parse_created_ts(meta.get('createdAt'))
+                if created_ts <= 0:
+                    created_ts = _save_sync_parse_created_ts(meta.get('created_at'))
+                if created_ts <= 0:
+                    try:
+                        created_ts = int(os.path.getmtime(archive_path))
+                    except Exception:
+                        created_ts = int(time.time())
+
+                created_at = str(meta.get('created_at') or meta.get('createdAt') or '').strip()
+                if not created_at:
+                    created_at = _save_sync_format_created_at(created_ts)
+
+                note = _normalize_save_note(meta.get('note'))
+                versions.append({
+                    'title_id': title_id,
+                    'save_id': save_id,
+                    'size': size,
+                    'note': note,
+                    'created_ts': int(created_ts),
+                    'created_at': created_at,
+                    'download_url': f'/api/saves/download/{title_id}/{save_id}.zip',
+                    'delete_url': f'/api/saves/delete/{title_id}/{save_id}',
+                    'archive_path': archive_path,
+                    'legacy': False,
+                })
+        except Exception as e:
+            logger.warning('Failed listing versioned saves for title %s: %s', title_id, e)
+
+    legacy_archive = _save_sync_archive_path(user, title_id)
+    if os.path.isfile(legacy_archive):
+        try:
+            legacy_size = int(os.path.getsize(legacy_archive))
+        except Exception:
+            legacy_size = 0
+        try:
+            legacy_created_ts = int(os.path.getmtime(legacy_archive))
+        except Exception:
+            legacy_created_ts = int(time.time())
+        versions.append({
+            'title_id': title_id,
+            'save_id': 'legacy',
+            'size': legacy_size,
+            'note': '',
+            'created_ts': legacy_created_ts,
+            'created_at': _save_sync_format_created_at(legacy_created_ts),
+            'download_url': f'/api/saves/download/{title_id}.zip',
+            'delete_url': f'/api/saves/delete/{title_id}',
+            'archive_path': legacy_archive,
+            'legacy': True,
+        })
+
+    versions.sort(key=lambda item: (-(int(item.get('created_ts') or 0)), str(item.get('save_id') or '')))
+    return versions
+
+
+def _save_sync_collect_versions(user):
+    user_dir = _save_sync_user_dir(user)
+    os.makedirs(user_dir, exist_ok=True)
+
+    title_ids = set()
+    try:
+        for name in os.listdir(user_dir):
+            title_id = _normalize_save_title_id(name)
+            if not title_id:
+                continue
+            path = os.path.join(user_dir, name)
+            if os.path.isdir(path) or (os.path.isfile(path) and name.lower().endswith('.zip')):
+                title_ids.add(title_id)
+    except Exception as e:
+        logger.warning('Failed reading save sync directory for user %s: %s', getattr(user, 'user', '?'), e)
+
+    saves = []
+    for title_id in sorted(title_ids):
+        saves.extend(_save_sync_collect_versions_for_title(user, title_id))
+
+    saves.sort(key=lambda item: (str(item.get('title_id') or ''), -(int(item.get('created_ts') or 0)), str(item.get('save_id') or '')))
+    return saves
+
+
+def _save_sync_resolve_download_archive(user, title_id, save_id=None):
+    versions = _save_sync_collect_versions_for_title(user, title_id)
+    if not versions:
+        return None, 'Save archive not found.'
+    if save_id:
+        normalized_save_id = _normalize_save_id(save_id)
+        if not normalized_save_id:
+            return None, 'Invalid save_id for save download.'
+        for version in versions:
+            if str(version.get('save_id') or '') == normalized_save_id:
+                return version, None
+        return None, 'Save archive not found.'
+    return versions[0], None
+
+
+def _save_sync_delete_archive(user, title_id, save_id=None):
+    selected_archive, resolve_error = _save_sync_resolve_download_archive(user, title_id, save_id=save_id)
+    if selected_archive is None:
+        return None, resolve_error or 'Save archive not found.'
+
+    archive_path = str(selected_archive.get('archive_path') or '')
+    if not archive_path or not os.path.isfile(archive_path):
+        return None, 'Save archive not found.'
+
+    selected_save_id = str(selected_archive.get('save_id') or '').strip()
+    is_legacy = bool(selected_archive.get('legacy'))
+    try:
+        os.remove(archive_path)
+    except FileNotFoundError:
+        return None, 'Save archive not found.'
+    except Exception as e:
+        logger.error('Failed deleting save archive for user %s title %s save %s: %s', getattr(user, 'user', '?'), title_id, selected_save_id or '-', e)
+        return None, 'Failed to delete save archive.'
+
+    if not is_legacy and selected_save_id:
+        try:
+            metadata_path = _save_sync_metadata_path(user, title_id, selected_save_id)
+            if os.path.isfile(metadata_path):
+                os.remove(metadata_path)
+        except Exception as e:
+            logger.warning('Failed deleting save metadata for user %s title %s save %s: %s', getattr(user, 'user', '?'), title_id, selected_save_id, e)
+
+        title_dir = _save_sync_title_dir(user, title_id)
+        try:
+            if os.path.isdir(title_dir) and not os.listdir(title_dir):
+                os.rmdir(title_dir)
+        except Exception:
+            pass
+
+    return {
+        'title_id': title_id,
+        'save_id': selected_save_id or '',
+        'legacy': is_legacy,
+    }, None
+
+
+def _save_sync_resolve_title_id(route_title_id=None):
+    route_value = _normalize_save_title_id(route_title_id)
+    if route_value:
+        return route_value
+
+    form_candidates = [
+        request.form.get('title_id'),
+        request.form.get('titleId'),
+        request.form.get('application_id'),
+        request.form.get('app_id'),
+    ]
+    for candidate in form_candidates:
+        normalized = _normalize_save_title_id(candidate)
+        if normalized:
+            return normalized
+    return None
+
+
+def save_sync_access(f):
+    @wraps(f)
+    def _save_sync_access(*args, **kwargs):
+        user, error, status = _resolve_save_sync_user()
+        if user is None:
+            return api_error(error or 'Save sync authorization failed.', status or 403)
+        g.save_sync_user = user
+        return f(*args, **kwargs)
+    return _save_sync_access
+
 @login_manager.user_loader
 def load_user(user_id):
     # since the user_id is just the primary key of our user table, use it in the query for the user
@@ -627,9 +1523,52 @@ def reload_conf():
     global watcher
     app_settings = load_settings()
 
+def _maybe_sync_request_settings():
+    global app_settings
+    global request_settings_last_sync_ts
+
+    interval = REQUEST_SETTINGS_SYNC_INTERVAL_S
+    if interval is None:
+        return
+
+    now = time.time()
+    if interval > 0 and (now - float(request_settings_last_sync_ts or 0.0)) < interval:
+        return
+
+    with request_settings_sync_lock:
+        now = time.time()
+        if interval > 0 and (now - float(request_settings_last_sync_ts or 0.0)) < interval:
+            return
+        app_settings = load_settings()
+        request_settings_last_sync_ts = now
+
+def _maybe_remove_missing_files_from_db(force=False):
+    global missing_files_last_run_ts
+    interval = MISSING_FILES_SWEEP_INTERVAL_S
+    if interval is None and not force:
+        return
+
+    now = time.time()
+    if (not force) and interval and interval > 0:
+        if (now - float(missing_files_last_run_ts or 0.0)) < float(interval):
+            return
+
+    if not missing_files_sweep_lock.acquire(blocking=False):
+        return
+    try:
+        now = time.time()
+        if (not force) and interval and interval > 0:
+            if (now - float(missing_files_last_run_ts or 0.0)) < float(interval):
+                return
+        remove_missing_files_from_db()
+        missing_files_last_run_ts = time.time()
+    finally:
+        missing_files_sweep_lock.release()
+
 def on_library_change(events):
     # TODO refactor: group modified and created together
     with app.app_context():
+        has_changes = False
         created_events = [e for e in events if e.type == 'created']
         modified_events = [e for e in events if e.type != 'created']
 
@@ -637,11 +1576,14 @@ def on_library_change(events):
             if event.type == 'moved':
                 moved_outside_library = not event.dest_path or not event.dest_path.startswith(event.directory)
                 if moved_outside_library:
+                    if file_exists_in_db(event.src_path):
+                        has_changes = True
                     delete_file_by_filepath(event.src_path)
                     continue
                 if file_exists_in_db(event.src_path):
                     # update the path
                     update_file_path(event.directory, event.src_path, event.dest_path)
+                    has_changes = True
                 else:
                     # add to the database
                     event.src_path = event.dest_path
@@ -649,28 +1591,36 @@ def on_library_change(events):
 
             elif event.type == 'deleted':
                 # delete the file from library if it exists
+                if file_exists_in_db(event.src_path):
+                    has_changes = True
                 delete_file_by_filepath(event.src_path)
 
             elif event.type == 'modified':
                 # can happen if file copy has started before the app was running
+                if file_exists_in_db(event.src_path):
+                    continue
                 add_files_to_library(event.directory, [event.src_path])
+                has_changes = True
 
         if created_events:
             directories = list(set(e.directory for e in created_events))
             for library_path in directories:
                 new_files = [e.src_path for e in created_events if e.directory == library_path]
                 add_files_to_library(library_path, new_files)
+                if new_files:
+                    has_changes = True
 
-    post_library_change()
+    if has_changes:
+        post_library_change()
 
 def create_app():
     app = Flask(__name__)
-    app.config["SQLALCHEMY_DATABASE_URI"] = OWNFOIL_DB
+    app.config["SQLALCHEMY_DATABASE_URI"] = AEROFOIL_DB
     # Generate secret key from environment variable or create random one
-    secret_key = os.getenv('OWNFOIL_SECRET_KEY')
+    secret_key = os.getenv('AEROFOIL_SECRET_KEY') or os.getenv('OWNFOIL_SECRET_KEY')
     if not secret_key:
         secret_key = secrets.token_hex(32)
-        logger.warning('SECRET_KEY not set in environment. Generated random key. Set OWNFOIL_SECRET_KEY for production.')
+        logger.warning('SECRET_KEY not set in environment. Generated random key. Set AEROFOIL_SECRET_KEY for production.')
     app.config['SECRET_KEY'] = secret_key
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
@@ -724,6 +1674,8 @@ _connected_clients = {}
 _recent_access_lock = threading.Lock()
 _recent_access = {}
 
+_CLIENT_SEEN_META_PREFIX = 'client_meta:'
+
 _transfer_sessions_lock = threading.Lock()
 _transfer_sessions = {}
 
@@ -749,6 +1701,8 @@ def _effective_remote_addr():
     # Use trusted proxy config to resolve the true client IP.
     # Cache in `g` so multiple log calls per request are consistent and cheap.
     try:
+        if has_request_context() and hasattr(g, '_aerofoil_effective_remote_addr'):
+            return g._aerofoil_effective_remote_addr
         if has_request_context() and hasattr(g, '_ownfoil_effective_remote_addr'):
             return g._ownfoil_effective_remote_addr
     except Exception:
@@ -767,7 +1721,7 @@ def _effective_remote_addr():
     remote = (remote or (request.remote_addr or '-') or '-').strip()
     try:
         if has_request_context():
-            g._ownfoil_effective_remote_addr = remote
+            g._aerofoil_effective_remote_addr = remote
     except Exception:
         pass
     return remote
@@ -777,7 +1731,98 @@ def _client_key():
     user = _get_request_user() or '-'
     remote = _effective_remote_addr() or '-'
     ua = request.headers.get('User-Agent') or '-'
-    return f"{user}|{remote}|{ua}"[:512]
+    uid = ''
+    try:
+        if all(header in request.headers for header in TINFOIL_HEADERS):
+            uid = (request.headers.get('Uid') or '').strip()
+    except Exception:
+        uid = ''
+    return f"{user}|{remote}|{ua}|{uid}"[:512]
+
+
+def _extract_tinfoil_client_meta():
+    try:
+        if not all(header in request.headers for header in TINFOIL_HEADERS):
+            return {}
+    except Exception:
+        return {}
+
+    def _val(name, max_len=256):
+        try:
+            return str(request.headers.get(name) or '').strip()[:max_len]
+        except Exception:
+            return ''
+
+    out = {
+        'theme': _val('Theme', 128),
+        'uid': _val('Uid', 128),
+        'version': _val('Version', 64),
+        'revision': _val('Revision', 64),
+        'language': _val('Language', 64),
+        'hauth': _val('Hauth', 256),
+        'uauth': _val('Uauth', 256),
+    }
+    return {k: v for k, v in out.items() if v}
+
+
+def _encode_client_seen_meta(meta):
+    if not isinstance(meta, dict) or not meta:
+        return None
+    payload = {}
+    for key in ('theme', 'uid', 'version', 'revision', 'language', 'hauth', 'uauth'):
+        try:
+            value = str(meta.get(key) or '').strip()
+        except Exception:
+            value = ''
+        if value:
+            payload[key] = value[:256]
+    if not payload:
+        return None
+    try:
+        return _CLIENT_SEEN_META_PREFIX + json.dumps(payload, separators=(',', ':'))
+    except Exception:
+        return None
+
+
+def _decode_client_seen_meta(raw):
+    try:
+        text = str(raw or '')
+    except Exception:
+        return {}
+    if not text.startswith(_CLIENT_SEEN_META_PREFIX):
+        return {}
+    try:
+        data = json.loads(text[len(_CLIENT_SEEN_META_PREFIX):])
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    out = {}
+    for key in ('theme', 'uid', 'version', 'revision', 'language', 'hauth', 'uauth'):
+        try:
+            value = str(data.get(key) or '').strip()
+        except Exception:
+            value = ''
+        if value:
+            out[key] = value[:256]
+    return out
+
+
+def _attach_client_meta(items):
+    for item in (items or []):
+        if not isinstance(item, dict):
+            continue
+
+        decoded = _decode_client_seen_meta(item.get('filename'))
+        for key in ('theme', 'uid', 'version', 'revision', 'language', 'hauth', 'uauth'):
+            value = item.get(key)
+            if value in (None, ''):
+                value = decoded.get(key)
+            if value in (None, ''):
+                value = ''
+            item[key] = value
+    return items
 
 
 def _touch_client():
@@ -795,6 +1840,9 @@ def _touch_client():
         'remote_addr': remote,
         'user_agent': request.headers.get('User-Agent'),
     }
+    tinfoil_meta = _extract_tinfoil_client_meta()
+    if tinfoil_meta:
+        meta.update(tinfoil_meta)
     key = _client_key()
     with _connected_clients_lock:
         existing = _connected_clients.get(key) or {}
@@ -811,6 +1859,7 @@ def _touch_client():
             user=meta.get('user'),
             remote_addr=meta.get('remote_addr'),
             user_agent=meta.get('user_agent'),
+            filename=_encode_client_seen_meta(tinfoil_meta),
             ok=True,
             status_code=200,
         )
@@ -1140,7 +2189,64 @@ def _job_log(job_id, message):
         job = conversion_jobs.get(job_id)
         if not job:
             return
+        suppress_traceback = bool(job.get('_suppress_traceback'))
+        if message.startswith('Traceback (most recent call last):'):
+            job['_suppress_traceback'] = True
+            if not job.get('_traceback_notice_emitted'):
+                job['_traceback_notice_emitted'] = True
+                job['logs'].append('Converter traceback suppressed. Showing concise error summary.')
+            job['updated_at'] = time.time()
+            return
+        if message.startswith('During handling of the above exception'):
+            job['_suppress_traceback'] = True
+            job['updated_at'] = time.time()
+            return
+        if suppress_traceback:
+            if re.match(r'^\s*File ".*", line \d+, in .+$', message):
+                job['updated_at'] = time.time()
+                return
+            if re.match(r'^\s*~+.*$', message):
+                job['updated_at'] = time.time()
+                return
+            if re.match(r'^\s*[A-Za-z_][A-Za-z0-9_.]*: .*$', message):
+                # Exception summary line; stop traceback suppression after this.
+                job['_suppress_traceback'] = False
+            elif message.strip() == '':
+                job['updated_at'] = time.time()
+                return
+            else:
+                job['updated_at'] = time.time()
+                return
+
+        verification_error_match = re.search(
+            r'VerificationException:\s*Verification detected hash mismatch',
+            message,
+            re.IGNORECASE
+        )
+        permission_32_match = re.search(r'PermissionError:.*WinError\s*32', message, re.IGNORECASE)
+        bad_verify_match = re.search(r'^\[BAD VERIFY\]\s+(.+)$', message)
+        delete_failed_output_match = re.search(r'^\[DELETE NSZ\]\s+(.+)$', message)
+        compress_error_match = re.search(r'^Error while compressing file:\s+(.+)$', message)
+
+        if verification_error_match:
+            message = 'Verification failed: hash mismatch detected. Source file is likely bad or corrupted.'
+        elif permission_32_match:
+            message = 'Cleanup warning: failed output file is in use (WinError 32), so automatic delete failed.'
+        elif bad_verify_match:
+            bad_path = str(bad_verify_match.group(1) or '').strip()
+            bad_name = os.path.basename(bad_path) if bad_path else bad_path
+            message = f"Verification failed for output: {bad_name or bad_path}."
+        elif delete_failed_output_match:
+            out_path = str(delete_failed_output_match.group(1) or '').strip()
+            out_name = os.path.basename(out_path) if out_path else out_path
+            message = f"Removing failed output: {out_name or out_path}."
+        elif compress_error_match:
+            in_path = str(compress_error_match.group(1) or '').strip()
+            in_name = os.path.basename(in_path) if in_path else in_path
+            message = f"Conversion failed for input: {in_name or in_path}."
+
         percent_match = re.search(r'Compressed\s+([0-9.]+)%', message)
+        minimal_progress_match = re.search(r'^\s*(?:[^0-9]{1,4}\s*)?([0-9]{1,3}(?:\.[0-9]+)?)%\s*(.*)$', message)
         numeric_match = re.fullmatch(r'\d{1,3}', message)
         convert_match = re.search(r'^\[CONVERT\]\s+(.+?)\s+->\s+(.+)$', message)
         verify_match = re.search(r'^\[VERIFY\]\s+(.+)$', message)
@@ -1152,7 +2258,36 @@ def _job_log(job_id, message):
                     job['progress']['percent'] = float(percent_value)
                     stage = job['progress'].get('stage') or 'converting'
                     label = 'Verifying' if stage == 'verifying' else 'Converting'
-                    job['progress']['message'] = f"{label}: {percent_value}%"
+                    file_name = (job['progress'].get('file') or '').strip()
+                    file_suffix = f" ({file_name})" if file_name else ''
+                    job['progress']['message'] = f"{label}: {percent_value}%{file_suffix}"
+                    job['updated_at'] = time.time()
+                    return
+            except ValueError:
+                pass
+        if minimal_progress_match:
+            try:
+                percent_value = float(minimal_progress_match.group(1))
+                if 0 <= percent_value <= 100:
+                    status_hint = (minimal_progress_match.group(2) or '').strip()
+                    status_hint_lower = status_hint.lower()
+                    stage = job['progress'].get('stage') or 'converting'
+                    if 'verif' in status_hint_lower:
+                        stage = 'verifying'
+                    elif 'compress' in status_hint_lower or 'convert' in status_hint_lower:
+                        stage = 'converting'
+                    job['progress']['stage'] = stage
+                    file_match = re.search(r'([^\s].*\.(?:nsp|nsz|xci|xcz|nca|ncz))', status_hint, re.IGNORECASE)
+                    if file_match:
+                        status_file = os.path.basename(file_match.group(1).strip())
+                        if status_file:
+                            job['progress']['file'] = status_file
+                    job['progress']['percent'] = percent_value
+                    label = 'Verifying' if stage == 'verifying' else 'Converting'
+                    file_name = (job['progress'].get('file') or '').strip()
+                    file_suffix = f" ({file_name})" if file_name else ''
+                    suffix = f" - {status_hint}" if status_hint else ''
+                    job['progress']['message'] = f"{label}: {percent_value:.0f}%{file_suffix}{suffix}"
                     job['updated_at'] = time.time()
                     return
             except ValueError:
@@ -1162,7 +2297,9 @@ def _job_log(job_id, message):
                 job['progress']['percent'] = float(percent_match.group(1))
                 stage = job['progress'].get('stage') or 'converting'
                 label = 'Verifying' if stage == 'verifying' else 'Converting'
-                job['progress']['message'] = f"{label}: {job['progress']['percent']:.0f}%"
+                file_name = (job['progress'].get('file') or '').strip()
+                file_suffix = f" ({file_name})" if file_name else ''
+                job['progress']['message'] = f"{label}: {job['progress']['percent']:.0f}%{file_suffix}"
                 job['updated_at'] = time.time()
                 return
             except ValueError:
@@ -1229,6 +2366,34 @@ def _job_finish(job_id, results):
             'deleted': results.get('deleted', 0),
             'moved': results.get('moved', 0)
         }
+        progress = job.setdefault('progress', {})
+        kind = str(job.get('kind') or '')
+        total = int(progress.get('total') or 0)
+        if kind == 'convert-single':
+            total = max(total, 1)
+            progress['total'] = total
+            progress['done'] = total
+        else:
+            if total > 0:
+                progress['done'] = total
+            else:
+                estimated_total = int(job['summary'].get('converted', 0) or 0) + int(job['summary'].get('skipped', 0) or 0)
+                if estimated_total > 0:
+                    progress['total'] = estimated_total
+                    progress['done'] = estimated_total
+        final_total = int(progress.get('total') or 0)
+        final_done = int(progress.get('done') or 0)
+        if final_total > 0 and final_done >= final_total:
+            progress['percent'] = 100.0
+        if job['status'] == 'success':
+            progress['message'] = 'Conversion complete.'
+            progress['stage'] = 'completed'
+        elif job['status'] == 'cancelled':
+            progress['message'] = 'Conversion cancelled.'
+            progress['stage'] = 'cancelled'
+        else:
+            progress['message'] = 'Conversion failed.'
+            progress['stage'] = 'failed'
         job['updated_at'] = time.time()
         if len(conversion_jobs) > conversion_job_limit:
             oldest = sorted(conversion_jobs.values(), key=lambda item: item['created_at'])[:len(conversion_jobs) - conversion_job_limit]
@@ -1243,7 +2408,7 @@ def _job_is_cancelled(job_id):
 def tinfoil_access(f):
     @wraps(f)
     def _tinfoil_access(*args, **kwargs):
-        reload_conf()
+        _maybe_sync_request_settings()
         hauth_success = None
         auth_success = None
         request.verified_host = None
@@ -1437,7 +2602,7 @@ def index():
             # enforce client side host verification
             shop["referrer"] = f"https://{request.verified_host}"
             
-        shop["files"] = gen_shop_files(db)
+        shop["files"] = _get_cached_shop_files()
 
         if _is_cyberfoil_request():
             _log_access(
@@ -1449,7 +2614,12 @@ def index():
             )
 
         if app_settings['shop']['encrypt']:
-            return Response(encrypt_shop(shop, app_settings['shop'].get('public_key')), mimetype='application/octet-stream')
+            encrypted = _get_cached_encrypted_shop_payload(
+                shop,
+                public_key=app_settings['shop'].get('public_key'),
+                verified_host=request.verified_host
+            )
+            return Response(encrypted, mimetype='application/octet-stream')
 
         return jsonify(shop)
     
@@ -1505,6 +2675,14 @@ def manage_page():
         title='Manage',
         admin_account_created=admin_account_created())
 
+@app.route('/downloads')
+@access_required('admin')
+def downloads_page():
+    return render_template(
+        'downloads.html',
+        title='Downloads',
+        admin_account_created=admin_account_created())
+
 @app.route('/upload')
 @access_required('admin')
 def upload_page():
@@ -1541,6 +2719,15 @@ def requests_page():
         admin_account_created=admin_account_created())
 
 
+@app.route('/saves')
+@access_required('backup')
+def saves_page():
+    return render_template(
+        'saves.html',
+        title='Save Data Backups',
+        admin_account_created=admin_account_created())
+
+
 @app.post('/api/requests')
 @access_required('shop')
 def create_title_request_api():
@@ -1573,22 +2760,40 @@ def list_requests_api():
     # Auto-close open requests whose titles are now in the library.
     # This keeps the requests list actionable without requiring manual admin cleanup.
     try:
-        open_ids = [r.id for r in (items or []) if getattr(r, 'status', None) == 'open' and getattr(r, 'title_id', None)]
-        if open_ids:
-            reqs = TitleRequests.query.filter(TitleRequests.id.in_(open_ids)).all()
-            changed = 0
-            for r in (reqs or []):
-                try:
-                    title_id = (r.title_id or '').strip().upper()
-                    if not title_id:
-                        continue
-                    if Titles.query.filter_by(title_id=title_id).first() is not None:
-                        r.status = 'closed'
-                        changed += 1
-                except Exception:
-                    continue
-            if changed:
-                db.session.commit()
+        open_requests = [
+            r for r in (items or [])
+            if getattr(r, 'status', None) == 'open' and getattr(r, 'title_id', None)
+        ]
+        if open_requests:
+            open_ids = [r.id for r in open_requests if r.id is not None]
+            open_title_ids = sorted({
+                str(getattr(r, 'title_id', '') or '').strip().upper()
+                for r in open_requests
+            })
+            open_title_ids = [tid for tid in open_title_ids if tid]
+            if open_ids and open_title_ids:
+                existing_title_ids = {
+                    row.title_id
+                    for row in (
+                        db.session.query(Titles.title_id)
+                        .filter(Titles.title_id.in_(open_title_ids))
+                        .all()
+                    )
+                    if row.title_id
+                }
+                if existing_title_ids:
+                    changed = (
+                        db.session.query(TitleRequests)
+                        .filter(TitleRequests.id.in_(open_ids))
+                        .filter(TitleRequests.status == 'open')
+                        .filter(TitleRequests.title_id.in_(existing_title_ids))
+                        .update({TitleRequests.status: 'closed'}, synchronize_session=False)
+                    )
+                    if changed:
+                        db.session.commit()
+                        for r in open_requests:
+                            if str(getattr(r, 'title_id', '') or '').strip().upper() in existing_title_ids:
+                                r.status = 'closed'
     except Exception:
         try:
             db.session.rollback()
@@ -1637,13 +2842,10 @@ def admin_unseen_requests_count_api():
 def admin_mark_requests_seen_api():
     data = request.json or {}
     ids = data.get('request_ids')
+    mark_all_open = not ids
 
-    # Default: mark all open requests as seen.
-    if not ids:
-        try:
-            ids = [r[0] for r in db.session.query(TitleRequests.id).filter(TitleRequests.status == 'open').all()]
-        except Exception:
-            ids = []
+    if mark_all_open:
+        ids = []
 
     try:
         ids = [int(x) for x in (ids or [])]
@@ -1651,7 +2853,7 @@ def admin_mark_requests_seen_api():
         return api_error('Invalid request_ids.', 400)
 
     ids = list(dict.fromkeys([x for x in ids if x > 0]))
-    if not ids:
+    if not ids and not mark_all_open:
         return jsonify({'success': True, 'message': 'Nothing to mark.', 'marked': 0})
 
     now = None
@@ -1661,16 +2863,63 @@ def admin_mark_requests_seen_api():
         now = None
 
     try:
-        marked = 0
-        for req_id in ids:
-            exists = TitleRequestViews.query.filter_by(user_id=current_user.id, request_id=req_id).first()
-            if exists is not None:
-                continue
-            view = TitleRequestViews(user_id=current_user.id, request_id=req_id)
-            if now is not None:
-                view.viewed_at = now
-            db.session.add(view)
-            marked += 1
+        ts = now or datetime.utcnow()
+
+        if mark_all_open:
+            select_stmt = (
+                db.session.query(
+                    literal(int(current_user.id)).label('user_id'),
+                    TitleRequests.id.label('request_id'),
+                    literal(ts).label('viewed_at'),
+                )
+                .outerjoin(
+                    TitleRequestViews,
+                    (TitleRequestViews.request_id == TitleRequests.id)
+                    & (TitleRequestViews.user_id == current_user.id),
+                )
+                .filter(TitleRequests.status == 'open')
+                .filter(TitleRequestViews.id.is_(None))
+            )
+            stmt = (
+                insert(TitleRequestViews)
+                .from_select(['user_id', 'request_id', 'viewed_at'], select_stmt)
+                .on_conflict_do_nothing(index_elements=['user_id', 'request_id'])
+            )
+            result = db.session.execute(stmt)
+            try:
+                marked = int(result.rowcount or 0)
+            except Exception:
+                marked = 0
+            if marked < 0:
+                marked = 0
+        else:
+            existing_ids = {
+                row.request_id
+                for row in (
+                    db.session.query(TitleRequestViews.request_id)
+                    .filter(TitleRequestViews.user_id == current_user.id)
+                    .filter(TitleRequestViews.request_id.in_(ids))
+                    .all()
+                )
+                if row.request_id is not None
+            }
+            to_insert = [
+                {'user_id': current_user.id, 'request_id': req_id, 'viewed_at': ts}
+                for req_id in ids
+                if req_id not in existing_ids
+            ]
+            marked = 0
+            if to_insert:
+                stmt = (
+                    insert(TitleRequestViews)
+                    .values(to_insert)
+                    .on_conflict_do_nothing(index_elements=['user_id', 'request_id'])
+                )
+                result = db.session.execute(stmt)
+                try:
+                    marked = int(result.rowcount or 0)
+                except Exception:
+                    marked = len(to_insert)
         db.session.commit()
         return jsonify({'success': True, 'message': 'Marked seen.', 'marked': int(marked)})
     except Exception as e:
@@ -1706,6 +2955,30 @@ def admin_delete_request_api():
         return api_error(str(e), 500)
 
 
+def _apply_download_search_char_replacements(text, downloads_settings):
+    out = str(text or '')
+    for rule in (downloads_settings or {}).get('search_char_replacements') or []:
+        if not isinstance(rule, dict):
+            continue
+        from_text = str(rule.get('from') or '')
+        to_text = str(rule.get('to') or '')
+        if not from_text:
+            continue
+        out = out.replace(from_text, to_text)
+    return out
+
+
+def _normalize_download_search_query(text, downloads_settings=None):
+    normalized = _apply_download_search_char_replacements(text, downloads_settings)
+    try:
+        normalized = unicodedata.normalize('NFKD', normalized)
+        normalized = normalized.encode('ascii', 'ignore').decode('ascii')
+    except Exception:
+        normalized = str(normalized or '')
+    normalized = re.sub(r"[^A-Za-z0-9\s]+", " ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
 @app.get('/api/requests/search')
 @access_required('admin')
 def request_prowlarr_search_api():
@@ -1728,18 +3001,26 @@ def request_prowlarr_search_api():
             info = titles.get_game_info(title_id) or {}
             resolved_name = (info.get('name') or '').strip() or resolved_name
         finally:
-            titles.identification_in_progress_count -= 1
-            titles.unload_titledb()
+            titles.release_titledb()
 
-    base_query = resolved_name or title_id
-    prefix = (downloads.get('search_prefix') or '').strip()
+    base_query = _normalize_download_search_query(resolved_name or title_id, downloads)
+    prefix = _normalize_download_search_query(downloads.get('search_prefix') or '', downloads)
     full_query = base_query
     if prefix and not full_query.lower().startswith(prefix.lower()):
         full_query = f"{prefix} {full_query}".strip()
 
     try:
-        client = ProwlarrClient(prowlarr_cfg['url'], prowlarr_cfg['api_key'])
-        results = client.search(full_query, indexer_ids=prowlarr_cfg.get('indexer_ids') or [])
+        try:
+            timeout_seconds = int(prowlarr_cfg.get('timeout_seconds') or 15)
+        except (TypeError, ValueError):
+            timeout_seconds = 15
+        timeout_seconds = max(5, min(timeout_seconds, 180))
+        client = ProwlarrClient(prowlarr_cfg['url'], prowlarr_cfg['api_key'], timeout_seconds=timeout_seconds)
+        results = client.search(
+            full_query,
+            indexer_ids=prowlarr_cfg.get('indexer_ids') or [],
+            categories=prowlarr_cfg.get('categories') or [],
+        )
         trimmed = [
             {
                 'title': r.get('title'),
@@ -1782,6 +3063,7 @@ def admin_activity_api():
                 _connected_clients[k] = v
 
     clients = sorted(clients, key=lambda item: item.get('last_seen_at', 0), reverse=True)[:250]
+    _attach_client_meta(clients)
 
     # Recent access events.
     history_error = None
@@ -1847,6 +3129,7 @@ def admin_clients_history_api():
     limit = max(1, min(limit, 2000))
     try:
         history = get_access_events(limit=limit, kinds=['client_seen'])
+        _attach_client_meta(history)
         return jsonify({'success': True, 'history': history})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e), 'history': []}), 500
@@ -1864,6 +3147,7 @@ def admin_clients_history_csv_api():
 
     try:
         items = get_access_events(limit=limit, kinds=['client_seen'])
+        _attach_client_meta(items)
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -1873,7 +3157,7 @@ def admin_clients_history_csv_api():
 
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator='\n')
-    writer.writerow(['at', 'user', 'remote_addr', 'user_agent'])
+    writer.writerow(['at', 'user', 'remote_addr', 'user_agent', 'theme', 'uid', 'version', 'revision', 'language', 'hauth', 'uauth'])
     for item in (items or []):
         at = item.get('at')
         at_iso = ''
@@ -1887,6 +3171,13 @@ def admin_clients_history_csv_api():
             item.get('user') or '',
             item.get('remote_addr') or '',
             item.get('user_agent') or '',
+            item.get('theme') or '',
+            item.get('uid') or '',
+            item.get('version') or '',
+            item.get('revision') or '',
+            item.get('language') or '',
+            item.get('hauth') or '',
+            item.get('uauth') or '',
         ])
 
     csv_text = buf.getvalue()
@@ -1929,9 +3220,11 @@ def admin_access_history_clear_api():
 def get_settings_api():
     reload_conf()
     settings = copy.deepcopy(app_settings)
+    settings.setdefault('shop', {})
     hauth_value = settings['shop'].get('hauth')
     settings['shop']['hauth_value'] = hauth_value or ''
     settings['shop']['hauth'] = bool(hauth_value)
+    settings['shop']['fast_transfer_mode'] = bool(settings['shop'].get('fast_transfer_mode'))
 
     # Surface the effective public key in the UI even if it isn't in settings.yaml yet.
     settings['shop']['public_key'] = settings['shop'].get('public_key') or TINFOIL_PUBLIC_KEY
@@ -1990,8 +3283,24 @@ def set_titles_settings_api():
 @app.post('/api/settings/shop')
 @access_required('admin')
 def set_shop_settings_api():
-    data = request.json
-    set_shop_settings(data)
+    data = request.json or {}
+    security_fields = {
+        'auth_ip_lockout_enabled',
+        'auth_ip_lockout_threshold',
+        'auth_ip_lockout_window_seconds',
+        'auth_ip_lockout_duration_seconds',
+        'auth_permanent_ip_blacklist',
+    }
+    shop_data = dict(data)
+    security_data = {}
+    for key in list(shop_data.keys()):
+        if key in security_fields:
+            security_data[key] = shop_data.pop(key)
+
+    shop_data.setdefault('host', '')
+    set_shop_settings(shop_data)
+    if security_data:
+        set_security_settings(security_data)
     reload_conf()
     resp = {
         'success': True,
@@ -2056,11 +3365,30 @@ def refresh_media_cache_api():
         'removed_banners': removed_banners
     })
 
+def _get_media_prefetch_ids():
+    title_ids = {
+        str(row.title_id or '').strip().upper()
+        for row in db.session.query(Titles.title_id).all()
+        if row.title_id
+    }
+    app_ids = {
+        str(row.app_id or '').strip().upper()
+        for row in (
+            db.session.query(Apps.app_id)
+            .filter(Apps.owned.is_(True))
+            .distinct()
+            .all()
+        )
+        if row.app_id
+    }
+    all_ids = {value for value in (title_ids | app_ids) if value}
+    return sorted(all_ids)
+
 
 @app.post('/api/settings/media-cache/prefetch-icons')
 @access_required('admin')
 def prefetch_media_icons_api():
-    titles_library = generate_library()
+    prefetch_ids = _get_media_prefetch_ids()
     cache_dir = os.path.join(CACHE_DIR, 'icons')
     os.makedirs(cache_dir, exist_ok=True)
 
@@ -2069,12 +3397,11 @@ def prefetch_media_icons_api():
     missing = 0
     failed = 0
     failures = []
-    headers = {'User-Agent': 'Ownfoil/1.0'}
+    headers = {'User-Agent': 'AeroFoil/1.0'}
 
     titles.load_titledb()
     try:
-        for entry in titles_library:
-            title_id = (entry.get('title_id') or entry.get('id') or '').upper()
+        for title_id in prefetch_ids:
             if not title_id:
                 missing += 1
                 continue
@@ -2123,8 +3450,7 @@ def prefetch_media_icons_api():
                         'message': str(e)
                     })
     finally:
-        titles.identification_in_progress_count -= 1
-        titles.unload_titledb()
+        titles.release_titledb()
 
     return jsonify({
         'success': True,
@@ -2139,7 +3465,7 @@ def prefetch_media_icons_api():
 @app.post('/api/settings/media-cache/prefetch-banners')
 @access_required('admin')
 def prefetch_media_banners_api():
-    titles_library = generate_library()
+    prefetch_ids = _get_media_prefetch_ids()
     cache_dir = os.path.join(CACHE_DIR, 'banners')
     os.makedirs(cache_dir, exist_ok=True)
 
@@ -2148,12 +3474,11 @@ def prefetch_media_banners_api():
     missing = 0
     failed = 0
     failures = []
-    headers = {'User-Agent': 'Ownfoil/1.0'}
+    headers = {'User-Agent': 'AeroFoil/1.0'}
 
     titles.load_titledb()
     try:
-        for entry in titles_library:
-            title_id = (entry.get('title_id') or entry.get('id') or '').upper()
+        for title_id in prefetch_ids:
             if not title_id:
                 missing += 1
                 continue
@@ -2202,8 +3527,7 @@ def prefetch_media_banners_api():
                         'message': str(e)
                     })
     finally:
-        titles.identification_in_progress_count -= 1
-        titles.unload_titledb()
+        titles.release_titledb()
 
     return jsonify({
         'success': True,
@@ -2221,7 +3545,12 @@ def test_downloads_prowlarr_api():
     url = data.get('url', '')
     api_key = data.get('api_key', '')
     try:
-        client = ProwlarrClient(url, api_key)
+        timeout_seconds = int(data.get('timeout_seconds') or 15)
+    except (TypeError, ValueError):
+        timeout_seconds = 15
+    timeout_seconds = max(5, min(timeout_seconds, 180))
+    try:
+        client = ProwlarrClient(url, api_key, timeout_seconds=timeout_seconds)
         status = client.system_status()
         indexer_ids = data.get('indexer_ids') or []
         warning = None
@@ -2299,16 +3628,25 @@ def downloads_search():
     if not prowlarr_cfg.get('url') or not prowlarr_cfg.get('api_key'):
         return jsonify({'success': False, 'message': 'Prowlarr is not configured.'})
     try:
-        full_query = query
+        try:
+            timeout_seconds = int(prowlarr_cfg.get('timeout_seconds') or 15)
+        except (TypeError, ValueError):
+            timeout_seconds = 15
+        timeout_seconds = max(5, min(timeout_seconds, 180))
+        full_query = _normalize_download_search_query(query, downloads)
         if apply_settings:
-            prefix = (downloads.get('search_prefix') or '').strip()
-            suffix = (downloads.get('search_suffix') or '').strip()
+            prefix = _normalize_download_search_query(downloads.get('search_prefix') or '', downloads)
+            suffix = _normalize_download_search_query(downloads.get('search_suffix') or '', downloads)
             if prefix and not full_query.lower().startswith(prefix.lower()):
                 full_query = f"{prefix} {full_query}".strip()
             if suffix and not full_query.lower().endswith(suffix.lower()):
                 full_query = f"{full_query} {suffix}".strip()
-        client = ProwlarrClient(prowlarr_cfg['url'], prowlarr_cfg['api_key'])
-        results = client.search(full_query, indexer_ids=prowlarr_cfg.get('indexer_ids') or [])
+        client = ProwlarrClient(prowlarr_cfg['url'], prowlarr_cfg['api_key'], timeout_seconds=timeout_seconds)
+        results = client.search(
+            full_query,
+            indexer_ids=prowlarr_cfg.get('indexer_ids') or [],
+            categories=prowlarr_cfg.get('categories') or [],
+        )
         if apply_settings:
             required_terms = [t.lower() for t in (downloads.get('required_terms') or []) if t]
             blacklist_terms = [t.lower() for t in (downloads.get('blacklist_terms') or []) if t]
@@ -2345,6 +3683,7 @@ def downloads_queue():
     data = request.json or {}
     download_url = data.get('download_url')
     expected_name = data.get('title')
+    title_id = data.get('title_id')
     update_only = bool(data.get('update_only', False))
     expected_version = data.get('expected_version')
     if not download_url:
@@ -2353,7 +3692,8 @@ def downloads_queue():
         download_url,
         expected_name=expected_name,
         update_only=update_only,
-        expected_version=expected_version
+        expected_version=expected_version,
+        title_id=title_id
     )
     return jsonify({'success': ok, 'message': message})
 
@@ -2379,11 +3719,43 @@ def manage_delete_updates():
         post_library_change()
     return jsonify(results)
 
+@app.post('/api/manage/delete-duplicates')
+@access_required('admin')
+def manage_delete_duplicates():
+    data = request.json or {}
+    dry_run = bool(data.get('dry_run', False))
+    verbose = bool(data.get('verbose', False))
+    results = delete_duplicates(dry_run=dry_run, verbose=verbose)
+    if results.get('success') and not dry_run:
+        post_library_change()
+    return jsonify(results)
+
 @app.post('/api/manage/check-downloads')
 @access_required('admin')
 def manage_check_downloads():
     ok, message = check_completed_downloads(scan_cb=scan_library, post_cb=post_library_change)
     return jsonify({'success': ok, 'message': message})
+
+
+@app.post('/api/downloads/check-completed')
+@access_required('admin')
+def downloads_check_completed():
+    ok, message = check_completed_downloads(scan_cb=scan_library, post_cb=post_library_change)
+    return jsonify({'success': ok, 'message': message})
+
+
+@app.get('/api/downloads/queue')
+@access_required('admin')
+def downloads_queue_state():
+    state = get_downloads_state()
+    return jsonify({'success': True, 'state': state})
+
+
+@app.get('/api/downloads/active')
+@access_required('admin')
+def downloads_active():
+    ok, message, items = get_active_downloads()
+    return jsonify({'success': ok, 'message': message, 'items': items})
 
 
 @app.get('/api/manage/downloads-queue')
@@ -2399,6 +3771,7 @@ def manage_convert_nsz():
     dry_run = bool(data.get('dry_run', False))
     delete_original = bool(data.get('delete_original', True))
     verbose = bool(data.get('verbose', False))
+    verify = bool(data.get('verify', True))
     threads = data.get('threads')
     command = data.get('command')
     results = convert_to_nsz(
@@ -2406,7 +3779,8 @@ def manage_convert_nsz():
         delete_original=delete_original,
         dry_run=dry_run,
         verbose=verbose,
-        threads=threads
+        threads=threads,
+        verify=verify
     )
     if results.get('success') and not dry_run:
         post_library_change()
@@ -2427,6 +3801,7 @@ def manage_convert_single():
     dry_run = bool(data.get('dry_run', False))
     delete_original = bool(data.get('delete_original', True))
     verbose = bool(data.get('verbose', False))
+    verify = bool(data.get('verify', True))
     threads = data.get('threads')
     command = data.get('command')
     if not file_id:
@@ -2437,7 +3812,8 @@ def manage_convert_single():
         delete_original=delete_original,
         dry_run=dry_run,
         verbose=verbose,
-        threads=threads
+        threads=threads,
+        verify=verify
     )
     if results.get('success') and not dry_run:
         post_library_change()
@@ -2450,6 +3826,7 @@ def manage_convert_job():
     dry_run = bool(data.get('dry_run', False))
     delete_original = bool(data.get('delete_original', True))
     verbose = bool(data.get('verbose', False))
+    verify = bool(data.get('verify', True))
     threads = data.get('threads')
     library_id = data.get('library_id')
     timeout_seconds = data.get('timeout_seconds')
@@ -2459,23 +3836,40 @@ def manage_convert_job():
 
     def _run_job():
         with app.app_context():
-            results = convert_to_nsz(
-                command_template=command,
-                delete_original=delete_original,
-                dry_run=dry_run,
-                verbose=verbose,
-                log_cb=lambda msg: _job_log(job_id, msg),
-                progress_cb=lambda done, total: _job_progress(job_id, done, total),
-                stream_output=True,
-                threads=threads,
-                library_id=library_id,
-                cancel_cb=lambda: _job_is_cancelled(job_id),
-                timeout_seconds=timeout_seconds,
-                min_size_bytes=200 * 1024 * 1024
-            )
-            if results.get('success') and not dry_run:
-                post_library_change()
+            try:
+                results = convert_to_nsz(
+                    command_template=command,
+                    delete_original=delete_original,
+                    dry_run=dry_run,
+                    verbose=verbose,
+                    log_cb=lambda msg: _job_log(job_id, msg),
+                    progress_cb=lambda done, total: _job_progress(job_id, done, total),
+                    stream_output=True,
+                    threads=threads,
+                    verify=verify,
+                    library_id=library_id,
+                    cancel_cb=lambda: _job_is_cancelled(job_id),
+                    timeout_seconds=timeout_seconds,
+                    min_size_bytes=200 * 1024 * 1024
+                )
+            except Exception as e:
+                db.session.rollback()
+                logger.exception('Unexpected error while running conversion job %s', job_id)
+                results = {
+                    'success': False,
+                    'converted': 0,
+                    'skipped': 0,
+                    'deleted': 0,
+                    'moved': 0,
+                    'errors': [f'Unexpected conversion job error: {e}'],
+                    'details': []
+                }
             _job_finish(job_id, results)
+            if results.get('success') and not dry_run:
+                try:
+                    post_library_change()
+                except Exception:
+                    logger.exception('Conversion job %s succeeded but post_library_change failed', job_id)
 
     thread = threading.Thread(target=_run_job, daemon=True)
     thread.start()
@@ -2489,6 +3883,7 @@ def manage_convert_single_job():
     dry_run = bool(data.get('dry_run', False))
     delete_original = bool(data.get('delete_original', True))
     verbose = bool(data.get('verbose', False))
+    verify = bool(data.get('verify', True))
     threads = data.get('threads')
     timeout_seconds = data.get('timeout_seconds')
     command = data.get('command')
@@ -2499,22 +3894,39 @@ def manage_convert_single_job():
 
     def _run_job():
         with app.app_context():
-            results = convert_single_to_nsz(
-                file_id=int(file_id),
-                command_template=command,
-                delete_original=delete_original,
-                dry_run=dry_run,
-                verbose=verbose,
-                log_cb=lambda msg: _job_log(job_id, msg),
-                progress_cb=lambda done, total: _job_progress(job_id, done, total),
-                stream_output=True,
-                threads=threads,
-                cancel_cb=lambda: _job_is_cancelled(job_id),
-                timeout_seconds=timeout_seconds
-            )
-            if results.get('success') and not dry_run:
-                post_library_change()
+            try:
+                results = convert_single_to_nsz(
+                    file_id=int(file_id),
+                    command_template=command,
+                    delete_original=delete_original,
+                    dry_run=dry_run,
+                    verbose=verbose,
+                    log_cb=lambda msg: _job_log(job_id, msg),
+                    progress_cb=lambda done, total: _job_progress(job_id, done, total),
+                    stream_output=True,
+                    threads=threads,
+                    verify=verify,
+                    cancel_cb=lambda: _job_is_cancelled(job_id),
+                    timeout_seconds=timeout_seconds
+                )
+            except Exception as e:
+                db.session.rollback()
+                logger.exception('Unexpected error while running single conversion job %s', job_id)
+                results = {
+                    'success': False,
+                    'converted': 0,
+                    'skipped': 0,
+                    'deleted': 0,
+                    'moved': 0,
+                    'errors': [f'Unexpected single conversion job error: {e}'],
+                    'details': []
+                }
             _job_finish(job_id, results)
+            if results.get('success') and not dry_run:
+                try:
+                    post_library_change()
+                except Exception:
+                    logger.exception('Single conversion job %s succeeded but post_library_change failed', job_id)
 
     thread = threading.Thread(target=_run_job, daemon=True)
     thread.start()
@@ -2558,7 +3970,7 @@ def manage_jobs_list():
 def manage_health():
     nsz_path = None
     try:
-        nsz_path = _get_nsz_exe()
+        nsz_path = _get_nsz_runner()
     except NameError:
         nsz_path = None
     keys_file = KEYS_FILE
@@ -2566,8 +3978,70 @@ def manage_health():
     return jsonify({
         'success': True,
         'nsz_exe': nsz_path,
+        'nsz_runner': nsz_path,
         'keys_file': keys_file,
         'keys_present': keys_ok
+    })
+
+@app.get('/api/manage/diagnostics/memory')
+@app.get('/api/diagnostics/memory')
+@access_required('admin')
+def manage_memory_diagnostics():
+    now = time.time()
+    with scan_lock:
+        scan_busy = bool(scan_in_progress)
+    with library_rebuild_lock:
+        rebuild_state = dict(library_rebuild_status)
+    with shop_sections_cache_lock:
+        in_memory_payload = shop_sections_cache.get('payload')
+        in_memory_limit = shop_sections_cache.get('limit')
+        in_memory_timestamp = float(shop_sections_cache.get('timestamp') or 0)
+
+    disk_cache = _load_shop_sections_cache_from_disk()
+    disk_payload = (disk_cache or {}).get('payload')
+    disk_ts = float((disk_cache or {}).get('timestamp') or 0)
+
+    sqlalchemy_diag = {
+        'current_session_identity_map_size': len(db.session.identity_map),
+        'new_count': len(getattr(db.session, 'new', []) or []),
+        'dirty_count': len(getattr(db.session, 'dirty', []) or []),
+    }
+
+    return jsonify({
+        'success': True,
+        'timestamp': now,
+        'process': _read_proc_meminfo_bytes(),
+        'python_gc': {
+            'counts': list(gc.get_count()),
+        },
+        'scan': {
+            'scan_in_progress': scan_busy,
+            'library_rebuild': rebuild_state,
+            'library_memory_diagnostics': get_memory_diagnostics(),
+        },
+        'sqlalchemy': sqlalchemy_diag,
+        'titledb': titles.get_titledb_diagnostics(),
+        'shop_sections_cache': {
+            'config': {
+                'ttl_s': SHOP_SECTIONS_CACHE_TTL_S,
+                'all_items_cap': SHOP_SECTIONS_ALL_ITEMS_CAP,
+                'max_in_memory_bytes': SHOP_SECTIONS_MAX_IN_MEMORY_BYTES,
+            },
+            'in_memory': {
+                'present': in_memory_payload is not None,
+                'limit': in_memory_limit,
+                'timestamp': in_memory_timestamp,
+                'age_s': max(0.0, now - in_memory_timestamp) if in_memory_timestamp else None,
+                'summary': _summarize_shop_sections_payload(in_memory_payload),
+            },
+            'disk': {
+                'present': bool(disk_cache),
+                'limit': (disk_cache or {}).get('limit'),
+                'timestamp': disk_ts if disk_ts else None,
+                'age_s': max(0.0, now - disk_ts) if disk_ts else None,
+                'summary': _summarize_shop_sections_payload(disk_payload),
+            },
+        }
     })
 
 @app.get('/api/manage/libraries')
@@ -2635,8 +4109,7 @@ def titledb_search_api():
             r['in_library'] = (r.get('id') or '').upper() in existing
         return jsonify({'success': True, 'results': results})
     finally:
-        titles.identification_in_progress_count -= 1
-        titles.unload_titledb()
+        titles.release_titledb()
 
 @app.post('/api/upload')
 @access_required('admin')
@@ -2660,7 +4133,7 @@ def upload_file():
         # filename = secure_filename(file.filename)
         file.save(KEYS_FILE + '.tmp')
         logger.info(f'Validating {file.filename}...')
-        valid = load_keys(KEYS_FILE + '.tmp')
+        valid, validation_errors = validate_keys_file(KEYS_FILE + '.tmp')
         if valid:
             os.rename(KEYS_FILE + '.tmp', KEYS_FILE)
             success = True
@@ -2670,6 +4143,7 @@ def upload_file():
         else:
             os.remove(KEYS_FILE + '.tmp')
             logger.error(f'Invalid keys from {file.filename}')
+            errors = validation_errors or ['invalid_keys_file']
 
     resp = {
         'success': success,
@@ -2744,148 +4218,529 @@ def upload_library_files():
     })
 
 
+@app.get('/api/saves/list')
+@save_sync_access
+def list_saves_api():
+    user = getattr(g, 'save_sync_user', None)
+    if user is None:
+        return api_error('Save sync authorization failed.', 403)
+
+    saves = []
+    titledb_loaded = False
+    try:
+        titledb_loaded = bool(titles.load_titledb())
+    except Exception as e:
+        logger.warning('Unable to load TitleDB for save metadata: %s', e)
+
+    try:
+        save_versions = _save_sync_collect_versions(user)
+        title_metadata = {}
+        for version in save_versions:
+            title_id = str(version.get('title_id') or '').strip().upper()
+            if not title_id:
+                continue
+
+            cached_meta = title_metadata.get(title_id)
+            if cached_meta is None:
+                title_name = title_id
+                icon_remote_url = ''
+                if titledb_loaded:
+                    try:
+                        info = titles.get_game_info(title_id) or {}
+                        resolved_name = str(info.get('name') or '').strip()
+                        if resolved_name and resolved_name.lower() != 'unrecognized':
+                            title_name = resolved_name
+                        icon_remote_url = str(info.get('iconUrl') or '').strip()
+                    except Exception as title_err:
+                        logger.debug('Failed title metadata lookup for save %s: %s', title_id, title_err)
+                cached_meta = {'title_name': title_name, 'icon_remote_url': icon_remote_url}
+                title_metadata[title_id] = cached_meta
+
+            save_id = str(version.get('save_id') or '')
+            note = _normalize_save_note(version.get('note'))
+            created_ts = int(version.get('created_ts') or 0)
+            created_at = str(version.get('created_at') or '').strip() or _save_sync_format_created_at(created_ts)
+            size = int(version.get('size') or 0)
+            download_url = str(version.get('download_url') or '')
+            delete_url = str(version.get('delete_url') or '')
+            icon_url = f'/api/shop/icon/{title_id}'
+            saves.append({
+                'title_id': title_id,
+                'titleId': title_id,
+                'app_id': title_id,
+                'name': cached_meta['title_name'],
+                'title_name': cached_meta['title_name'],
+                'titleName': cached_meta['title_name'],
+                'size': size,
+                'save_id': save_id,
+                'saveId': save_id,
+                'note': note,
+                'save_note': note,
+                'saveNote': note,
+                'created_at': created_at,
+                'createdAt': created_at,
+                'created_ts': created_ts,
+                'createdTs': created_ts,
+                'icon_url': icon_url,
+                'iconUrl': icon_url,
+                'icon_remote_url': cached_meta['icon_remote_url'],
+                'iconRemoteUrl': cached_meta['icon_remote_url'],
+                'download_url': download_url,
+                'downloadUrl': download_url,
+                'delete_url': delete_url,
+                'deleteUrl': delete_url,
+            })
+    except Exception as e:
+        logger.error('Failed to list saves for user %s: %s', getattr(user, 'user', '?'), e)
+        return api_error('Failed to list saves.', 500)
+    finally:
+        try:
+            titles.release_titledb()
+        except Exception:
+            pass
+
+    return jsonify({'saves': saves})
+
+
+@app.post('/api/saves/upload/<title_id>')
+@save_sync_access
+def upload_save_api(title_id):
+    user = getattr(g, 'save_sync_user', None)
+    if user is None:
+        return api_error('Save sync authorization failed.', 403)
+
+    normalized_title_id = _save_sync_resolve_title_id(title_id)
+    if not normalized_title_id:
+        return api_error('Invalid title_id for save upload.', 400)
+
+    if 'file' not in request.files:
+        return api_error('No save archive provided.', 400)
+
+    uploaded_file = request.files.get('file')
+    if uploaded_file is None or not uploaded_file.filename:
+        return api_error('No save archive provided.', 400)
+
+    uploaded_file.seek(0, os.SEEK_END)
+    file_size = uploaded_file.tell()
+    uploaded_file.seek(0)
+
+    if file_size is None or file_size <= 0:
+        return api_error('Save archive is empty.', 400)
+    if file_size > MAX_SAVE_UPLOAD_SIZE:
+        limit_gb = MAX_SAVE_UPLOAD_SIZE // (1024 * 1024 * 1024)
+        return api_error(f'Save archive exceeds maximum limit of {limit_gb}GB.', 400)
+
+    note = _save_sync_resolve_note()
+    save_id = _save_sync_generate_save_id(note)
+    title_dir = _save_sync_title_dir(user, normalized_title_id)
+    os.makedirs(title_dir, exist_ok=True)
+    archive_path = _save_sync_archive_path(user, normalized_title_id, save_id=save_id)
+    temp_path = archive_path + '.tmp'
+
+    try:
+        uploaded_file.save(temp_path)
+        if not zipfile.is_zipfile(temp_path):
+            os.remove(temp_path)
+            return api_error('Uploaded file is not a valid zip archive.', 400)
+
+        os.replace(temp_path, archive_path)
+    except Exception as e:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception:
+            pass
+        logger.error('Failed to save uploaded archive for user %s title %s: %s', getattr(user, 'user', '?'), normalized_title_id, e)
+        return api_error('Failed to store save archive.', 500)
+
+    created_ts = int(time.time())
+    created_at = _save_sync_format_created_at(created_ts)
+    metadata = {
+        'title_id': normalized_title_id,
+        'save_id': save_id,
+        'created_at': created_at,
+        'created_ts': created_ts,
+        'note': note,
+        'uploaded_by': str(getattr(user, 'user', '') or ''),
+        'size': int(file_size),
+    }
+    try:
+        _save_sync_write_metadata(_save_sync_metadata_path(user, normalized_title_id, save_id), metadata)
+    except Exception as e:
+        logger.warning('Failed writing save metadata for user %s title %s save %s: %s', getattr(user, 'user', '?'), normalized_title_id, save_id, e)
+
+    return api_success({
+        'title_id': normalized_title_id,
+        'titleId': normalized_title_id,
+        'save_id': save_id,
+        'saveId': save_id,
+        'created_at': created_at,
+        'createdAt': created_at,
+        'created_ts': created_ts,
+        'createdTs': created_ts,
+        'note': note,
+        'size': int(file_size),
+        'download_url': f'/api/saves/download/{normalized_title_id}/{save_id}.zip',
+        'downloadUrl': f'/api/saves/download/{normalized_title_id}/{save_id}.zip',
+        'delete_url': f'/api/saves/delete/{normalized_title_id}/{save_id}',
+        'deleteUrl': f'/api/saves/delete/{normalized_title_id}/{save_id}',
+    }, message='Save uploaded successfully.')
+
+
+@app.get('/api/saves/download/<title_id>/<save_id>')
+@app.get('/api/saves/download/<title_id>/<save_id>.zip')
+@app.get('/api/saves/download/<title_id>')
+@app.get('/api/saves/download/<title_id>.zip')
+@save_sync_access
+def download_save_api(title_id, save_id=None):
+    user = getattr(g, 'save_sync_user', None)
+    if user is None:
+        return api_error('Save sync authorization failed.', 403)
+
+    normalized_title_id = _normalize_save_title_id(title_id)
+    if not normalized_title_id:
+        return api_error('Invalid title_id for save download.', 400)
+
+    selected_archive, resolve_error = _save_sync_resolve_download_archive(user, normalized_title_id, save_id=save_id)
+    if selected_archive is None:
+        if resolve_error and str(resolve_error).lower().startswith('invalid'):
+            return api_error(resolve_error, 400)
+        return api_error(resolve_error or 'Save archive not found.', 404)
+
+    archive_path = str(selected_archive.get('archive_path') or '')
+    if not os.path.isfile(archive_path):
+        return api_error('Save archive not found.', 404)
+
+    selected_save_id = str(selected_archive.get('save_id') or '').strip()
+    if selected_save_id and selected_save_id != 'legacy':
+        download_name = f'{normalized_title_id}_{selected_save_id}.zip'
+    else:
+        download_name = f'{normalized_title_id}.zip'
+
+    return send_from_directory(
+        os.path.dirname(archive_path),
+        os.path.basename(archive_path),
+        as_attachment=True,
+        download_name=download_name,
+        mimetype='application/zip'
+    )
+
+
+@app.route('/api/saves/delete/<title_id>/<save_id>', methods=['DELETE', 'POST'])
+@app.route('/api/saves/delete/<title_id>/<save_id>.zip', methods=['DELETE', 'POST'])
+@app.route('/api/saves/delete/<title_id>', methods=['DELETE', 'POST'])
+@app.route('/api/saves/delete/<title_id>.zip', methods=['DELETE', 'POST'])
+@save_sync_access
+def delete_save_api(title_id, save_id=None):
+    user = getattr(g, 'save_sync_user', None)
+    if user is None:
+        return api_error('Save sync authorization failed.', 403)
+
+    normalized_title_id = _normalize_save_title_id(title_id)
+    if not normalized_title_id:
+        return api_error('Invalid title_id for save delete.', 400)
+
+    selected_save_id = None
+    if save_id is not None:
+        selected_save_id = _normalize_save_id(save_id)
+        if not selected_save_id:
+            return api_error('Invalid save_id for save delete.', 400)
+
+    deleted_info, delete_error = _save_sync_delete_archive(user, normalized_title_id, save_id=selected_save_id)
+    if deleted_info is None:
+        status = 404
+        error_text = str(delete_error or '')
+        if error_text.lower().startswith('invalid'):
+            status = 400
+        elif error_text and 'failed to delete' in error_text.lower():
+            status = 500
+        return api_error(delete_error or 'Save archive not found.', status)
+
+    deleted_save_id = str(deleted_info.get('save_id') or '')
+    is_legacy = bool(deleted_info.get('legacy'))
+    return api_success({
+        'title_id': normalized_title_id,
+        'titleId': normalized_title_id,
+        'save_id': deleted_save_id,
+        'saveId': deleted_save_id,
+        'legacy': is_legacy,
+        'deleted': True,
+    }, message='Save backup deleted successfully.')
+
+
 @app.route('/api/titles', methods=['GET'])
 @access_required('shop')
 def get_all_titles_api():
     start_ts = time.time()
-    titles_library = generate_library()
 
-    def _game_title(game):
-        return (game.get('title_id_name') or game.get('name') or game.get('title_id') or game.get('app_id') or '')
-
-    def _split_genres(raw):
-        parts = []
-        for s in str(raw or '').split(','):
-            # Normalize stray brackets/quotes from source data (e.g. "['Action']" -> "Action").
-            cleaned = re.sub(r'^[\s\[\]\'"`]+|[\s\[\]\'"`]+$', '', str(s or '').strip()).strip()
-            if cleaned:
-                parts.append(cleaned)
-        seen = set()
-        out = []
-        for p in parts:
-            key = p.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(p)
-        return out
-
-    def _build_genre_list(games):
-        seen = {}
-        for g in games or []:
-            for genre in _split_genres(g.get('genre') or g.get('category') or ''):
-                key = genre.lower()
-                if key not in seen:
-                    seen[key] = genre
-        return sorted(seen.values(), key=lambda s: str(s).lower())
-
-    def _lite_game(game):
-        if not isinstance(game, dict):
-            return game
-        slim = dict(game)
-        slim.pop('version', None)
-        slim.pop('description', None)
-        slim.pop('screenshots', None)
-        return slim
-
-    def _sort_games(games, sort_key):
-        if sort_key == 'title_desc':
-            return sorted(games, key=lambda g: _game_title(g).lower(), reverse=True)
-        if sort_key == 'newest':
-            return sorted(
-                games,
-                key=lambda g: int(g.get('title_db_id') or 0),
-                reverse=True
-            )
-        return sorted(games, key=lambda g: _game_title(g).lower())
-
-    def _filter_games(games, search=None, types=None, owned=None, updates=None, completion=None, genre=None):
-        out = games
-        if search:
-            q = str(search).strip().lower()
-            if q:
-                out = [
-                    g for g in out
-                    if q in str(g.get('app_id') or '').lower()
-                    or q in str(g.get('title_id') or '').lower()
-                    or q in str(g.get('name') or '').lower()
-                    or q in str(g.get('title_id_name') or '').lower()
-                ]
-        if types:
-            allowed = {t.strip().upper() for t in str(types).split(',') if t.strip()}
-            if allowed:
-                out = [g for g in out if str(g.get('app_type') or '').upper() in allowed]
-        if owned == 'owned':
-            out = [g for g in out if g.get('owned') is True]
-        elif owned == 'missing':
-            out = [g for g in out if g.get('owned') is False]
-        if updates == 'up_to_date':
-            out = [g for g in out if g.get('has_latest_version') is True]
-        elif updates == 'outdated':
-            out = [g for g in out if g.get('has_latest_version') is False]
-        if completion == 'complete':
-            out = [g for g in out if g.get('has_all_dlcs') is True]
-        elif completion == 'missing_dlc':
-            out = [g for g in out if g.get('has_all_dlcs') is False]
-        if genre:
-            wanted = str(genre).strip().lower()
-            if wanted:
-                out = [
-                    g for g in out
-                    if any(gr.lower() == wanted for gr in _split_genres(g.get('genre') or g.get('category') or ''))
-                ]
-        return out
-
-    # Query params
-    page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 50, type=int)
-    page = max(1, page)
-    per_page = max(1, min(per_page, 200))
+    page = max(1, request.args.get('page', 1, type=int))
+    per_page = max(1, min(request.args.get('per_page', 50, type=int), 200))
     lite = str(request.args.get('lite', '')).lower() in ('1', 'true', 'yes')
-    sort_key = str(request.args.get('sort') or 'title_asc').strip()
-    search = request.args.get('search')
+    sort_key = str(request.args.get('sort') or 'title_asc').strip().lower()
+    search = (request.args.get('search') or '').strip()
     types = request.args.get('types')
     owned = request.args.get('owned')
     updates = request.args.get('updates')
     completion = request.args.get('completion')
-    genre = request.args.get('genre')
+    genre = (request.args.get('genre') or '').strip()
+    recognized = (request.args.get('recognized') or '').strip().lower()
+    app_version_num_expr = func.coalesce(Apps.app_version_num, 0)
+    titles_metadata = None
 
-    # Build discovery sections from the full list (unfiltered).
-    base_games = [g for g in titles_library if g.get('app_type') == 'BASE']
-    newest = sorted(base_games, key=lambda g: int(g.get('title_db_id') or 0), reverse=True)[:12]
-    day_key = time.strftime('%Y-%m-%d')
-    seed = f"ownfoil-reco-{day_key}"
-    def _hash32(s):
-        h = 0x811c9dc5
-        for ch in str(s):
-            h ^= ord(ch)
-            h = (h * 0x01000193) & 0xffffffff
-        return h
-    candidates = [g for g in base_games if g.get('owned') is True]
-    recommended = sorted(
-        candidates,
-        key=lambda g: _hash32(f"{seed}-{g.get('title_id') or g.get('app_id')}")
-    )[:12]
-
-    filtered = _filter_games(
-        titles_library,
-        search=search,
-        types=types,
-        owned=owned,
-        updates=updates,
-        completion=completion,
-        genre=genre
+    size_subquery = (
+        db.session.query(
+            app_files.c.app_id.label('app_pk'),
+            func.coalesce(func.sum(Files.size), 0).label('size'),
+        )
+        .outerjoin(Files, Files.id == app_files.c.file_id)
+        .group_by(app_files.c.app_id)
+        .subquery()
     )
-    filtered = _sort_games(filtered, sort_key)
-    total = len(filtered)
+    dlc_agg_subquery = (
+        db.session.query(
+            Apps.app_id.label('dlc_app_id'),
+            func.max(app_version_num_expr).label('max_version'),
+            func.max(
+                case(
+                    (Apps.owned.is_(True), app_version_num_expr),
+                    else_=0
+                )
+            ).label('max_owned_version')
+        )
+        .filter(Apps.app_type == APP_TYPE_DLC)
+        .group_by(Apps.app_id)
+        .subquery()
+    )
+
+    query = (
+        db.session.query(
+            Apps.id.label('app_pk'),
+            Apps.title_id.label('title_fk'),
+            Titles.id.label('title_db_id'),
+            Titles.title_id.label('title_id'),
+            Titles.have_base.label('have_base'),
+            Titles.up_to_date.label('up_to_date'),
+            Titles.complete.label('complete'),
+            Apps.app_id.label('app_id'),
+            Apps.app_version.label('app_version'),
+            Apps.app_type.label('app_type'),
+            Apps.owned.label('owned'),
+            func.coalesce(size_subquery.c.size, 0).label('size'),
+            func.coalesce(dlc_agg_subquery.c.max_version, 0).label('dlc_max_version'),
+            func.coalesce(dlc_agg_subquery.c.max_owned_version, 0).label('dlc_max_owned_version'),
+        )
+        .join(Titles, Apps.title_id == Titles.id)
+        .outerjoin(size_subquery, size_subquery.c.app_pk == Apps.id)
+        .outerjoin(dlc_agg_subquery, dlc_agg_subquery.c.dlc_app_id == Apps.app_id)
+        .filter(
+            or_(
+                Apps.app_type == APP_TYPE_BASE,
+                and_(
+                    Apps.app_type == APP_TYPE_DLC,
+                    app_version_num_expr == dlc_agg_subquery.c.max_version
+                )
+            )
+        )
+    )
+
+    if types:
+        allowed_types = {part.strip().upper() for part in str(types).split(',') if part.strip()}
+        if allowed_types:
+            query = query.filter(Apps.app_type.in_(allowed_types))
+    if owned == 'owned':
+        query = query.filter(Apps.owned.is_(True))
+    elif owned == 'missing':
+        query = query.filter(Apps.owned.is_(False))
+    if updates == 'up_to_date':
+        query = query.filter(
+            or_(
+                and_(Apps.app_type == APP_TYPE_BASE, Titles.have_base.is_(True), Titles.up_to_date.is_(True)),
+                and_(Apps.app_type == APP_TYPE_DLC, dlc_agg_subquery.c.max_owned_version >= dlc_agg_subquery.c.max_version),
+            )
+        )
+    elif updates == 'outdated':
+        query = query.filter(
+            or_(
+                and_(Apps.app_type == APP_TYPE_BASE, or_(Titles.have_base.is_(False), Titles.up_to_date.is_(False))),
+                and_(Apps.app_type == APP_TYPE_DLC, dlc_agg_subquery.c.max_owned_version < dlc_agg_subquery.c.max_version),
+            )
+        )
+    if completion == 'complete':
+        query = query.filter(and_(Apps.app_type == APP_TYPE_BASE, Titles.complete.is_(True)))
+    elif completion == 'missing_dlc':
+        query = query.filter(and_(Apps.app_type == APP_TYPE_BASE, Titles.complete.is_(False)))
+
+    if search:
+        search_normalized = _normalize_library_search_text(search)
+        if search_normalized:
+            search_term = f"%{search_normalized}%"
+            titles_metadata = _get_cached_titles_metadata()
+            title_ids_from_search = [
+                title_id
+                for title_id, lowered_name in (titles_metadata.get('title_name_map') or {}).items()
+                if _search_matches_normalized_text(search_normalized, lowered_name)
+            ]
+            search_filters = [
+                func.lower(Apps.app_id).like(search_term),
+                func.lower(Titles.title_id).like(search_term),
+            ]
+            if title_ids_from_search:
+                search_filters.append(Titles.title_id.in_(title_ids_from_search))
+            query = query.filter(or_(*search_filters))
+
+    if genre or recognized in ('recognized', 'unrecognized'):
+        if titles_metadata is None:
+            titles_metadata = _get_cached_titles_metadata()
+        matched_title_ids = None
+        all_title_ids = set((titles_metadata.get('title_name_map') or {}).keys())
+        unrecognized_ids = set(titles_metadata.get('unrecognized_title_ids') or set())
+
+        if recognized == 'unrecognized':
+            matched_title_ids = set(unrecognized_ids)
+        elif recognized == 'recognized':
+            matched_title_ids = set(all_title_ids) - set(unrecognized_ids)
+
+        if genre:
+            wanted_genre = genre.lower()
+            genre_ids = set((titles_metadata.get('genre_title_ids') or {}).get(wanted_genre) or set())
+            if matched_title_ids is None:
+                matched_title_ids = genre_ids
+            else:
+                matched_title_ids &= genre_ids
+
+        if matched_title_ids is None:
+            matched_title_ids = set(all_title_ids)
+
+        if matched_title_ids:
+            query = query.filter(Titles.title_id.in_(matched_title_ids))
+        else:
+            query = query.filter(Titles.id == -1)
+
+    if sort_key == 'newest':
+        query = query.order_by(Titles.id.desc(), Apps.id.desc())
+    elif sort_key == 'title_desc':
+        query = query.order_by(Titles.title_id.desc(), Apps.app_id.desc())
+    else:
+        query = query.order_by(Titles.title_id.asc(), Apps.app_id.asc())
+
+    total = query.count()
     start = (page - 1) * per_page
-    end = start + per_page
-    page_games = filtered[start:end]
+    rows = query.offset(start).limit(per_page).all()
+
+    title_fk_ids = {row.title_fk for row in rows if row.title_fk is not None}
+    title_id_by_fk = {row.title_fk: row.title_id for row in rows if row.title_fk is not None and row.title_id}
+    dlc_app_ids = {row.app_id for row in rows if row.app_type == APP_TYPE_DLC and row.app_id}
+
+    update_rows = []
+    if title_fk_ids:
+        update_rows = (
+            db.session.query(
+                Apps.title_id.label('title_fk'),
+                Apps.app_version.label('app_version'),
+                Apps.owned.label('owned'),
+                func.coalesce(size_subquery.c.size, 0).label('size'),
+            )
+            .outerjoin(size_subquery, size_subquery.c.app_pk == Apps.id)
+            .filter(Apps.app_type == APP_TYPE_UPD, Apps.title_id.in_(title_fk_ids))
+            .all()
+        )
+    update_versions_by_title_fk = {}
+    for upd in update_rows:
+        update_versions_by_title_fk.setdefault(upd.title_fk, []).append({
+            'version': int(upd.app_version or 0),
+            'owned': bool(upd.owned),
+            'size': int(upd.size or 0),
+            'release_date': 'Unknown',
+        })
+
+    dlc_rows = []
+    if dlc_app_ids:
+        dlc_rows = (
+            db.session.query(
+                Apps.app_id.label('app_id'),
+                Apps.app_version.label('app_version'),
+                Apps.owned.label('owned'),
+            )
+            .filter(Apps.app_type == APP_TYPE_DLC, Apps.app_id.in_(dlc_app_ids))
+            .all()
+        )
+    dlc_versions_by_app_id = {}
+    for dlc in dlc_rows:
+        dlc_versions_by_app_id.setdefault(dlc.app_id, []).append({
+            'version': int(dlc.app_version or 0),
+            'owned': bool(dlc.owned),
+            'release_date': 'Unknown',
+        })
+
+    all_lookup_ids = set()
+    all_lookup_ids.update([tid for tid in title_id_by_fk.values() if tid])
+    all_lookup_ids.update([aid for aid in dlc_app_ids if aid])
+    info_cache = {}
+    release_dates_by_title = {}
+    with titles.titledb_session() as titledb_loaded:
+        if titledb_loaded:
+            for lookup_id in all_lookup_ids:
+                info_cache[lookup_id] = titles.get_game_info(lookup_id) or {}
+            for title_fk, title_id in title_id_by_fk.items():
+                versions = titles.get_all_existing_versions(title_id) or []
+                release_dates_by_title[title_fk] = {
+                    int(v.get('version') or 0): v.get('release_date') or 'Unknown'
+                    for v in versions
+                }
+
+    for title_fk, versions in update_versions_by_title_fk.items():
+        release_dates = release_dates_by_title.get(title_fk) or {}
+        for version in versions:
+            version['release_date'] = release_dates.get(version['version'], 'Unknown')
+        versions.sort(key=lambda item: item['version'])
+    for app_id, versions in dlc_versions_by_app_id.items():
+        versions.sort(key=lambda item: item['version'])
+
+    games = []
+    for row in rows:
+        title_info = info_cache.get(row.title_id) or {}
+        app_info = title_info if row.app_type == APP_TYPE_BASE else (info_cache.get(row.app_id) or title_info)
+        game = {
+            'id': app_info.get('id') or row.app_id,
+            'name': app_info.get('name') or row.app_id,
+            'bannerUrl': app_info.get('bannerUrl'),
+            'iconUrl': app_info.get('iconUrl'),
+            'category': app_info.get('category') or '',
+            'genre': app_info.get('category') or '',
+            'nsuId': app_info.get('nsuId'),
+            'description': app_info.get('description'),
+            'screenshots': app_info.get('screenshots') or [],
+            'title_db_id': row.title_db_id,
+            'title_id': row.title_id,
+            'title_id_name': (title_info.get('name') or app_info.get('name') or row.title_id or row.app_id),
+            'app_id': row.app_id,
+            'app_version': row.app_version,
+            'app_type': row.app_type,
+            'owned': bool(row.owned),
+            'size': int(row.size or 0),
+        }
+        if row.app_type == APP_TYPE_BASE:
+            game['has_base'] = bool(row.have_base)
+            game['has_latest_version'] = bool(row.have_base) and bool(row.up_to_date)
+            game['has_all_dlcs'] = bool(row.complete)
+            game['version'] = list(update_versions_by_title_fk.get(row.title_fk, []))
+        elif row.app_type == APP_TYPE_DLC:
+            game['has_latest_version'] = int(row.dlc_max_owned_version or 0) >= int(row.dlc_max_version or 0)
+            game['version'] = list(dlc_versions_by_app_id.get(row.app_id, []))
+        games.append(game)
+
+    newest, recommended = _get_discovery_sections(limit=12)
 
     if lite:
-        page_games = [_lite_game(g) for g in page_games]
-        newest = [_lite_game(g) for g in newest]
-        recommended = [_lite_game(g) for g in recommended]
+        def _lite(entry):
+            slim = dict(entry)
+            slim.pop('version', None)
+            slim.pop('description', None)
+            slim.pop('screenshots', None)
+            return slim
+        games = [_lite(entry) for entry in games]
+        newest = [_lite(entry) for entry in newest]
+        recommended = [_lite(entry) for entry in recommended]
 
     if _is_cyberfoil_request():
         _log_access(
@@ -2897,11 +4752,11 @@ def get_all_titles_api():
         )
 
     return jsonify({
-        'total': total,
-        'page': page,
-        'per_page': per_page,
-        'games': page_games,
-        'genres': _build_genre_list(titles_library),
+        'total': int(total),
+        'page': int(page),
+        'per_page': int(per_page),
+        'games': games,
+        'genres': _get_cached_library_genres(),
         'discovery': {
             'newest': newest,
             'recommended': recommended,
@@ -2919,26 +4774,92 @@ def get_title_details_api():
     if not app_id and not title_id:
         return jsonify({'success': False, 'error': 'missing_identifier'}), 400
 
-    titles_library = generate_library()
+    query = (
+        db.session.query(
+            Apps.id.label('app_pk'),
+            Apps.title_id.label('title_fk'),
+            Titles.title_id.label('title_id'),
+            Titles.have_base.label('have_base'),
+            Titles.up_to_date.label('up_to_date'),
+            Titles.complete.label('complete'),
+            Apps.app_id.label('app_id'),
+            Apps.app_version.label('app_version'),
+            Apps.app_type.label('app_type'),
+            Apps.owned.label('owned'),
+        )
+        .join(Titles, Apps.title_id == Titles.id)
+    )
+    if app_id and app_type:
+        query = query.filter(Apps.app_id == app_id, Apps.app_type == app_type.upper())
+    elif app_id:
+        query = query.filter(Apps.app_id == app_id)
+    else:
+        query = query.filter(Titles.title_id == title_id.upper())
+    row = query.order_by(Apps.id.desc()).first()
 
-    def _match_game(game):
-        if not isinstance(game, dict):
-            return False
-        if app_id and app_type:
-            return (
-                str(game.get('app_id') or '').upper() == app_id.upper()
-                and str(game.get('app_type') or '').upper() == app_type.upper()
-            )
-        if app_id:
-            return str(game.get('app_id') or '').upper() == app_id.upper()
-        if title_id:
-            return str(game.get('title_id') or '').upper() == title_id.upper()
-        return False
-
-    game = next((g for g in titles_library if _match_game(g)), None)
-    if not game and title_id:
-        tid = title_id.upper()
-        game = next((g for g in titles_library if str(g.get('title_id') or '').upper() == tid), None)
+    game = None
+    if row:
+        with titles.titledb_session():
+            title_info = titles.get_game_info(row.title_id) or {}
+            app_info = title_info if row.app_type == APP_TYPE_BASE else (titles.get_game_info(row.app_id) or title_info)
+            game = {
+                'id': app_info.get('id') or row.app_id,
+                'name': app_info.get('name') or row.app_id,
+                'bannerUrl': app_info.get('bannerUrl'),
+                'iconUrl': app_info.get('iconUrl'),
+                'category': app_info.get('category') or '',
+                'genre': app_info.get('category') or '',
+                'nsuId': app_info.get('nsuId'),
+                'description': app_info.get('description'),
+                'screenshots': app_info.get('screenshots') or [],
+                'title_id': row.title_id,
+                'title_id_name': title_info.get('name') or app_info.get('name') or row.title_id,
+                'app_id': row.app_id,
+                'app_version': row.app_version,
+                'app_type': row.app_type,
+                'owned': bool(row.owned),
+            }
+            if row.app_type == APP_TYPE_BASE:
+                versions = []
+                for upd in (
+                    db.session.query(Apps.app_version, Apps.owned)
+                    .filter(Apps.title_id == row.title_fk, Apps.app_type == APP_TYPE_UPD)
+                    .all()
+                ):
+                    versions.append({
+                        'version': int(upd.app_version or 0),
+                        'owned': bool(upd.owned),
+                        'size': 0,
+                        'release_date': 'Unknown',
+                    })
+                release_dates = {
+                    int(v.get('version') or 0): v.get('release_date') or 'Unknown'
+                    for v in (titles.get_all_existing_versions(row.title_id) or [])
+                }
+                for version in versions:
+                    version['release_date'] = release_dates.get(version['version'], 'Unknown')
+                versions.sort(key=lambda item: item['version'])
+                game['version'] = versions
+                game['has_base'] = bool(row.have_base)
+                game['has_latest_version'] = bool(row.have_base) and bool(row.up_to_date)
+                game['has_all_dlcs'] = bool(row.complete)
+            elif row.app_type == APP_TYPE_DLC:
+                dlc_versions = []
+                for dlc in (
+                    db.session.query(Apps.app_version, Apps.owned)
+                    .filter(Apps.app_type == APP_TYPE_DLC, Apps.app_id == row.app_id)
+                    .all()
+                ):
+                    dlc_versions.append({
+                        'version': int(dlc.app_version or 0),
+                        'owned': bool(dlc.owned),
+                        'release_date': 'Unknown',
+                    })
+                dlc_versions.sort(key=lambda item: item['version'])
+                game['version'] = dlc_versions
+                latest_available = max([item['version'] for item in dlc_versions], default=0)
+                latest_owned = max([item['version'] for item in dlc_versions if item['owned']], default=0)
+                game['has_latest_version'] = latest_owned >= latest_available
 
     return jsonify({
         'success': bool(game),
@@ -2957,16 +4878,57 @@ def get_title_info_api(title_id):
     try:
         info = titles.get_game_info(title_id) or {}
     finally:
-        titles.identification_in_progress_count -= 1
-        titles.unload_titledb()
+        titles.release_titledb()
 
     return jsonify({
         'success': True,
         'title_id': title_id,
         'name': info.get('name'),
+        'iconUrl': info.get('iconUrl'),
+        'bannerUrl': info.get('bannerUrl'),
         'description': info.get('description'),
         'screenshots': info.get('screenshots') or []
     })
+
+@app.post('/api/title-info/manual')
+@access_required('admin')
+def set_manual_title_info_api():
+    data = request.json or {}
+    title_id = str(data.get('title_id') or '').strip().upper()
+    if not title_id:
+        return jsonify({'success': False, 'error': 'missing_title_id'}), 400
+
+    payload = {
+        'name': data.get('name'),
+        'description': data.get('description'),
+        'iconUrl': data.get('iconUrl'),
+        'bannerUrl': data.get('bannerUrl'),
+        'screenshots': data.get('screenshots') or [],
+    }
+    ok = set_manual_title_override(title_id, payload)
+    if not ok:
+        return jsonify({'success': False, 'error': 'invalid_payload'}), 400
+
+    # Refresh in-memory settings and invalidate library/shop caches so UI picks up overrides.
+    reload_conf()
+    try:
+        if os.path.exists(LIBRARY_CACHE_FILE):
+            os.remove(LIBRARY_CACHE_FILE)
+    except Exception:
+        pass
+    with shop_sections_cache_lock:
+        shop_sections_cache['payload'] = None
+        shop_sections_cache['timestamp'] = 0
+        shop_sections_cache['limit'] = None
+        shop_sections_cache['state_token'] = None
+    with titles_metadata_cache_lock:
+        titles_metadata_cache['version'] = _TITLES_METADATA_CACHE_VERSION
+        titles_metadata_cache['state_token'] = None
+        titles_metadata_cache['genres'] = []
+        titles_metadata_cache['title_name_map'] = {}
+        titles_metadata_cache['genre_title_ids'] = {}
+        titles_metadata_cache['unrecognized_title_ids'] = set()
+    return jsonify({'success': True, 'title_id': title_id})
 
 @app.get('/api/library/size')
 @access_required('shop')
@@ -2997,28 +4959,32 @@ def serve_game(id):
     user_agent = request.headers.get('User-Agent')
     username = _get_request_user()
 
-    try:
-        Files.query.filter_by(id=id).update({Files.download_count: Files.download_count + 1})
-        db.session.commit()
-    except Exception as e:
-        db.session.rollback()
-        logger.error(f"Failed to increment download count for file id {id}: {e}")
-    file_result = db.session.query(Files.filepath).filter_by(id=id).first()
-    if not file_result:
+    file_row = (
+        db.session.query(
+            Files.filepath.label('filepath'),
+            Files.filename.label('filename'),
+            Titles.title_id.label('title_id'),
+        )
+        .select_from(Files)
+        .outerjoin(app_files, app_files.c.file_id == Files.id)
+        .outerjoin(Apps, Apps.id == app_files.c.app_id)
+        .outerjoin(Titles, Titles.id == Apps.title_id)
+        .filter(Files.id == id)
+        .first()
+    )
+    if not file_row:
         return Response(status=404)
-    filepath = file_result[0]
-    filedir, filename = os.path.split(filepath)
 
-    title_id = None
     try:
-        file_obj = Files.query.filter_by(id=id).first()
-        if file_obj and getattr(file_obj, 'apps', None):
-            app_obj = file_obj.apps[0] if file_obj.apps else None
-            if app_obj and getattr(app_obj, 'title', None):
-                title_id = app_obj.title.title_id
+        queue_file_download_increment(id)
     except Exception as e:
-        logger.error(f"Failed to get title_id for file id {id}: {e}")
-        title_id = None
+        logger.error(f"Failed to queue download count increment for file id {id}: {e}")
+
+    filepath = file_row.filepath
+    filename = file_row.filename or os.path.basename(filepath)
+    filedir = os.path.dirname(filepath)
+    title_id = (file_row.title_id or '').strip().upper() or None
+    fast_transfer_mode = bool((app_settings.get('shop') or {}).get('fast_transfer_mode'))
 
     transfer_id = uuid.uuid4().hex
     meta = {
@@ -3057,6 +5023,12 @@ def serve_game(id):
         'ok': True,
         'finished': False,
     }
+    fast_mode_fallback_sent = 0
+    if fast_transfer_mode:
+        try:
+            fast_mode_fallback_sent = max(0, int(resp.headers.get('Content-Length') or 0))
+        except Exception:
+            fast_mode_fallback_sent = 0
 
     _finish_lock = threading.Lock()
 
@@ -3067,23 +5039,33 @@ def serve_game(id):
             state['finished'] = True
 
         code = getattr(resp, 'status_code', None) or status_code
+        bytes_sent = int(state.get('sent') or 0)
+        if fast_transfer_mode and bytes_sent <= 0 and fast_mode_fallback_sent > 0:
+            # Fast mode skips per-chunk accounting; use response length as fallback.
+            bytes_sent = int(fast_mode_fallback_sent)
         try:
             _transfer_session_finish(
                 session_key,
                 ok=bool(state.get('ok')),
                 status_code=int(code) if code is not None else None,
-                bytes_sent=int(state.get('sent') or 0),
+                bytes_sent=bytes_sent,
             )
         except Exception:
             try:
                 logger.exception('Failed to finalize transfer session')
             except Exception:
                 pass
+        finally:
+            with _active_transfers_lock:
+                _active_transfers.pop(transfer_id, None)
 
     def _on_close():
         _finish_once()
 
     resp.call_on_close(_on_close)
+
+    if fast_transfer_mode:
+        return resp
 
     def _generate_wrapped():
         try:
@@ -3104,8 +5086,6 @@ def serve_game(id):
         finally:
             # Ensure we close the session even if call_on_close doesn't fire.
             _finish_once()
-            with _active_transfers_lock:
-                _active_transfers.pop(transfer_id, None)
 
     resp.response = _generate_wrapped()
     resp.direct_passthrough = False
@@ -3122,15 +5102,22 @@ def shop_sections_api():
     except ValueError:
         limit = 50
 
+    is_cyberfoil = _is_cyberfoil_request()
+
     now = time.time()
+    state_token = _get_titledb_aware_state_token()
     payload = None
     with shop_sections_cache_lock:
-        cache_enabled = SHOP_SECTIONS_CACHE_TTL_S > 0
+        cache_enabled = SHOP_SECTIONS_CACHE_TTL_S is None or SHOP_SECTIONS_CACHE_TTL_S > 0
+        cache_valid = True
+        if SHOP_SECTIONS_CACHE_TTL_S is not None:
+            cache_valid = (now - float(shop_sections_cache.get('timestamp') or 0)) <= SHOP_SECTIONS_CACHE_TTL_S
         cache_hit = (
             cache_enabled
             and shop_sections_cache['payload'] is not None
             and shop_sections_cache['limit'] == limit
-            and (now - float(shop_sections_cache.get('timestamp') or 0)) <= SHOP_SECTIONS_CACHE_TTL_S
+            and shop_sections_cache.get('state_token') == state_token
+            and cache_valid
         )
         if cache_hit:
             payload = shop_sections_cache['payload']
@@ -3139,31 +5126,31 @@ def shop_sections_api():
             shop_sections_cache['payload'] = None
             shop_sections_cache['limit'] = None
             shop_sections_cache['timestamp'] = 0
+            shop_sections_cache['state_token'] = None
 
     if payload is None:
-        if SHOP_SECTIONS_CACHE_TTL_S > 0:
+        if SHOP_SECTIONS_CACHE_TTL_S is None or SHOP_SECTIONS_CACHE_TTL_S > 0:
             disk_cache = _load_shop_sections_cache_from_disk()
-            if disk_cache and disk_cache.get('limit') == limit:
+            if (
+                disk_cache
+                and disk_cache.get('limit') == limit
+                and str(disk_cache.get('state_token') or '') == state_token
+            ):
                 disk_payload = disk_cache.get('payload')
                 disk_ts = float(disk_cache.get('timestamp') or 0)
-                disk_ok = (now - disk_ts) <= SHOP_SECTIONS_CACHE_TTL_S
+                disk_ok = True
+                if SHOP_SECTIONS_CACHE_TTL_S is not None:
+                    disk_ok = (now - disk_ts) <= SHOP_SECTIONS_CACHE_TTL_S
                 if disk_payload and disk_ok:
                     payload = disk_payload
-                    with shop_sections_cache_lock:
-                        shop_sections_cache['payload'] = payload
-                        shop_sections_cache['limit'] = limit
-                        shop_sections_cache['timestamp'] = disk_ts
+                    _store_shop_sections_cache(payload, limit, disk_ts, state_token, persist_disk=False)
 
     if payload is None:
         payload = _build_shop_sections_payload(limit)
-        if SHOP_SECTIONS_CACHE_TTL_S > 0:
-            with shop_sections_cache_lock:
-                shop_sections_cache['payload'] = payload
-                shop_sections_cache['limit'] = limit
-                shop_sections_cache['timestamp'] = now
-            _save_shop_sections_cache_to_disk(payload, limit, now)
+        if SHOP_SECTIONS_CACHE_TTL_S is None or SHOP_SECTIONS_CACHE_TTL_S > 0:
+            _store_shop_sections_cache(payload, limit, now, state_token, persist_disk=True)
 
-    if _is_cyberfoil_request():
+    if is_cyberfoil:
         _log_access(
             kind='shop_sections',
             filename=request.full_path if request.query_string else request.path,
@@ -3239,8 +5226,7 @@ def shop_icon_api(title_id):
     try:
         info = titles.get_game_info(title_id)
     finally:
-        titles.identification_in_progress_count -= 1
-        titles.unload_titledb()
+        titles.release_titledb()
     icon_url = info.get('iconUrl') if info else ''
     if not icon_url:
         response = send_from_directory(app.static_folder, 'placeholder-icon.svg')
@@ -3392,8 +5378,7 @@ def shop_banner_api(title_id):
     try:
         info = titles.get_game_info(title_id)
     finally:
-        titles.identification_in_progress_count -= 1
-        titles.unload_titledb()
+        titles.release_titledb()
     banner_url = info.get('bannerUrl') if info else ''
     if not banner_url:
         response = send_from_directory(app.static_folder, 'placeholder-banner.svg')
@@ -3483,6 +5468,9 @@ def shop_banner_api(title_id):
 
 @debounce(10)
 def post_library_change():
+    if _is_conversion_running():
+        logger.info("Skipping library rebuild: conversion job is running.")
+        return
     with library_rebuild_lock:
         if not library_rebuild_status['in_progress']:
             library_rebuild_status['started_at'] = time.time()
@@ -3494,31 +5482,37 @@ def post_library_change():
             process_library_identification(app)
             add_missing_apps_to_db()
             update_titles() # Ensure titles are updated after identification
-            # remove missing files
-            remove_missing_files_from_db()
+            # Expensive filesystem sweep: run periodically, not on every rebuild.
+            _maybe_remove_missing_files_from_db(force=False)
             organize_pending_downloads()
-            # The process_library_identification already handles updating titles and generating library
-            # So, we just need to ensure titles_library is updated from the generated library
+            # Generate the library after organization tasks so cache/UI reflect final file layout.
             generate_library()
             with shop_sections_cache_lock:
                 shop_sections_cache['payload'] = None
                 shop_sections_cache['timestamp'] = 0
                 shop_sections_cache['limit'] = None
+                shop_sections_cache['state_token'] = None
+            _invalidate_shop_root_cache()
+            with titles_metadata_cache_lock:
+                titles_metadata_cache['version'] = _TITLES_METADATA_CACHE_VERSION
+                titles_metadata_cache['state_token'] = None
+                titles_metadata_cache['genres'] = []
+                titles_metadata_cache['title_name_map'] = {}
+                titles_metadata_cache['genre_title_ids'] = {}
+                titles_metadata_cache['unrecognized_title_ids'] = set()
 
             # Media cache index can be repopulated on demand.
             with _media_cache_lock:
                 _media_cache_index['icon'].clear()
                 _media_cache_index['banner'].clear()
-            now = time.time()
-            payload = _build_shop_sections_payload(50)
-            with shop_sections_cache_lock:
-                shop_sections_cache['payload'] = payload
-                shop_sections_cache['limit'] = 50
-                shop_sections_cache['timestamp'] = now
-            _save_shop_sections_cache_to_disk(payload, 50, now)
+            state_token = _get_titledb_aware_state_token()
+            if '::missing' not in state_token:
+                now = time.time()
+                payload = _build_shop_sections_payload(50)
+                _store_shop_sections_cache(payload, 50, now, state_token, persist_disk=True)
         finally:
-            titles.identification_in_progress_count -= 1
-            titles.unload_titledb()
+            titles.release_titledb()
+            _release_process_memory()
             with library_rebuild_lock:
                 library_rebuild_status['in_progress'] = False
                 library_rebuild_status['updated_at'] = time.time()
@@ -3526,10 +5520,14 @@ def post_library_change():
 @app.post('/api/library/scan')
 @access_required('admin')
 def scan_library_api():
-    data = request.json
-    path = data['path']
+    data = request.json or {}
+    path = data.get('path')
     success = True
     errors = []
+
+    if _is_conversion_running():
+        logger.info('Skipping scan_library_api call: conversion job is running.')
+        return jsonify({'success': False, 'errors': ['Conversion in progress. Try again after conversion finishes.']})
 
     global scan_in_progress
     with scan_lock:
@@ -3566,18 +5564,58 @@ def scan_library():
         scan_library_path(library.path) # Only scan, identification will be done globally
 
 if __name__ == '__main__':
-    logger.info('Starting initialization of Ownfoil...')
+    logger.info('Starting initialization of AeroFoil...')
     init_db(app)
     init_users(app)
     init()
     logger.info('Initialization steps done, starting server...')
-    # Enable threading so admin activity polling keeps working during transfers.
-    app.run(debug=False, use_reloader=False, host="0.0.0.0", port=8465, threaded=True)
-    # Shutdown server
-    logger.info('Shutting down server...')
-    watcher.stop()
-    watcher_thread.join()
-    logger.debug('Watcher thread terminated.')
-    # Shutdown scheduler
-    app.scheduler.shutdown()
-    logger.debug('Scheduler terminated.')
+    host = (os.environ.get('AEROFOIL_HOST') or os.environ.get('OWNFOIL_HOST') or '0.0.0.0').strip() or '0.0.0.0'
+    port = _read_int_env('AEROFOIL_PORT', _read_int_env('OWNFOIL_PORT', 8465, minimum=1, maximum=65535), minimum=1, maximum=65535)
+    use_flask_dev_server = str(os.environ.get('AEROFOIL_USE_FLASK_DEV') or os.environ.get('OWNFOIL_USE_FLASK_DEV') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+    try:
+        if waitress_serve is not None and not use_flask_dev_server:
+            wsgi_threads = _read_int_env('AEROFOIL_WSGI_THREADS', _read_int_env('OWNFOIL_WSGI_THREADS', 32, minimum=1, maximum=512), minimum=1, maximum=512)
+            wsgi_connection_limit = _read_int_env('AEROFOIL_WSGI_CONNECTION_LIMIT', _read_int_env('OWNFOIL_WSGI_CONNECTION_LIMIT', 1000, minimum=1, maximum=100000), minimum=1, maximum=100000)
+            wsgi_channel_timeout = _read_int_env('AEROFOIL_WSGI_CHANNEL_TIMEOUT_S', _read_int_env('OWNFOIL_WSGI_CHANNEL_TIMEOUT_S', 120, minimum=5, maximum=3600), minimum=5, maximum=3600)
+            wsgi_cleanup_interval = _read_int_env('AEROFOIL_WSGI_CLEANUP_INTERVAL_S', _read_int_env('OWNFOIL_WSGI_CLEANUP_INTERVAL_S', 30, minimum=1, maximum=600), minimum=1, maximum=600)
+            logger.info(
+                'Starting Waitress WSGI server on %s:%s (threads=%s, connection_limit=%s, channel_timeout=%ss)',
+                host,
+                port,
+                wsgi_threads,
+                wsgi_connection_limit,
+                wsgi_channel_timeout,
+            )
+            waitress_serve(
+                app,
+                host=host,
+                port=port,
+                threads=wsgi_threads,
+                connection_limit=wsgi_connection_limit,
+                channel_timeout=wsgi_channel_timeout,
+                cleanup_interval=wsgi_cleanup_interval,
+                ident='AeroFoil'
+            )
+        else:
+            if use_flask_dev_server:
+                logger.warning('AEROFOIL_USE_FLASK_DEV enabled: using Flask development server.')
+            elif waitress_serve is None:
+                logger.warning('Waitress is not available; falling back to Flask development server.')
+            # Threaded fallback keeps admin polling responsive during long transfers.
+            app.run(debug=False, use_reloader=False, host=host, port=port, threaded=True)
+    finally:
+        # Shutdown server
+        logger.info('Shutting down server...')
+        try:
+            watcher.stop()
+            watcher_thread.join()
+            logger.debug('Watcher thread terminated.')
+        except Exception:
+            logger.exception('Watcher shutdown failed')
+        # Shutdown scheduler
+        try:
+            app.scheduler.shutdown()
+            logger.debug('Scheduler terminated.')
+        except Exception:
+            logger.exception('Scheduler shutdown failed')

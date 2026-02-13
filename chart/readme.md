@@ -1,2 +1,3 @@
 # installation 
-helm upgrade --install Ownfoil ./ -n namespace -f values.yaml
+helm upgrade --install AeroFoil ./ -n namespace -f values.yaml
+

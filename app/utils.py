@@ -130,7 +130,7 @@ def get_app_version(fallback=None):
     if _version_cache and (now - _version_cache_time) < _version_cache_ttl:
         return _version_cache
 
-    env_version = os.environ.get('OWNFOIL_VERSION') or os.environ.get('APP_VERSION')
+    env_version = os.environ.get('AEROFOIL_VERSION') or os.environ.get('OWNFOIL_VERSION') or os.environ.get('APP_VERSION')
     if env_version:
         _version_cache = env_version.strip()
         _version_cache_time = now

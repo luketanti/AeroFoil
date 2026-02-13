@@ -33,10 +33,34 @@ class ProwlarrClient:
     def list_indexers(self):
         return self._get("/api/v1/indexer")
 
-    def search(self, query, indexer_ids=None, limit=None):
+    def search(self, query, indexer_ids=None, categories=None, limit=None):
         params = {"query": query}
         if indexer_ids:
-            params["indexerIds"] = ",".join(str(i) for i in indexer_ids)
+            normalized_ids = []
+            for item in indexer_ids:
+                if isinstance(item, int):
+                    normalized_ids.append(int(item))
+                    continue
+                if isinstance(item, str):
+                    value = item.strip()
+                    if value.isdigit():
+                        normalized_ids.append(int(value))
+            if normalized_ids:
+                # Prowlarr expects repeated query params (indexerIds=1&indexerIds=2),
+                # not a single comma-separated value.
+                params["indexerIds"] = normalized_ids
+        if categories:
+            normalized = []
+            for item in categories:
+                if isinstance(item, int):
+                    normalized.append(int(item))
+                    continue
+                if isinstance(item, str):
+                    value = item.strip()
+                    if value.isdigit():
+                        normalized.append(int(value))
+            if normalized:
+                params["categories"] = normalized
         results = self._get("/api/v1/search", params=params)
         normalized = [_normalize_result(item) for item in results or []]
         if limit:

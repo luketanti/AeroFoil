@@ -1,0 +1,449 @@
+{% extends "base.html" %}
+{% block content %}
+{% include 'nav.html' %}
+
+<div class="container-fluid setting-body">
+    <div class="row">
+        <div class="col">
+            <div class="settings-container container mt-3">
+                <div class="d-flex flex-column flex-lg-row justify-content-between gap-2 align-items-lg-center mb-2">
+                    <div>
+                        <h2 class="pb-2">Save Data Backups</h2>
+                        <p class="text-muted mb-0">Saved archives available for your account.</p>
+                    </div>
+                    <div class="d-flex align-items-center gap-2">
+                        <div class="btn-group btn-group-sm" role="group" aria-label="Saves view mode">
+                            <button type="button" id="viewListBtn" class="btn btn-outline-secondary active">
+                                <i class="bi bi-list-ul"></i> List
+                            </button>
+                            <button type="button" id="viewIconsBtn" class="btn btn-outline-secondary">
+                                <i class="bi bi-grid-3x3-gap"></i> Icons
+                            </button>
+                        </div>
+                        <button type="button" id="refreshSavesBtn" class="btn btn-outline-primary btn-sm">
+                            <i class="bi bi-arrow-clockwise"></i> Refresh
+                        </button>
+                    </div>
+                </div>
+
+                <div id="savesAlert" class="alert alert-info d-none mb-3" role="alert"></div>
+
+                <div class="card">
+                    <div class="card-body">
+                        <div id="savesListView">
+                            <div class="table-responsive">
+                                <table class="table table-dark table-sm align-middle mb-0">
+                                    <thead>
+                                        <tr>
+                                            <th>Title</th>
+                                            <th>Saved</th>
+                                            <th>Note</th>
+                                            <th>Size</th>
+                                            <th class="text-end">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="savesTableBody">
+                                        <tr><td colspan="5" class="text-muted">Loading...</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div id="savesIconsView" class="d-none">
+                            <div id="savesIconGrid" class="row row-cols-2 row-cols-sm-3 row-cols-md-4 row-cols-xl-6 g-3">
+                                <div class="col-12 text-muted">Loading...</div>
+                            </div>
+                        </div>
+                        <div class="small text-muted mt-2" id="savesStatus"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+    .save-title-cell {
+        min-width: 18rem;
+    }
+
+    .save-icon-thumb {
+        width: 42px;
+        height: 42px;
+        border-radius: 0.45rem;
+        object-fit: cover;
+        background: rgba(255, 255, 255, 0.05);
+        flex-shrink: 0;
+    }
+
+    .save-icon-card .card-img-top {
+        aspect-ratio: 1 / 1;
+        object-fit: cover;
+        background: rgba(255, 255, 255, 0.04);
+    }
+
+    .save-icon-card .card-body {
+        min-height: 92px;
+    }
+
+    .save-note-text {
+        max-width: 22rem;
+    }
+</style>
+
+<script>
+    let currentViewMode = 'list';
+
+    function formatBytes(bytes) {
+        const n = Number(bytes || 0);
+        if (!isFinite(n) || n <= 0) return '-';
+        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        let size = n;
+        let idx = 0;
+        while (size >= 1024 && idx < units.length - 1) {
+            size /= 1024;
+            idx += 1;
+        }
+        return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[idx]}`;
+    }
+
+    function showSavesAlert(message, type = 'info') {
+        const alertBox = $('#savesAlert');
+        alertBox.removeClass('d-none alert-info alert-success alert-warning alert-danger');
+        alertBox.addClass(`alert-${type}`);
+        alertBox.text(message);
+    }
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text ?? '';
+        return div.innerHTML;
+    }
+
+    function getTitleId(item) {
+        return (item['title_id'] || item['titleId'] || item['app_id'] || '').toString();
+    }
+
+    function getTitleName(item, titleId) {
+        return (
+            item['title_name']
+            || item['titleName']
+            || item['name']
+            || titleId
+            || 'Unknown title'
+        ).toString();
+    }
+
+    function getDownloadUrl(item, titleId) {
+        let downloadUrl = (item['download_url'] || item['downloadUrl'] || '').toString();
+        const saveId = (item['save_id'] || item['saveId'] || '').toString();
+        if (!downloadUrl && titleId) {
+            if (saveId) {
+                downloadUrl = `/api/saves/download/${encodeURIComponent(titleId)}/${encodeURIComponent(saveId)}.zip`;
+            } else {
+                downloadUrl = `/api/saves/download/${encodeURIComponent(titleId)}.zip`;
+            }
+        }
+        return downloadUrl;
+    }
+
+    function getDeleteUrl(item, titleId) {
+        let deleteUrl = (item['delete_url'] || item['deleteUrl'] || '').toString();
+        const saveId = (item['save_id'] || item['saveId'] || '').toString();
+        if (!deleteUrl && titleId) {
+            if (saveId && saveId.toLowerCase() !== 'legacy') {
+                deleteUrl = `/api/saves/delete/${encodeURIComponent(titleId)}/${encodeURIComponent(saveId)}`;
+            } else {
+                deleteUrl = `/api/saves/delete/${encodeURIComponent(titleId)}`;
+            }
+        }
+        return deleteUrl;
+    }
+
+    function getIconUrl(item, titleId) {
+        let iconUrl = (item['icon_url'] || item['iconUrl'] || '').toString();
+        if (!iconUrl && titleId) {
+            iconUrl = `/api/shop/icon/${encodeURIComponent(titleId)}`;
+        }
+        return iconUrl || '/static/placeholder-icon.svg';
+    }
+
+    function getFallbackIconUrl(item) {
+        return (item['icon_remote_url'] || item['iconRemoteUrl'] || '/static/placeholder-icon.svg').toString();
+    }
+
+    function getSaveNote(item) {
+        return (
+            item['note']
+            || item['save_note']
+            || item['saveNote']
+            || ''
+        ).toString();
+    }
+
+    function getSaveCreatedAt(item) {
+        return (
+            item['created_at']
+            || item['createdAt']
+            || ''
+        ).toString();
+    }
+
+    function formatSaveDate(value) {
+        const text = (value || '').toString().trim();
+        if (!text) return '-';
+        const dt = new Date(text);
+        if (!isNaN(dt.getTime())) {
+            return dt.toLocaleString();
+        }
+        return text;
+    }
+
+    function deleteSaveBackup(deleteUrl, titleName, createdAt, note, buttonEl) {
+        if (!deleteUrl) {
+            showSavesAlert('Delete URL is missing for this backup.', 'warning');
+            return;
+        }
+        const labelTitle = (titleName || 'this title').toString();
+        const labelDate = (createdAt || '').toString();
+        const labelNote = (note || '').toString();
+        let confirmText = `Delete this save backup for ${labelTitle}?`;
+        if (labelDate) {
+            confirmText += `\nSaved: ${labelDate}`;
+        }
+        if (labelNote) {
+            confirmText += `\nNote: ${labelNote}`;
+        }
+        confirmText += '\n\nThis cannot be undone.';
+        if (!window.confirm(confirmText)) {
+            return;
+        }
+
+        if (buttonEl && buttonEl.length) {
+            buttonEl.prop('disabled', true);
+        }
+
+        $.ajax({
+            url: deleteUrl,
+            type: 'DELETE',
+            dataType: 'json',
+        }).done(function (result) {
+            if (!result || result['success'] === false) {
+                const message = (result && result['message']) ? result['message'] : 'Failed to delete save backup.';
+                showSavesAlert(message, 'danger');
+                return;
+            }
+            showSavesAlert('Save backup deleted.', 'success');
+            loadSaves();
+        }).fail(function (xhr) {
+            let message = 'Failed to delete save backup.';
+            try {
+                if (xhr && xhr.responseJSON && xhr.responseJSON.message) {
+                    message = xhr.responseJSON.message;
+                }
+            } catch (e) {
+                // Ignore parse errors and keep default message.
+            }
+            showSavesAlert(message, 'danger');
+        }).always(function () {
+            if (buttonEl && buttonEl.length) {
+                buttonEl.prop('disabled', false);
+            }
+        });
+    }
+
+    function buildIconImage(className, titleName, iconUrl, fallbackIconUrl) {
+        const iconSrc = escapeHtml(iconUrl || '/static/placeholder-icon.svg');
+        const fallbackSrc = escapeHtml(fallbackIconUrl || '/static/placeholder-icon.svg');
+        const alt = escapeHtml(`${titleName || 'Title'} icon`);
+        return `<img src="${iconSrc}" data-fallback-src="${fallbackSrc}" data-fallback-used="0" onerror="onSaveIconError(this)" alt="${alt}" class="${className}">`;
+    }
+
+    function onSaveIconError(imgEl) {
+        if (!imgEl) return;
+        const fallbackSrc = imgEl.getAttribute('data-fallback-src') || '/static/placeholder-icon.svg';
+        const fallbackUsed = imgEl.getAttribute('data-fallback-used') === '1';
+        if (!fallbackUsed) {
+            imgEl.setAttribute('data-fallback-used', '1');
+            imgEl.src = fallbackSrc;
+            return;
+        }
+        imgEl.onerror = null;
+        imgEl.src = '/static/placeholder-icon.svg';
+    }
+
+    function setSavesView(mode) {
+        currentViewMode = mode === 'icons' ? 'icons' : 'list';
+        $('#viewListBtn').toggleClass('active', currentViewMode === 'list');
+        $('#viewIconsBtn').toggleClass('active', currentViewMode === 'icons');
+        $('#savesListView').toggleClass('d-none', currentViewMode !== 'list');
+        $('#savesIconsView').toggleClass('d-none', currentViewMode !== 'icons');
+        try {
+            localStorage.setItem('savesViewMode', currentViewMode);
+        } catch (e) {
+            // Ignore storage errors.
+        }
+    }
+
+    function renderSavesList(items) {
+        const body = $('#savesTableBody');
+        body.empty();
+
+        if (!items.length) {
+            body.html('<tr><td colspan="5" class="text-muted">No save archives found for this account.</td></tr>');
+            return;
+        }
+
+        items.forEach((item) => {
+            const titleId = getTitleId(item);
+            const titleName = getTitleName(item, titleId);
+            const note = getSaveNote(item);
+            const createdAt = formatSaveDate(getSaveCreatedAt(item));
+            const sizeText = formatBytes(item['size']);
+            const downloadUrl = getDownloadUrl(item, titleId);
+            const deleteUrl = getDeleteUrl(item, titleId);
+            const iconUrl = getIconUrl(item, titleId);
+            const fallbackIconUrl = getFallbackIconUrl(item);
+
+            const row = $(`
+                <tr>
+                    <td class="save-title-cell">
+                        <div class="d-flex align-items-center gap-2">
+                            ${buildIconImage('save-icon-thumb', titleName, iconUrl, fallbackIconUrl)}
+                            <div class="overflow-hidden">
+                                <div class="small fw-semibold text-truncate" title="${escapeHtml(titleName)}">${escapeHtml(titleName)}</div>
+                                <div class="small font-monospace text-muted text-truncate" title="${escapeHtml(titleId || '-')}">${escapeHtml(titleId || '-')}</div>
+                            </div>
+                        </div>
+                    </td>
+                    <td class="small text-nowrap">${escapeHtml(createdAt)}</td>
+                    <td class="small text-muted save-note-text text-truncate" title="${escapeHtml(note || '-')}">${escapeHtml(note || '-')}</td>
+                    <td class="small">${escapeHtml(sizeText)}</td>
+                    <td class="text-end">
+                        <div class="btn-group btn-group-sm" role="group">
+                            ${downloadUrl ? `<a class="btn btn-outline-light btn-sm" href="${escapeHtml(downloadUrl)}"><i class="bi bi-download"></i> Download</a>` : ''}
+                            ${deleteUrl ? `<button type="button" class="btn btn-outline-danger btn-sm delete-save-btn" data-delete-url="${escapeHtml(deleteUrl)}" data-title-name="${escapeHtml(titleName)}" data-created-at="${escapeHtml(createdAt)}" data-save-note="${escapeHtml(note || '')}"><i class="bi bi-trash"></i> Delete</button>` : ''}
+                        </div>
+                    </td>
+                </tr>
+            `);
+            body.append(row);
+        });
+    }
+
+    function renderSavesIcons(items) {
+        const grid = $('#savesIconGrid');
+        grid.empty();
+
+        if (!items.length) {
+            grid.html('<div class="col-12 text-muted">No save archives found for this account.</div>');
+            return;
+        }
+
+        items.forEach((item) => {
+            const titleId = getTitleId(item);
+            const titleName = getTitleName(item, titleId);
+            const note = getSaveNote(item);
+            const createdAt = formatSaveDate(getSaveCreatedAt(item));
+            const sizeText = formatBytes(item['size']);
+            const downloadUrl = getDownloadUrl(item, titleId);
+            const deleteUrl = getDeleteUrl(item, titleId);
+            const iconUrl = getIconUrl(item, titleId);
+            const fallbackIconUrl = getFallbackIconUrl(item);
+
+            const card = $(`
+                <div class="col">
+                    <div class="card h-100 bg-body-tertiary border-secondary save-icon-card">
+                        ${buildIconImage('card-img-top', titleName, iconUrl, fallbackIconUrl)}
+                        <div class="card-body p-2">
+                            <div class="small fw-semibold text-truncate" title="${escapeHtml(titleName)}">${escapeHtml(titleName)}</div>
+                            <div class="small text-muted font-monospace text-truncate mb-1" title="${escapeHtml(titleId || '-')}">${escapeHtml(titleId || '-')}</div>
+                            <div class="small text-muted text-truncate" title="${escapeHtml(createdAt)}">${escapeHtml(createdAt)}</div>
+                            <div class="small text-muted text-truncate" title="${escapeHtml(note || '-')}">${escapeHtml(note || '-')}</div>
+                            <div class="small text-muted">${escapeHtml(sizeText)}</div>
+                        </div>
+                        <div class="card-footer p-2 text-end border-secondary">
+                            <div class="btn-group btn-group-sm" role="group">
+                                ${downloadUrl ? `<a class="btn btn-outline-light btn-sm" href="${escapeHtml(downloadUrl)}"><i class="bi bi-download"></i> Download</a>` : ''}
+                                ${deleteUrl ? `<button type="button" class="btn btn-outline-danger btn-sm delete-save-btn" data-delete-url="${escapeHtml(deleteUrl)}" data-title-name="${escapeHtml(titleName)}" data-created-at="${escapeHtml(createdAt)}" data-save-note="${escapeHtml(note || '')}"><i class="bi bi-trash"></i> Delete</button>` : ''}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `);
+            grid.append(card);
+        });
+    }
+
+    function renderSaves(items) {
+        renderSavesList(items);
+        renderSavesIcons(items);
+        $('#savesStatus').text(`${items.length} save version${items.length === 1 ? '' : 's'}`);
+    }
+
+    function renderSavesError(message) {
+        const safeMessage = escapeHtml(message || 'Failed to load saves.');
+        $('#savesTableBody').html(`<tr><td colspan="5" class="text-danger">${safeMessage}</td></tr>`);
+        $('#savesIconGrid').html(`<div class="col-12 text-danger">${safeMessage}</div>`);
+        $('#savesStatus').text('');
+    }
+
+    function loadSaves() {
+        $('#refreshSavesBtn').prop('disabled', true);
+        $('#savesTableBody').html('<tr><td colspan="5" class="text-muted">Loading...</td></tr>');
+        $('#savesIconGrid').html('<div class="col-12 text-muted">Loading...</div>');
+
+        $.getJSON('/api/saves/list', function (result) {
+            if (!result || result['success'] === false) {
+                const message = (result && result['message']) ? result['message'] : 'Failed to load saves.';
+                showSavesAlert(message, 'danger');
+                renderSavesError('Failed to load saves.');
+                return;
+            }
+
+            const saves = Array.isArray(result['saves']) ? result['saves'] : [];
+            showSavesAlert('Saves list loaded.', 'success');
+            renderSaves(saves);
+        }).fail(function (xhr) {
+            let message = 'Failed to load saves.';
+            try {
+                if (xhr && xhr.responseJSON && xhr.responseJSON.message) {
+                    message = xhr.responseJSON.message;
+                }
+            } catch (e) {
+                // Ignore parse errors and keep default message.
+            }
+            showSavesAlert(message, 'danger');
+            renderSavesError('Failed to load saves.');
+        }).always(function () {
+            $('#refreshSavesBtn').prop('disabled', false);
+        });
+    }
+
+    $(document).ready(function () {
+        $('#refreshSavesBtn').on('click', loadSaves);
+        $('#viewListBtn').on('click', function () {
+            setSavesView('list');
+        });
+        $('#viewIconsBtn').on('click', function () {
+            setSavesView('icons');
+        });
+        $(document).on('click', '.delete-save-btn', function () {
+            const btn = $(this);
+            const deleteUrl = (btn.data('delete-url') || '').toString();
+            const titleName = (btn.data('title-name') || '').toString();
+            const createdAt = (btn.data('created-at') || '').toString();
+            const note = (btn.data('save-note') || '').toString();
+            deleteSaveBackup(deleteUrl, titleName, createdAt, note, btn);
+        });
+
+        let savedView = 'list';
+        try {
+            savedView = localStorage.getItem('savesViewMode') || 'list';
+        } catch (e) {
+            savedView = 'list';
+        }
+        setSavesView(savedView === 'icons' ? 'icons' : 'list');
+        loadSaves();
+    });
+</script>
+{% endblock %}

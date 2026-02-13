@@ -1,7 +1,7 @@
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import create_engine
 from sqlalchemy import event
-from sqlalchemy.orm import joinedload
+from sqlalchemy import func, or_, and_, text
 from sqlalchemy.orm.exc import NoResultFound
 from sqlalchemy.dialects.sqlite import insert  # Use postgresql if using PostgreSQL
 from flask_migrate import Migrate, upgrade
@@ -14,7 +14,10 @@ import os, sys
 import shutil
 import logging
 import datetime
-from constants import *
+import threading
+import time
+import atexit
+from app.constants import *
 
 # Retrieve main logger
 logger = logging.getLogger('main')
@@ -29,7 +32,7 @@ def get_alembic_cfg():
     return cfg
 
 def get_current_db_version():
-    engine = create_engine(OWNFOIL_DB)
+    engine = create_engine(AEROFOIL_DB)
     with engine.connect() as connection:
         context = MigrationContext.configure(connection)
         current_rev = context.get_current_revision()
@@ -57,6 +60,13 @@ def is_migration_needed():
 
 def to_dict(db_results):
     return {c.name: getattr(db_results, c.name) for c in db_results.__table__.columns}
+
+
+def _coerce_app_version_num(raw_version):
+    try:
+        return int(raw_version or 0)
+    except Exception:
+        return 0
 
 class Libraries(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -101,12 +111,14 @@ app_files = db.Table('app_files',
     db.Column('app_id', db.Integer, db.ForeignKey('apps.id', ondelete="CASCADE"), primary_key=True),
     db.Column('file_id', db.Integer, db.ForeignKey('files.id', ondelete="CASCADE"), primary_key=True)
 )
+db.Index('idx_app_files_file_id', app_files.c.file_id)
 
 class Apps(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     title_id = db.Column(db.Integer, db.ForeignKey('titles.id', ondelete="CASCADE"), nullable=False)
     app_id = db.Column(db.String)
     app_version = db.Column(db.String)
+    app_version_num = db.Column(db.Integer, default=0)
     app_type = db.Column(db.String)
     owned = db.Column(db.Boolean, default=False)
 
@@ -117,7 +129,21 @@ class Apps(db.Model):
         db.UniqueConstraint('app_id', 'app_version', name='uq_apps_app_version'),
         db.Index('idx_apps_owned', 'owned'),
         db.Index('idx_apps_app_id', 'app_id'),
+        db.Index('idx_apps_title_app_type', 'title_id', 'app_type'),
+        db.Index('idx_apps_type_owned', 'app_type', 'owned'),
+        db.Index('idx_apps_type_version_num', 'app_type', 'app_version_num'),
+        db.Index('idx_apps_appid_type_version_num', 'app_id', 'app_type', 'app_version_num'),
     )
+
+
+@event.listens_for(Apps, 'before_insert')
+def _apps_before_insert(mapper, connection, target):
+    target.app_version_num = _coerce_app_version_num(getattr(target, 'app_version', 0))
+
+
+@event.listens_for(Apps, 'before_update')
+def _apps_before_update(mapper, connection, target):
+    target.app_version_num = _coerce_app_version_num(getattr(target, 'app_version', 0))
 
 class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -190,6 +216,106 @@ class AccessEvents(db.Model):
     duration_ms = db.Column(db.Integer)
 
 
+_ACCESS_EVENT_BUFFER_LOCK = threading.Lock()
+_ACCESS_EVENT_BUFFER = []
+_ACCESS_EVENT_BUFFER_MAX = 64
+_ACCESS_EVENT_BUFFER_FLUSH_S = 1.0
+_ACCESS_EVENT_LAST_FLUSH_TS = 0.0
+
+_DOWNLOAD_COUNT_BUFFER_LOCK = threading.Lock()
+_DOWNLOAD_COUNT_BUFFER = {}
+_DOWNLOAD_COUNT_BUFFER_MAX = 128
+_DOWNLOAD_COUNT_BUFFER_FLUSH_S = 1.5
+_DOWNLOAD_COUNT_LAST_FLUSH_TS = 0.0
+
+
+def flush_access_events_buffer(force=False):
+    global _ACCESS_EVENT_LAST_FLUSH_TS
+    now = time.time()
+    with _ACCESS_EVENT_BUFFER_LOCK:
+        if not _ACCESS_EVENT_BUFFER:
+            _ACCESS_EVENT_LAST_FLUSH_TS = now
+            return 0
+        should_flush = force or len(_ACCESS_EVENT_BUFFER) >= _ACCESS_EVENT_BUFFER_MAX
+        if not should_flush and (now - float(_ACCESS_EVENT_LAST_FLUSH_TS or 0.0)) >= _ACCESS_EVENT_BUFFER_FLUSH_S:
+            should_flush = True
+        if not should_flush:
+            return 0
+        batch = list(_ACCESS_EVENT_BUFFER)
+        _ACCESS_EVENT_BUFFER.clear()
+        _ACCESS_EVENT_LAST_FLUSH_TS = now
+
+    try:
+        db.session.bulk_insert_mappings(AccessEvents, batch)
+        db.session.commit()
+        return len(batch)
+    except Exception:
+        db.session.rollback()
+        with _ACCESS_EVENT_BUFFER_LOCK:
+            if batch:
+                _ACCESS_EVENT_BUFFER[0:0] = batch
+                if len(_ACCESS_EVENT_BUFFER) > 5000:
+                    _ACCESS_EVENT_BUFFER[:] = _ACCESS_EVENT_BUFFER[-5000:]
+        return 0
+
+
+def queue_file_download_increment(file_id):
+    global _DOWNLOAD_COUNT_LAST_FLUSH_TS
+    try:
+        file_id_int = int(file_id)
+    except Exception:
+        return False
+    if file_id_int <= 0:
+        return False
+
+    now = time.time()
+    with _DOWNLOAD_COUNT_BUFFER_LOCK:
+        _DOWNLOAD_COUNT_BUFFER[file_id_int] = int(_DOWNLOAD_COUNT_BUFFER.get(file_id_int, 0)) + 1
+        should_flush = len(_DOWNLOAD_COUNT_BUFFER) >= _DOWNLOAD_COUNT_BUFFER_MAX
+        if not should_flush and (now - float(_DOWNLOAD_COUNT_LAST_FLUSH_TS or 0.0)) >= _DOWNLOAD_COUNT_BUFFER_FLUSH_S:
+            should_flush = True
+    if should_flush:
+        flush_file_download_increments(force=False)
+    return True
+
+
+def flush_file_download_increments(force=False):
+    global _DOWNLOAD_COUNT_LAST_FLUSH_TS
+    now = time.time()
+    with _DOWNLOAD_COUNT_BUFFER_LOCK:
+        if not _DOWNLOAD_COUNT_BUFFER:
+            _DOWNLOAD_COUNT_LAST_FLUSH_TS = now
+            return 0
+        should_flush = force or len(_DOWNLOAD_COUNT_BUFFER) >= _DOWNLOAD_COUNT_BUFFER_MAX
+        if not should_flush and (now - float(_DOWNLOAD_COUNT_LAST_FLUSH_TS or 0.0)) >= _DOWNLOAD_COUNT_BUFFER_FLUSH_S:
+            should_flush = True
+        if not should_flush:
+            return 0
+        pending = dict(_DOWNLOAD_COUNT_BUFFER)
+        _DOWNLOAD_COUNT_BUFFER.clear()
+        _DOWNLOAD_COUNT_LAST_FLUSH_TS = now
+
+    try:
+        for file_id, count in pending.items():
+            if count <= 0:
+                continue
+            (
+                db.session.query(Files)
+                .filter(Files.id == file_id)
+                .update({Files.download_count: Files.download_count + int(count)}, synchronize_session=False)
+            )
+        db.session.commit()
+        return len(pending)
+    except Exception:
+        db.session.rollback()
+        with _DOWNLOAD_COUNT_BUFFER_LOCK:
+            for file_id, count in pending.items():
+                _DOWNLOAD_COUNT_BUFFER[file_id] = int(_DOWNLOAD_COUNT_BUFFER.get(file_id, 0)) + int(count or 0)
+                if len(_DOWNLOAD_COUNT_BUFFER) > 10000:
+                    break
+        return 0
+
+
 def add_access_event(
     kind,
     user=None,
@@ -204,28 +330,30 @@ def add_access_event(
     duration_ms=None,
 ):
     try:
-        evt = AccessEvents(
-            kind=kind,
-            user=user,
-            remote_addr=remote_addr,
-            user_agent=user_agent,
-            title_id=title_id,
-            file_id=file_id,
-            filename=filename,
-            bytes_sent=bytes_sent,
-            ok=ok,
-            status_code=int(status_code) if status_code is not None else None,
-            duration_ms=duration_ms,
-        )
-        db.session.add(evt)
-        db.session.commit()
+        payload = {
+            'at': datetime.datetime.utcnow(),
+            'kind': kind,
+            'user': user,
+            'remote_addr': remote_addr,
+            'user_agent': user_agent,
+            'title_id': title_id,
+            'file_id': file_id,
+            'filename': filename,
+            'bytes_sent': bytes_sent,
+            'ok': ok,
+            'status_code': int(status_code) if status_code is not None else None,
+            'duration_ms': duration_ms,
+        }
+        with _ACCESS_EVENT_BUFFER_LOCK:
+            _ACCESS_EVENT_BUFFER.append(payload)
+        flush_access_events_buffer(force=False)
         return True
     except Exception:
-        db.session.rollback()
         return False
 
 
 def get_access_events(limit=100, kind=None, kinds=None):
+    flush_access_events_buffer(force=True)
     try:
         limit = int(limit)
     except Exception:
@@ -265,6 +393,7 @@ def get_access_events(limit=100, kind=None, kinds=None):
 
 
 def delete_access_events(kind=None, kinds=None):
+    flush_access_events_buffer(force=True)
     try:
         q = AccessEvents.query
         if kinds:
@@ -287,6 +416,7 @@ def delete_access_events(kind=None, kinds=None):
 
 def delete_access_events_excluding(kinds=None):
     """Delete access events excluding the provided kinds."""
+    flush_access_events_buffer(force=True)
     try:
         q = AccessEvents.query
         if kinds:
@@ -303,6 +433,60 @@ def delete_access_events_excluding(kinds=None):
     except Exception:
         db.session.rollback()
         return False
+
+
+def _sqlite_column_exists(table_name, column_name):
+    rows = db.session.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
+    for row in rows:
+        try:
+            if str(row[1]) == str(column_name):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def ensure_performance_schema():
+    try:
+        dialect = (db.engine.dialect.name or '').lower()
+    except Exception:
+        dialect = ''
+
+    if dialect != 'sqlite':
+        return
+
+    try:
+        added_column = False
+        if not _sqlite_column_exists('apps', 'app_version_num'):
+            db.session.execute(text("ALTER TABLE apps ADD COLUMN app_version_num INTEGER"))
+            db.session.commit()
+            added_column = True
+
+        db.session.execute(text("""
+            UPDATE apps
+            SET app_version_num = CAST(COALESCE(NULLIF(app_version, ''), '0') AS INTEGER)
+            WHERE app_version_num IS NULL
+        """))
+        db.session.commit()
+
+        ddl_statements = [
+            "CREATE INDEX IF NOT EXISTS idx_app_files_file_id ON app_files(file_id)",
+            "CREATE INDEX IF NOT EXISTS idx_apps_title_app_type ON apps(title_id, app_type)",
+            "CREATE INDEX IF NOT EXISTS idx_apps_type_owned ON apps(app_type, owned)",
+            "CREATE INDEX IF NOT EXISTS idx_apps_type_version_num ON apps(app_type, app_version_num)",
+            "CREATE INDEX IF NOT EXISTS idx_apps_appid_type_version_num ON apps(app_id, app_type, app_version_num)",
+        ]
+        for ddl in ddl_statements:
+            db.session.execute(text(ddl))
+        db.session.commit()
+        if added_column:
+            logger.info("Added apps.app_version_num and applied performance indexes.")
+        else:
+            logger.info("Performance indexes verified for SQLite database.")
+    except Exception as e:
+        db.session.rollback()
+        logger.warning("Failed to apply performance schema optimizations: %s", e)
+
 
 def init_db(app):
     with app.app_context():
@@ -325,6 +509,7 @@ def init_db(app):
                     create_db_backup()
                     upgrade()
                     logger.info("Database migration applied successfully.")
+            ensure_performance_schema()
 
 def file_exists_in_db(filepath):
     return Files.query.filter_by(filepath=filepath).first() is not None
@@ -381,21 +566,71 @@ def get_all_files_without_identification(identification):
     results = Files.query.filter(Files.identification_type != identification).all()
     return[to_dict(r)['filepath']  for r in results]
 
+def _derive_title_id_from_app(app_id, app_type):
+    app_id = str(app_id or '').upper()
+    app_type = str(app_type or '').upper()
+    if len(app_id) != 16:
+        return None
+    try:
+        if app_type == APP_TYPE_BASE:
+            return app_id
+        if app_type == APP_TYPE_UPD:
+            return f"{app_id[:-3]}000"
+        if app_type == APP_TYPE_DLC:
+            base = app_id[:-3]
+            return (hex(int(base, base=16) - 1)[2:].rjust(len(base), '0') + '000').upper()
+    except Exception:
+        return None
+    return None
+
 def get_all_apps():
-    apps_list = [
-        {
-            "id": app.id,
-            "title_db_id": app.title.id,
-            "title_id": app.title.title_id,  # Access the actual title_id from Titles
-            "app_id": app.app_id,
-            "app_version": app.app_version,
-            "app_type": app.app_type,
-            "owned": app.owned,
-            "size": sum((f.size or 0) for f in (getattr(app, 'files', None) or [])),
-        }
-        for app in Apps.query.options(db.joinedload(Apps.title), db.joinedload(Apps.files)).all()  # Optimized with joinedload
-    ]
-    return apps_list
+    size_subquery = (
+        db.session.query(
+            app_files.c.app_id.label('app_pk'),
+            func.coalesce(func.sum(Files.size), 0).label('size'),
+        )
+        .outerjoin(Files, Files.id == app_files.c.file_id)
+        .group_by(app_files.c.app_id)
+        .subquery()
+    )
+    rows = (
+        db.session.query(
+            Apps.id.label('id'),
+            Apps.title_id.label('title_fk_id'),
+            Titles.id.label('title_db_id'),
+            Titles.title_id.label('title_id'),
+            Apps.app_id.label('app_id'),
+            Apps.app_version.label('app_version'),
+            Apps.app_type.label('app_type'),
+            Apps.owned.label('owned'),
+            func.coalesce(size_subquery.c.size, 0).label('size'),
+        )
+        .outerjoin(Titles, Apps.title_id == Titles.id)
+        .outerjoin(size_subquery, size_subquery.c.app_pk == Apps.id)
+        .all()
+    )
+    out = []
+    missing_title_refs = 0
+    for row in rows:
+        title_id = row.title_id or _derive_title_id_from_app(row.app_id, row.app_type)
+        if row.title_id is None:
+            missing_title_refs += 1
+        out.append({
+            "id": row.id,
+            "title_db_id": row.title_db_id if row.title_db_id is not None else row.title_fk_id,
+            "title_id": title_id,
+            "app_id": row.app_id,
+            "app_version": row.app_version,
+            "app_type": row.app_type,
+            "owned": row.owned,
+            "size": int(row.size or 0),
+        })
+    if missing_title_refs:
+        logger.warning(
+            "Detected %s app rows without matching titles rows; using fallback title_id derivation.",
+            missing_title_refs
+        )
+    return out
 
 def get_all_non_identified_files_from_library(library_id):
     return Files.query.filter_by(identified=False, library_id=library_id).all()
@@ -449,7 +684,51 @@ def get_library_id(library_path):
     return library_id
 
 def get_library_file_paths(library_id):
-    return [file.filepath for file in Files.query.filter_by(library_id=library_id).all()]
+    return list(iter_library_file_paths(library_id))
+
+def iter_library_file_paths(library_id, batch_size=2000):
+    try:
+        batch_size = max(1, int(batch_size))
+    except Exception:
+        batch_size = 2000
+    query = (
+        db.session.query(Files.filepath)
+        .filter_by(library_id=library_id)
+        .yield_per(batch_size)
+    )
+    for filepath, in query:
+        yield filepath
+
+def _files_to_identify_query(library_id, include_filename_retry=False, include_orphaned=False):
+    query = db.session.query(Files.id).filter(Files.library_id == library_id)
+    predicates = [Files.identified.is_(False)]
+    if include_filename_retry:
+        predicates.append(Files.identification_type == 'filename')
+    if include_orphaned:
+        orphaned = ~db.session.query(app_files.c.file_id).filter(app_files.c.file_id == Files.id).exists()
+        predicates.append(orphaned)
+    query = query.filter(or_(*predicates))
+    return query.order_by(Files.id)
+
+def iter_file_ids_for_identification(library_id, include_filename_retry=False, include_orphaned=False, batch_size=1000):
+    try:
+        batch_size = max(1, int(batch_size))
+    except Exception:
+        batch_size = 1000
+    query = _files_to_identify_query(
+        library_id,
+        include_filename_retry=include_filename_retry,
+        include_orphaned=include_orphaned
+    ).yield_per(batch_size)
+    for file_id, in query:
+        yield file_id
+
+def count_file_ids_for_identification(library_id, include_filename_retry=False, include_orphaned=False):
+    return _files_to_identify_query(
+        library_id,
+        include_filename_retry=include_filename_retry,
+        include_orphaned=include_orphaned
+    ).count()
 
 def set_library_scan_time(library_id, scan_time=None):
     library = get_library(library_id)
@@ -475,21 +754,42 @@ def add_title_id_in_db(title_id):
         db.session.commit()
 
 def get_all_title_apps(title_id):
-    title = (
-        Titles.query
-        .options(joinedload(Titles.apps).joinedload(Apps.files))
-        .filter_by(title_id=title_id)
-        .first()
+    size_subquery = (
+        db.session.query(
+            app_files.c.app_id.label('app_pk'),
+            func.coalesce(func.sum(Files.size), 0).label('size'),
+        )
+        .outerjoin(Files, Files.id == app_files.c.file_id)
+        .group_by(app_files.c.app_id)
+        .subquery()
     )
-    if not title:
-        return []
-
-    out = []
-    for a in title.apps:
-        d = to_dict(a)
-        d['size'] = sum((f.size or 0) for f in (getattr(a, 'files', None) or []))
-        out.append(d)
-    return out
+    rows = (
+        db.session.query(
+            Apps.id.label('id'),
+            Apps.title_id.label('title_id'),
+            Apps.app_id.label('app_id'),
+            Apps.app_version.label('app_version'),
+            Apps.app_type.label('app_type'),
+            Apps.owned.label('owned'),
+            func.coalesce(size_subquery.c.size, 0).label('size'),
+        )
+        .join(Titles, Apps.title_id == Titles.id)
+        .outerjoin(size_subquery, size_subquery.c.app_pk == Apps.id)
+        .filter(Titles.title_id == title_id)
+        .all()
+    )
+    return [
+        {
+            'id': row.id,
+            'title_id': row.title_id,
+            'app_id': row.app_id,
+            'app_version': row.app_version,
+            'app_type': row.app_type,
+            'owned': row.owned,
+            'size': int(row.size or 0),
+        }
+        for row in rows
+    ]
 
 def get_app_by_id_and_version(app_id, app_version):
     """Get app entry for a specific app_id and version (unique due to constraint)"""
@@ -598,27 +898,68 @@ def delete_files_by_library(library_path):
         })
         return success, errors
 
+def delete_files_by_filepaths_batch(filepaths, commit=True):
+    """Delete files and update app ownership in a single batched transaction."""
+    try:
+        unique_paths = list(dict.fromkeys([str(path) for path in (filepaths or []) if path]))
+    except Exception:
+        unique_paths = []
+    if not unique_paths:
+        return 0, 0
+
+    file_ids = [
+        row.id
+        for row in db.session.query(Files.id).filter(Files.filepath.in_(unique_paths)).all()
+    ]
+    if not file_ids:
+        return 0, 0
+
+    affected_app_ids = [
+        row.app_id
+        for row in (
+            db.session.query(app_files.c.app_id)
+            .filter(app_files.c.file_id.in_(file_ids))
+            .distinct()
+            .all()
+        )
+    ]
+
+    db.session.execute(app_files.delete().where(app_files.c.file_id.in_(file_ids)))
+    deleted_count = (
+        db.session.query(Files)
+        .filter(Files.id.in_(file_ids))
+        .delete(synchronize_session=False)
+    )
+
+    apps_updated = 0
+    if affected_app_ids:
+        apps_updated = len(affected_app_ids)
+        has_files_expr = (
+            db.session.query(app_files.c.app_id)
+            .filter(app_files.c.app_id == Apps.id)
+            .exists()
+        )
+        (
+            db.session.query(Apps)
+            .filter(Apps.id.in_(affected_app_ids))
+            .update({Apps.owned: has_files_expr}, synchronize_session=False)
+        )
+
+    if commit:
+        db.session.commit()
+    return int(deleted_count or 0), int(apps_updated or 0)
+
 def delete_file_by_filepath(filepath):
     try:
-        # Find file with the given filepath
-        file_to_delete = Files.query.filter_by(filepath=filepath).one()
-        file_id = file_to_delete.id
-        
-        # Update Apps table before deleting file
-        apps_updated = remove_file_from_apps(file_id)
-        
-        # Delete file
-        db.session.delete(file_to_delete)
-        
-        # Commit the changes
-        db.session.commit()
-        
+        deleted_count, apps_updated = delete_files_by_filepaths_batch([filepath], commit=True)
+        if deleted_count <= 0:
+            logger.info(f"File '{filepath}' not present in database.")
+            return
+
         logger.info(f"File '{filepath}' removed from database.")
         if apps_updated > 0:
             logger.info(f"Updated {apps_updated} app entries to remove file reference.")
             
-    except NoResultFound:
-        logger.info(f"File '{filepath}' not present in database.")
     except Exception as e:
         # If there's an error, rollback the session
         db.session.rollback()
@@ -626,39 +967,63 @@ def delete_file_by_filepath(filepath):
 
 def remove_missing_files_from_db():
     try:
-        # Query all entries in the Files table
-        files = Files.query.all()
-        
-        # List to keep track of IDs to be deleted
-        ids_to_delete = []
-        
-        for file_entry in files:
-            # Check if the file exists on disk
-            if not os.path.exists(file_entry.filepath):
-                # If the file does not exist, mark this entry for deletion
-                ids_to_delete.append(file_entry.id)
-                logger.debug(f"File not found, marking file for deletion: {file_entry.filepath}")
-        
-        # Update Apps table before deleting files
+        batch_size = 500
+        last_id = 0
+        total_deleted = 0
         total_apps_updated = 0
-        if ids_to_delete:
-            # Remove file_ids from Apps table and update owned status
-            for file_id in ids_to_delete:
-                apps_updated = remove_file_from_apps(file_id)
-                total_apps_updated += apps_updated
-            
-            # Delete all marked entries from the Files table
-            Files.query.filter(Files.id.in_(ids_to_delete)).delete(synchronize_session=False)
-            
-            db.session.commit()
-            
-            logger.info(f"Deleted {len(ids_to_delete)} files from the database.")
+
+        while True:
+            rows = (
+                db.session.query(Files.id, Files.filepath)
+                .filter(Files.id > last_id)
+                .order_by(Files.id)
+                .limit(batch_size)
+                .all()
+            )
+            if not rows:
+                break
+            last_id = rows[-1].id
+
+            ids_to_delete = []
+            for row in rows:
+                if not row.filepath or not os.path.exists(row.filepath):
+                    ids_to_delete.append(row.id)
+                    logger.debug(f"File not found, marking file for deletion: {row.filepath}")
+
+            if not ids_to_delete:
+                db.session.expunge_all()
+                continue
+
+            ids_to_delete_set = set(ids_to_delete)
+            filepaths_to_delete = [
+                row.filepath
+                for row in rows
+                if row.id in ids_to_delete_set and row.filepath
+            ]
+            deleted_count, apps_updated = delete_files_by_filepaths_batch(filepaths_to_delete, commit=True)
+            total_deleted += deleted_count
+            total_apps_updated += apps_updated
+            db.session.expunge_all()
+
+        if total_deleted > 0:
+            logger.info(f"Deleted {total_deleted} files from the database.")
             if total_apps_updated > 0:
                 logger.info(f"Updated {total_apps_updated} app entries to remove missing file references.")
-
         else:
             logger.debug("No files were deleted. All files are present on disk.")
     
     except Exception as e:
         db.session.rollback()  # Rollback in case of an error
         logger.error(f"An error occurred while removing missing files: {str(e)}")
+
+
+@atexit.register
+def _flush_db_buffers_at_exit():
+    try:
+        flush_access_events_buffer(force=True)
+    except Exception:
+        pass
+    try:
+        flush_file_download_increments(force=True)
+    except Exception:
+        pass

@@ -8,6 +8,14 @@
     padding: 20px;
 }
 
+.navbar-brand-banner {
+    height: 28px;
+    width: auto;
+    max-width: 180px;
+    object-fit: contain;
+    display: block;
+}
+
 .discover-columns {
     flex-wrap: nowrap;
 }

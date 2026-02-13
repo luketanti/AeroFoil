@@ -2,6 +2,31 @@
 {% block content %}
 {% include 'nav.html' %}
 
+<style>
+    #manageDiagnosticsResizeShell {
+        height: 280px;
+        min-height: 180px;
+        min-width: 320px;
+        resize: both;
+        overflow: auto;
+        border: 1px solid var(--bs-border-color);
+        border-radius: 0.375rem;
+        background: var(--bs-body-bg);
+    }
+
+    #manageDiagnosticsResizeShell.diagnostics-expanded {
+        height: clamp(360px, 60vh, 900px);
+    }
+
+    #manageDiagnostics {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        border: 0;
+        background: transparent;
+    }
+</style>
+
 <div class="container-fluid setting-body">
     <div class="row">
         <div class="col">
@@ -69,32 +94,21 @@
                                                 onClick='deleteOlderUpdates()'>Delete older updates</button>
                                         </div>
                                     </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="card mb-3">
-                            <div class="card-body">
-                                <div class="d-flex align-items-center justify-content-between mb-3">
-                                    <div>
-                                        <h5 class="card-title mb-1">Downloads</h5>
-                                        <div class="text-muted small">Keep transfers organized without enabling downloads.</div>
-                                    </div>
-                                </div>
-                                <div class="vstack gap-3">
                                     <div class="border rounded p-3">
-                                        <div class="fw-semibold">Completed downloads</div>
-                                        <div class="text-muted small mb-2">Move and organize completed torrents without enabling downloads.</div>
+                                        <div class="fw-semibold">Delete duplicates</div>
+                                        <div class="text-muted small mb-2">Keep one owned file per app ID/version and remove duplicate file entries, even across different extensions.</div>
                                         <div class="d-flex flex-wrap gap-3 align-items-center">
-                                            <button type="button" id="checkDownloadsBtn" class="btn btn-outline-primary ms-auto"
-                                                onClick='checkCompletedDownloads()'>Check completed downloads</button>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="deleteDuplicatesDryRun" checked>
+                                                <label class="form-check-label" for="deleteDuplicatesDryRun">Dry run</label>
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="deleteDuplicatesVerbose">
+                                                <label class="form-check-label" for="deleteDuplicatesVerbose">Verbose</label>
+                                            </div>
+                                            <button type="button" id="deleteDuplicatesBtn" class="btn btn-danger ms-auto"
+                                                onClick='deleteDuplicates()'>Delete duplicates</button>
                                         </div>
-                                    </div>
-                                    <div class="border rounded p-3">
-                                        <div class="fw-semibold">Download queue</div>
-                                        <div class="text-muted small mb-2">Pending downloads queued for auto-move.</div>
-                                        <div class="small text-muted" id="downloadsQueueStatus">Loading...</div>
-                                        <pre id="downloadsQueueList" class="mb-0" style="max-height: 200px; overflow: auto;"></pre>
                                     </div>
                                 </div>
                             </div>
@@ -119,6 +133,32 @@
                                                 onClick="loadConvertibleFiles()">Refresh</button>
                                             <button class="btn btn-outline-warning" type="button" id="convertSingleBtn"
                                                 onClick="convertSingleFile()">Convert selected</button>
+                                        </div>
+                                        <div class="d-flex flex-wrap gap-3 align-items-center mt-2">
+                                            <div class="input-group" style="max-width: 180px;">
+                                                <span class="input-group-text">Threads</span>
+                                                <input type="number" min="1" class="form-control" id="convertSingleThreadsInput" placeholder="Auto">
+                                            </div>
+                                            <div class="input-group" style="max-width: 200px;">
+                                                <span class="input-group-text">Timeout</span>
+                                                <input type="number" min="1" class="form-control" id="convertSingleTimeoutInput" placeholder="sec">
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="convertSingleDeleteOriginal" checked>
+                                                <label class="form-check-label" for="convertSingleDeleteOriginal">Delete original</label>
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="convertSingleDryRun" checked>
+                                                <label class="form-check-label" for="convertSingleDryRun">Dry run</label>
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="convertSingleVerbose">
+                                                <label class="form-check-label" for="convertSingleVerbose">Verbose</label>
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="convertSingleVerify" checked>
+                                                <label class="form-check-label" for="convertSingleVerify">Verify output</label>
+                                            </div>
                                         </div>
                                         <div class="form-text">Only NSP/XCI files are listed.</div>
                                     </div>
@@ -149,8 +189,12 @@
                                                 <input class="form-check-input" type="checkbox" id="convertVerbose">
                                                 <label class="form-check-label" for="convertVerbose">Verbose</label>
                                             </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="convertVerify" checked>
+                                                <label class="form-check-label" for="convertVerify">Verify output</label>
+                                            </div>
                                             <button type="button" id="convertNszBtn" class="btn btn-warning ms-auto"
-                                                onClick='convertToNsz()'>Convert to NSZ</button>
+                                                onClick='convertToNsz()'>Start Library Conversion</button>
                                         </div>
                                     </div>
                                 </div>
@@ -183,6 +227,21 @@
                             <div class="card-body">
                                 <h5 class="card-title">Recent jobs</h5>
                                 <div id="manageJobHistory" class="small text-muted">No jobs yet.</div>
+                            </div>
+                        </div>
+                        <div class="card mb-3">
+                            <div class="card-body">
+                                <details id="manageDiagnosticsDetails">
+                                    <summary class="fw-semibold">Diagnostics</summary>
+                                    <div class="text-muted small mt-2 mb-2">Live memory and scan diagnostics.</div>
+                                    <div class="d-flex justify-content-end gap-2 mb-2">
+                                        <button class="btn btn-outline-secondary btn-sm" type="button" id="expandDiagnosticsBtn" onClick="toggleDiagnosticsExpand()">Expand</button>
+                                        <button class="btn btn-outline-secondary btn-sm" type="button" id="copyDiagnosticsBtn" onClick="copyDiagnostics()">Copy</button>
+                                    </div>
+                                    <div id="manageDiagnosticsResizeShell">
+                                        <pre id="manageDiagnostics" class="mb-0 small">Loading diagnostics...</pre>
+                                    </div>
+                                </details>
                             </div>
                         </div>
                     </div>
@@ -251,48 +310,6 @@
         });
     }
 
-    function checkCompletedDownloads() {
-        $('#checkDownloadsBtn').prop('disabled', true);
-        $.ajax({
-            url: "/api/manage/check-downloads",
-            type: 'POST',
-            success: function (result) {
-                if (result['success']) {
-                    showManageAlert(result['message'] || 'Checked completed downloads.', 'success');
-                } else {
-                    showManageAlert(result['message'] || 'Check failed.', 'danger');
-                }
-            },
-            complete: function () {
-                $('#checkDownloadsBtn').prop('disabled', false);
-            }
-        });
-    }
-
-    function loadDownloadsQueue() {
-        $.getJSON("/api/manage/downloads-queue", function (result) {
-            if (!result['success']) {
-                $('#downloadsQueueStatus').text('Failed to load queue.');
-                return;
-            }
-            const state = result['state'] || {};
-            const pending = state['pending'] || [];
-            const running = state['running'] ? 'running' : 'idle';
-            const lastRun = state['last_run'] ? new Date(state['last_run'] * 1000).toLocaleString() : 'never';
-            $('#downloadsQueueStatus').text(`Status: ${running}. Last check: ${lastRun}. Pending: ${pending.length}.`);
-            if (!pending.length) {
-                $('#downloadsQueueList').text('No queued downloads.');
-                return;
-            }
-            const lines = pending.map(item => {
-                const name = item['expected_name'] || item['title_id'] || 'Unknown';
-                const version = item['version'] != null ? `v${item['version']}` : '';
-                return `${name} ${version}`.trim();
-            });
-            $('#downloadsQueueList').text(lines.join('\n'));
-        });
-    }
-
     function deleteOlderUpdates() {
         $('#deleteUpdatesBtn').prop('disabled', true);
         data = {
@@ -319,12 +336,39 @@
         });
     }
 
+    function deleteDuplicates() {
+        $('#deleteDuplicatesBtn').prop('disabled', true);
+        data = {
+            dry_run: $('#deleteDuplicatesDryRun').is(':checked'),
+            verbose: $('#deleteDuplicatesVerbose').is(':checked')
+        }
+        $.ajax({
+            url: "/api/manage/delete-duplicates",
+            type: 'POST',
+            data: JSON.stringify(data),
+            contentType: "application/json",
+            success: function (result) {
+                if (result['success']) {
+                    showManageAlert(`Delete duplicates complete. Deleted ${result['deleted']} files. Skipped ${result['skipped']}.`, 'success');
+                    showManageOutput(result['details']);
+                } else {
+                    showManageAlert(`Delete duplicates failed: ${result['errors'].join('; ')}`, 'danger');
+                    showManageOutput(result['details']);
+                }
+            },
+            complete: function () {
+                $('#deleteDuplicatesBtn').prop('disabled', false);
+            }
+        });
+    }
+
     function convertToNsz() {
         $('#convertNszBtn').prop('disabled', true);
         data = {
             dry_run: $('#convertDryRun').is(':checked'),
             delete_original: $('#convertDeleteOriginal').is(':checked'),
             verbose: $('#convertVerbose').is(':checked'),
+            verify: $('#convertVerify').is(':checked'),
             threads: getThreadsValue(),
             library_id: getLibraryValue(),
             timeout_seconds: getTimeoutValue()
@@ -384,11 +428,12 @@
         const selectedLabel = $('#convertSingleSelect option:selected').text();
         data = {
             file_id: fileId,
-            dry_run: $('#convertDryRun').is(':checked'),
-            delete_original: $('#convertDeleteOriginal').is(':checked'),
-            verbose: $('#convertVerbose').is(':checked'),
-            threads: getThreadsValue(),
-            timeout_seconds: getTimeoutValue()
+            dry_run: $('#convertSingleDryRun').is(':checked'),
+            delete_original: $('#convertSingleDeleteOriginal').is(':checked'),
+            verbose: $('#convertSingleVerbose').is(':checked'),
+            verify: $('#convertSingleVerify').is(':checked'),
+            threads: getSingleThreadsValue(),
+            timeout_seconds: getSingleTimeoutValue()
         }
         $.ajax({
             url: "/api/manage/convert-single-job",
@@ -397,7 +442,7 @@
             contentType: "application/json",
             success: function (result) {
                 if (result['success']) {
-                    showVerboseOutput = $('#convertVerbose').is(':checked');
+                    showVerboseOutput = $('#convertSingleVerbose').is(':checked');
                     startJobPolling(result['job_id'], `Single conversion started for ${selectedLabel}`);
                 } else {
                     showManageAlert(`Single conversion failed: ${result['errors'].join('; ')}`, 'danger');
@@ -432,6 +477,15 @@
     let jobPollTimer = null;
     let lastLogCount = 0;
     let showVerboseOutput = false;
+    const manageJobPollingKeys = ['aerofoilJobPolling', 'ownfoilJobPolling'];
+
+    function enableJobPollingStorage() {
+        localStorage.setItem('aerofoilJobPolling', 'true');
+    }
+
+    function clearJobPollingStorage() {
+        manageJobPollingKeys.forEach((key) => localStorage.removeItem(key));
+    }
     function getThreadsValue() {
         const val = $('#convertThreadsInput').val();
         return val ? parseInt(val, 10) : null;
@@ -439,6 +493,16 @@
 
     function getTimeoutValue() {
         const val = $('#convertTimeoutInput').val();
+        return val ? parseInt(val, 10) : null;
+    }
+
+    function getSingleThreadsValue() {
+        const val = $('#convertSingleThreadsInput').val();
+        return val ? parseInt(val, 10) : null;
+    }
+
+    function getSingleTimeoutValue() {
+        const val = $('#convertSingleTimeoutInput').val();
         return val ? parseInt(val, 10) : null;
     }
 
@@ -451,7 +515,7 @@
         activeJobId = jobId;
         showManageAlert(startMessage, 'info');
         lastLogCount = 0;
-        localStorage.setItem('ownfoilJobPolling', 'true');
+        enableJobPollingStorage();
         if (showVerboseOutput && resetOutput) {
             showManageOutput([startMessage]);
         } else if (resetOutput) {
@@ -469,17 +533,20 @@
         if (!job || job['status'] !== 'running') {
             return;
         }
-        showVerboseOutput = $('#convertVerbose').is(':checked');
+        showVerboseOutput = (job['kind'] === 'convert-single')
+            ? $('#convertSingleVerbose').is(':checked')
+            : $('#convertVerbose').is(':checked');
         activeJobId = job['id'];
         lastLogCount = 0;
-        localStorage.setItem('ownfoilJobPolling', 'true');
+        enableJobPollingStorage();
         const progress = job['progress'] || {};
         updateProgressDisplay(
             progress['done'] || 0,
             progress['total'] || 0,
             progress['percent'] || 0,
             progress['message'] || '',
-            progress['file'] || ''
+            progress['file'] || '',
+            job['status'] || 'running'
         );
         if (showVerboseOutput) {
             const logs = job['logs'] || [];
@@ -513,7 +580,7 @@
             const percent = progress['percent'] || 0;
             const file = progress['file'] || '';
             const message = progress['message'] || '';
-            updateProgressDisplay(done, total, percent, message, file);
+            updateProgressDisplay(done, total, percent, message, file, job['status'] || 'running');
             if (message && job['status'] === 'running') {
                 showManageAlert(message, 'info');
             }
@@ -528,7 +595,7 @@
                 clearInterval(jobPollTimer);
                 jobPollTimer = null;
                 $('#cancelJobBtn').prop('disabled', true);
-                localStorage.removeItem('ownfoilJobPolling');
+                clearJobPollingStorage();
                 if (job['status'] === 'success') {
                     showManageAlert('Conversion complete.', 'success');
                 } else {
@@ -540,7 +607,7 @@
         });
     }
 
-    function updateProgressDisplay(done, total, percent, message, file) {
+    function updateProgressDisplay(done, total, percent, message, file, jobStatus = 'running') {
         const progressPercent = total ? Math.round((done / total) * 100) : 0;
         $('#manageProgressBar').css('width', `${progressPercent}%`);
         $('#manageProgressText').text(`Progress: ${done}/${total} (${progressPercent}%)`);
@@ -549,7 +616,15 @@
         } else {
             $('#manageFileText').text('');
         }
-        if (percent) {
+        if (jobStatus !== 'running') {
+            if (jobStatus === 'success') {
+                $('#manageCompressionText').text('Converter progress: Complete');
+            } else if (jobStatus === 'cancelled') {
+                $('#manageCompressionText').text('Converter progress: Cancelled');
+            } else {
+                $('#manageCompressionText').text('Converter progress: Failed');
+            }
+        } else if (percent) {
             $('#manageCompressionText').text(`Converter progress: ${percent.toFixed(0)}%`);
         } else {
             $('#manageCompressionText').text('');
@@ -570,7 +645,7 @@
                 if (result['success']) {
                     showManageAlert('Job cancelled.', 'warning');
                     $('#cancelJobBtn').prop('disabled', true);
-                    localStorage.removeItem('ownfoilJobPolling');
+                    clearJobPollingStorage();
                 }
             }
         });
@@ -618,7 +693,7 @@
                 return;
             }
             const keysOk = result['keys_present'];
-            const nszOk = !!result['nsz_exe'];
+            const nszOk = !!result['nsz_runner'];
             let badgeClass = 'text-bg-success';
             let text = 'Converter ready';
             if (!keysOk || !nszOk) {
@@ -643,16 +718,248 @@
         });
     }
 
+    function formatDiagBytes(bytes) {
+        if (bytes == null || isNaN(bytes)) {
+            return 'n/a';
+        }
+        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        let size = Number(bytes);
+        let unitIndex = 0;
+        while (size >= 1024 && unitIndex < units.length - 1) {
+            size /= 1024;
+            unitIndex += 1;
+        }
+        return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[unitIndex]}`;
+    }
+
+    function formatDiagAge(seconds) {
+        if (seconds == null || isNaN(seconds)) {
+            return 'n/a';
+        }
+        const s = Math.max(0, Math.round(Number(seconds)));
+        if (s < 60) {
+            return `${s}s`;
+        }
+        const m = Math.floor(s / 60);
+        const r = s % 60;
+        return `${m}m ${r}s`;
+    }
+
+    function diagnosticsPhaseLine(name, phase) {
+        if (!phase) {
+            return `${name}: n/a`;
+        }
+        const inProgress = phase['in_progress'] ? 'running' : 'idle';
+        const peak = phase['identity_map_peak'] != null ? phase['identity_map_peak'] : 'n/a';
+        const last = phase['identity_map_last'] != null ? phase['identity_map_last'] : 'n/a';
+        const gcCount = phase['gc_collections'] != null ? phase['gc_collections'] : 'n/a';
+        const counters = phase['counters'] || {};
+        const bits = [];
+        if (counters['processed'] != null) {
+            bits.push(`processed=${counters['processed']}`);
+        }
+        if (counters['total_candidates'] != null) {
+            bits.push(`candidates=${counters['total_candidates']}`);
+        }
+        if (counters['files_seen'] != null) {
+            bits.push(`seen=${counters['files_seen']}`);
+        }
+        if (counters['files_added'] != null) {
+            bits.push(`added=${counters['files_added']}`);
+        }
+        if (counters['files_removed'] != null) {
+            bits.push(`removed=${counters['files_removed']}`);
+        }
+        if (counters['apps_added'] != null) {
+            bits.push(`apps_added=${counters['apps_added']}`);
+        }
+        if (counters['generated_items'] != null) {
+            bits.push(`items=${counters['generated_items']}`);
+        }
+        const extra = bits.length ? ` ${bits.join(' ')}` : '';
+        return `${name}: ${inProgress} idmap peak=${peak} last=${last} gc=${gcCount}${extra}`;
+    }
+
+    function copyDiagnostics() {
+        const text = $('#manageDiagnostics').text() || '';
+        if (!text.trim()) {
+            showManageAlert('No diagnostics text to copy yet.', 'warning');
+            return;
+        }
+        const btn = $('#copyDiagnosticsBtn');
+        const setCopiedState = function () {
+            const original = btn.text();
+            btn.text('Copied');
+            setTimeout(function () {
+                btn.text(original);
+            }, 1200);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function () {
+                setCopiedState();
+            }).catch(function () {
+                showManageAlert('Clipboard write failed.', 'danger');
+            });
+            return;
+        }
+        const ta = $('<textarea>').val(text).css({ position: 'fixed', top: '-1000px', left: '-1000px' });
+        $('body').append(ta);
+        ta.trigger('focus');
+        ta.trigger('select');
+        let ok = false;
+        try {
+            ok = document.execCommand('copy');
+        } catch (e) {
+            ok = false;
+        }
+        ta.remove();
+        if (ok) {
+            setCopiedState();
+        } else {
+            showManageAlert('Clipboard not available in this browser.', 'danger');
+        }
+    }
+
+    function toggleDiagnosticsExpand() {
+        const shell = $('#manageDiagnosticsResizeShell');
+        const btn = $('#expandDiagnosticsBtn');
+        const isExpanded = shell.hasClass('diagnostics-expanded');
+        if (isExpanded) {
+            shell.removeClass('diagnostics-expanded');
+            btn.text('Expand');
+            btn.attr('aria-pressed', 'false');
+            return;
+        }
+        shell.addClass('diagnostics-expanded');
+        btn.text('Collapse');
+        btn.attr('aria-pressed', 'true');
+    }
+
+    let diagnosticsTimer = null;
+    let diagnosticsRequest = null;
+    let diagnosticsRequestSeq = 0;
+    function loadDiagnostics() {
+        // Keep only one in-flight diagnostics request to avoid hung XHRs piling up.
+        if (diagnosticsRequest && diagnosticsRequest.readyState !== 4) {
+            diagnosticsRequest.abort();
+        }
+        const requestSeq = ++diagnosticsRequestSeq;
+        diagnosticsRequest = $.ajax({
+            url: "/api/manage/diagnostics/memory",
+            type: "GET",
+            dataType: "json",
+            timeout: 4500,
+            cache: false
+        }).done(function (result) {
+            if (requestSeq !== diagnosticsRequestSeq) {
+                return;
+            }
+            try {
+                if (!result['success']) {
+                    $('#manageDiagnostics').text('Failed to load diagnostics.');
+                    return;
+                }
+                const process = result['process'] || {};
+                const scan = result['scan'] || {};
+                const rebuild = scan['library_rebuild'] || {};
+                const titledb = result['titledb'] || {};
+                const titledbSizes = titledb['sizes'] || {};
+                const shop = result['shop_sections_cache'] || {};
+                const shopMem = shop['in_memory'] || {};
+                const shopDisk = shop['disk'] || {};
+                const sql = result['sqlalchemy'] || {};
+                const gcInfo = result['python_gc'] || {};
+                const libDiag = (scan['library_memory_diagnostics'] || {});
+                const phases = libDiag['phases'] || {};
+                const shopMemSummary = shopMem['summary'] || {};
+                const shopDiskSummary = shopDisk['summary'] || {};
+                const gcCounts = Array.isArray(gcInfo['counts']) ? gcInfo['counts'] : [];
+
+                const lines = [];
+                lines.push(`updated: ${new Date((result['timestamp'] || 0) * 1000).toLocaleString()}`);
+                lines.push(`process: rss=${formatDiagBytes(process['rss_bytes'])} vms=${formatDiagBytes(process['vms_bytes'])}`);
+                lines.push(`scan: in_progress=${!!scan['scan_in_progress']} rebuild=${!!rebuild['in_progress']}`);
+                lines.push(`sqlalchemy: identity_map=${sql['current_session_identity_map_size'] ?? 'n/a'} new=${sql['new_count'] ?? 'n/a'} dirty=${sql['dirty_count'] ?? 'n/a'}`);
+                lines.push(`python_gc: counts=${gcCounts.join(', ') || 'n/a'}`);
+                lines.push(`titledb: loaded=${!!titledb['loaded']} refcount=${titledb['refcount'] ?? 'n/a'} titles=${titledbSizes['titles_by_title_id'] ?? 'n/a'} versions=${titledbSizes['versions'] ?? 'n/a'}`);
+                lines.push(`shop cache mem: present=${!!shopMem['present']} age=${formatDiagAge(shopMem['age_s'])} size=${formatDiagBytes(shopMemSummary['size_bytes'])}`);
+                lines.push(`shop cache disk: present=${!!shopDisk['present']} age=${formatDiagAge(shopDisk['age_s'])} size=${formatDiagBytes(shopDiskSummary['size_bytes'])}`);
+                lines.push('');
+                lines.push('phases:');
+                lines.push(diagnosticsPhaseLine('scan_library_path', phases['scan_library_path']));
+                lines.push(diagnosticsPhaseLine('identify_library_files', phases['identify_library_files']));
+                lines.push(diagnosticsPhaseLine('add_missing_apps_to_db', phases['add_missing_apps_to_db']));
+                lines.push(diagnosticsPhaseLine('update_titles', phases['update_titles']));
+                lines.push(diagnosticsPhaseLine('generate_library', phases['generate_library']));
+                $('#manageDiagnostics').text(lines.join('\n'));
+            } catch (error) {
+                $('#manageDiagnostics').text('Diagnostics parse error.');
+            }
+        }).fail(function (_jqXhr, textStatus) {
+            if (requestSeq !== diagnosticsRequestSeq) {
+                return;
+            }
+            if (textStatus === 'abort') {
+                return;
+            }
+            if (textStatus === 'timeout') {
+                $('#manageDiagnostics').text('Diagnostics request timed out.');
+                return;
+            }
+            $('#manageDiagnostics').text('Diagnostics endpoint unavailable.');
+        }).always(function () {
+            if (requestSeq === diagnosticsRequestSeq) {
+                diagnosticsRequest = null;
+            }
+        });
+    }
+
+    function startDiagnosticsPolling() {
+        if (diagnosticsTimer) {
+            return;
+        }
+        diagnosticsTimer = setInterval(loadDiagnostics, 5000);
+    }
+
+    function stopDiagnosticsPolling() {
+        if (diagnosticsTimer) {
+            clearInterval(diagnosticsTimer);
+            diagnosticsTimer = null;
+        }
+        if (diagnosticsRequest && diagnosticsRequest.readyState !== 4) {
+            diagnosticsRequest.abort();
+        }
+        diagnosticsRequest = null;
+    }
+
     $(document).ready(function () {
         loadLibraries();
         loadConvertibleFiles();
         loadJobHistory();
         loadHealthStatus();
-        loadDownloadsQueue();
+        loadDiagnostics();
         startJobHistoryPolling();
-        setInterval(loadDownloadsQueue, 5000);
+        startDiagnosticsPolling();
         $('#convertLibrarySelect').on('change', loadConvertibleFiles);
         $('#convertVerbose').on('change', function () {
+            showVerboseOutput = $(this).is(':checked');
+            if (showVerboseOutput && activeJobId) {
+                $.getJSON(`/api/manage/convert-job/${activeJobId}`, function (result) {
+                    if (!result['success']) {
+                        return;
+                    }
+                    const job = result['job'];
+                    const logs = job['logs'] || [];
+                    if (logs.length) {
+                        showManageOutput(logs);
+                        lastLogCount = logs.length;
+                    }
+                });
+            } else if (!showVerboseOutput) {
+                $('#manageOutput').text('');
+            }
+        });
+        $('#convertSingleVerbose').on('change', function () {
             showVerboseOutput = $(this).is(':checked');
             if (showVerboseOutput && activeJobId) {
                 $.getJSON(`/api/manage/convert-job/${activeJobId}`, function (result) {
@@ -683,12 +990,16 @@
         document.addEventListener('visibilitychange', function () {
             if (document.hidden) {
                 stopJobHistoryPolling();
+                stopDiagnosticsPolling();
             } else {
                 loadJobHistory();
+                loadDiagnostics();
                 startJobHistoryPolling();
+                startDiagnosticsPolling();
             }
         });
     });
 </script>
 
 {% endblock %}
+

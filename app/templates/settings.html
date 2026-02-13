@@ -59,7 +59,7 @@
                 {% if admin_account_created == false %}
                 <div class="alert alert-danger" role="alert">
                     <h4 class="alert-heading">Missing admin account!</h4>
-                    <p>Ownfoil requires an admin account to enable authentication. Until an account with admin rights is
+                    <p>AeroFoil requires an admin account to enable authentication. Until an account with admin rights is
                         created, <strong>authentication is disabled, anyone can access and change the configuration of
                             your shop!</strong>
                         <br>
@@ -72,12 +72,12 @@
                 <div id="missingKeysAlert" class="alert alert-warning alert-dismissible fade show" role="alert">
                     <h4 class="alert-heading">Missing console keys!</h4>
                     Console keys are required to decrypt any Nintendo content, including
-                    backups. Ownfoil uses this to identify files, regardless of the filename.</br>
+                    backups. AeroFoil uses this to identify files, regardless of the filename.</br>
                     <strong>Titles will be missed or misidentified if you don't fill in your keys!</strong>
                     See <a target="_blank" href="https://gitlab.com/easyhacking/switch/-/wikis/home/getting-started/dump-keys" class="alert-link">this guide</a> on
                     how to extract the
                     keys from your console, and upload them <a href="/settings#consoleKeysInput" class="alert-link">here
-                        in Ownfoil.</a>
+                        in AeroFoil.</a>
                     <hr>
                     If keys are missing, all files <strong>must follow the format "Title Name
                         [TITLEID][vVERSION]"</strong>, else the file won't be recognized.
@@ -89,54 +89,7 @@
                     <h4 class="alert-heading">Missing shop Host!</h4>
                     Host verification from outside the local network is disabled if the shop <code>Host</code> is
                     missing, configure it <a href="/settings#shopHostInput" class="alert-link">here
-                        in Ownfoil</a> to prevent someone else stealing from your shop.
-                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-                </div>
-
-                <div id="missingShopHauthAlert" class="alert alert-warning alert-dismissible fade show" role="alert" style="display: none;">
-                    <h4 class="alert-heading">Missing shop Hauth!</h4>
-                    <a href="https://blawar.github.io/tinfoil/network/#host-signature" class="alert-link"
-                        target="_blank">Host signature</a> verification from outside the local network is disabled if
-                    the shop <code>Hauth</code> is missing. Connect to the shop from Tinfoil with an admin account to
-                    set it.
-                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-                </div>
-
-                <!-- Alerts (shown on all sections) -->
-                {% if admin_account_created == false %}
-                <div class="alert alert-danger" role="alert">
-                    <h4 class="alert-heading">Missing admin account!</h4>
-                    <p>Ownfoil requires an admin account to enable authentication. Until an account with admin rights is
-                        created, <strong>authentication is disabled, anyone can access and change the configuration of
-                            your shop!</strong>
-                        <br>
-                        Add an admin account <a href="/users" class="alert-link">on the Users page</a>.
-                    </p>
-                </div>
-                {% endif %}
-
-                {% if valid_keys == false %}
-                <div id="missingKeysAlert" class="alert alert-warning alert-dismissible fade show" role="alert">
-                    <h4 class="alert-heading">Missing console keys!</h4>
-                    Console keys are required to decrypt any Nintendo content, including
-                    backups. Ownfoil uses this to identify files, regardless of the filename.</br>
-                    <strong>Titles will be missed or misidentified if you don't fill in your keys!</strong>
-                    See <a target="_blank" href="https://gitlab.com/easyhacking/switch/-/wikis/home/getting-started/dump-keys" class="alert-link">this guide</a> on
-                    how to extract the
-                    keys from your console, and upload them <a href="/settings#consoleKeysInput" class="alert-link">here
-                        in Ownfoil.</a>
-                    <hr>
-                    If keys are missing, all files <strong>must follow the format "Title Name
-                        [TITLEID][vVERSION]"</strong>, else the file won't be recognized.
-                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-                </div>
-                {% endif %}
-
-                <div id="missingShopHostAlert" class="alert alert-warning alert-dismissible fade show" role="alert" style="display: none;">
-                    <h4 class="alert-heading">Missing shop Host!</h4>
-                    Host verification from outside the local network is disabled if the shop <code>Host</code> is
-                    missing, configure it <a href="/settings#shopHostInput" class="alert-link">here
-                        in Ownfoil</a> to prevent someone else stealing from your shop.
+                        in AeroFoil</a> to prevent someone else stealing from your shop.
                     <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
                 </div>
 
@@ -175,6 +128,68 @@
                         <div>
                             <div class="form-text">Last maintenance run</div>
                             <div id="libraryMaintenanceLastRun" class="small text-muted">Never</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card mb-3">
+                    <div class="card-body">
+                        <div class="d-flex flex-wrap gap-2 align-items-end mb-3">
+                            <div class="flex-grow-1" style="min-width: 220px;">
+                                <label for="libraryNamingTemplateSelect" class="form-label mb-1">Organization naming template</label>
+                                <select id="libraryNamingTemplateSelect" class="form-select" onchange="onLibraryNamingTemplateChange()"></select>
+                            </div>
+                            <div>
+                                <button type="button" class="btn btn-outline-primary" onclick="addLibraryNamingTemplate()">Add template</button>
+                            </div>
+                            <div>
+                                <button type="button" class="btn btn-outline-danger" onclick="deleteLibraryNamingTemplate()">Delete template</button>
+                            </div>
+                        </div>
+
+                        <div class="form-text mb-3">
+                            Tokens: <code>{title}</code>, <code>{title_id}</code>, <code>{app_id}</code>, <code>{version}</code>, <code>{dlc_name}</code>, <code>{ext}</code>
+                        </div>
+
+                        <div class="d-flex flex-wrap gap-2 mb-3">
+                            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="applyLibraryNamingPreset('default')">Use Default Preset</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="applyLibraryNamingPreset('flat')">Use Flat Preset</button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="applyLibraryNamingPreset('scene')">Use Scene Preset</button>
+                        </div>
+
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <label for="libraryTemplateBaseFolderInput" class="form-label">Base folder template</label>
+                                <input id="libraryTemplateBaseFolderInput" class="form-control" type="text">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="libraryTemplateBaseFilenameInput" class="form-label">Base filename template</label>
+                                <input id="libraryTemplateBaseFilenameInput" class="form-control" type="text">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="libraryTemplateUpdateFolderInput" class="form-label">Update folder template</label>
+                                <input id="libraryTemplateUpdateFolderInput" class="form-control" type="text">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="libraryTemplateUpdateFilenameInput" class="form-label">Update filename template</label>
+                                <input id="libraryTemplateUpdateFilenameInput" class="form-control" type="text">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="libraryTemplateDlcFolderInput" class="form-label">DLC folder template</label>
+                                <input id="libraryTemplateDlcFolderInput" class="form-control" type="text">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="libraryTemplateDlcFilenameInput" class="form-label">DLC filename template</label>
+                                <input id="libraryTemplateDlcFilenameInput" class="form-control" type="text">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="libraryTemplateOtherFolderInput" class="form-label">Other folder template</label>
+                                <input id="libraryTemplateOtherFolderInput" class="form-control" type="text">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="libraryTemplateOtherFilenameInput" class="form-label">Other filename template</label>
+                                <input id="libraryTemplateOtherFilenameInput" class="form-control" type="text">
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -274,7 +289,7 @@
                     </div>
                     <div id="consoleKeysHelp" class="form-text">Console keys are required to decrypt any Nintendo
                         content, including
-                        backups. Ownfoil uses this to identify files, regardless of the filename.
+                        backups. AeroFoil uses this to identify files, regardless of the filename.
                     </div>
                 </div>
 
@@ -329,6 +344,43 @@
                     <label class="form-check-label" for="encryptShopCheck">Encrypt shop</label>
                     <div id="encryptShopCheckHelp" class="form-text">Serve encrypted and compressed shop, so that only Tinfoil clients
                         can access the content. <strong>Strongly suggested to enable it for security</strong>.</div>
+                </div>
+                <div class="mb-3 form-check">
+                    <input type="checkbox" class="form-check-input" id="fastTransferModeCheck"
+                        aria-describedby="fastTransferModeCheckHelp">
+                    <label class="form-check-label" for="fastTransferModeCheck">Fast transfer mode</label>
+                    <div id="fastTransferModeCheckHelp" class="form-text">
+                        Prioritize throughput by skipping per-chunk transfer tracking. Activity live byte counters and exact transfer byte accounting may be less precise.
+                    </div>
+                </div>
+                <div class="card mb-3">
+                    <div class="card-body">
+                        <h6 class="card-title mb-3">Login Protection</h6>
+                        <div class="form-check form-switch mb-3">
+                            <input type="checkbox" class="form-check-input" id="authIpLockoutEnabledCheck">
+                            <label class="form-check-label" for="authIpLockoutEnabledCheck">Enable failed-login IP lockout</label>
+                        </div>
+                        <div class="row g-3 mb-3">
+                            <div class="col-md-4">
+                                <label for="authIpLockoutThresholdInput" class="form-label">Failed attempts</label>
+                                <input type="number" min="1" max="1000" class="form-control" id="authIpLockoutThresholdInput">
+                            </div>
+                            <div class="col-md-4">
+                                <label for="authIpLockoutWindowInput" class="form-label">Window (seconds)</label>
+                                <input type="number" min="10" max="86400" class="form-control" id="authIpLockoutWindowInput">
+                            </div>
+                            <div class="col-md-4">
+                                <label for="authIpLockoutDurationInput" class="form-label">Lockout (seconds)</label>
+                                <input type="number" min="10" max="604800" class="form-control" id="authIpLockoutDurationInput">
+                            </div>
+                        </div>
+                        <div>
+                            <label for="authPermanentIpBlacklistInput" class="form-label">Permanent IP blacklist</label>
+                            <textarea class="form-control font-monospace" id="authPermanentIpBlacklistInput" rows="4"
+                                placeholder="203.0.113.4&#10;198.51.100.0/24"></textarea>
+                            <div class="form-text">One IP or CIDR per line. Blacklisted clients cannot authenticate.</div>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="mb-3">
@@ -409,7 +461,7 @@
                             </div>
                             <div class="col-md-4">
                                 <label for="downloadsCategoryInput" class="form-label">Torrent category/tag</label>
-                                <input type="text" class="form-control" id="downloadsCategoryInput" placeholder="ownfoil">
+                                <input type="text" class="form-control" id="downloadsCategoryInput" placeholder="aerofoil">
                             </div>
                         </div>
                         <div class="row g-3 mb-3">
@@ -432,6 +484,13 @@
                                 <input type="text" class="form-control" id="downloadsSearchSuffixInput">
                             </div>
                         </div>
+                        <div class="row g-3 mt-1">
+                            <div class="col-12">
+                                <label for="downloadsSearchCharReplacementsInput" class="form-label">Search character replacements</label>
+                                <textarea class="form-control" id="downloadsSearchCharReplacementsInput" rows="4" placeholder="™=&gt;&#10;®=&gt;&#10;’=&gt;'"></textarea>
+                                <div class="form-text">One rule per line in the form <code>from=&gt;to</code>. Leave <code>to</code> empty to remove the character.</div>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- Prowlarr tab -->
@@ -447,8 +506,18 @@
                             </div>
                         </div>
                         <div class="mb-3">
+                            <label for="prowlarrTimeoutInput" class="form-label">Prowlarr timeout (seconds)</label>
+                            <input type="number" min="5" max="180" class="form-control" id="prowlarrTimeoutInput" value="15">
+                            <div class="form-text">Increase this if searches sometimes time out. Range: 5-180 seconds.</div>
+                        </div>
+                        <div class="mb-3">
                             <label for="prowlarrIndexerIdsInput" class="form-label">Indexer IDs (comma separated)</label>
                             <input type="text" class="form-control" id="prowlarrIndexerIdsInput" placeholder="1,2,3">
+                        </div>
+                        <div class="mb-3">
+                            <label for="prowlarrCategoriesInput" class="form-label">Categories (comma separated)</label>
+                            <input type="text" class="form-control" id="prowlarrCategoriesInput" placeholder="5000,5070">
+                            <div class="form-text">Use numeric category IDs from Prowlarr.</div>
                         </div>
                         <div class="d-flex align-items-center gap-3">
                             <button type="button" id="testProwlarrBtn" class="btn btn-outline-secondary"
@@ -526,6 +595,206 @@
 
     function getCheckboxStatus(checkboxId) {
         return $('#' + checkboxId).is(":checked")
+    }
+
+    const DEFAULT_LIBRARY_NAMING_TEMPLATE = {
+        base: {
+            folder: "{title} [{title_id}]/Base",
+            filename: "{title} [{title_id}] [BASE][v{version}].{ext}"
+        },
+        update: {
+            folder: "{title} [{title_id}]/Updates/v{version}",
+            filename: "{title} [{title_id}] [UPDATE][v{version}].{ext}"
+        },
+        dlc: {
+            folder: "{title} [{title_id}]/DLC/{dlc_name} [{app_id}]",
+            filename: "{title} - {dlc_name} [{app_id}] [DLC][v{version}].{ext}"
+        },
+        other: {
+            folder: "{title} [{title_id}]/Other",
+            filename: "{title} [{title_id}] [UNKNOWN].{ext}"
+        }
+    };
+
+    const LIBRARY_NAMING_PRESETS = {
+        default: JSON.parse(JSON.stringify(DEFAULT_LIBRARY_NAMING_TEMPLATE)),
+        flat: {
+            base: {
+                folder: ".",
+                filename: "{title} [{title_id}] [BASE][v{version}].{ext}"
+            },
+            update: {
+                folder: ".",
+                filename: "{title} [{title_id}] [UPDATE][v{version}].{ext}"
+            },
+            dlc: {
+                folder: ".",
+                filename: "{title} - {dlc_name} [{app_id}] [DLC][v{version}].{ext}"
+            },
+            other: {
+                folder: ".",
+                filename: "{title} [{title_id}] [UNKNOWN].{ext}"
+            }
+        },
+        scene: {
+            base: {
+                folder: "{title} [{title_id}]",
+                filename: "{title} [{title_id}] [v{version}] [BASE].{ext}"
+            },
+            update: {
+                folder: "{title} [{title_id}]/Updates",
+                filename: "{title} [{title_id}] [UPDATE][v{version}].{ext}"
+            },
+            dlc: {
+                folder: "{title} [{title_id}]/DLC",
+                filename: "{title} [{title_id}] - {dlc_name} [{app_id}] [DLC][v{version}].{ext}"
+            },
+            other: {
+                folder: "{title} [{title_id}]/Other",
+                filename: "{title} [{title_id}] [UNKNOWN].{ext}"
+            }
+        }
+    };
+
+    let libraryNamingTemplatesState = {
+        active: 'default',
+        templates: { default: JSON.parse(JSON.stringify(DEFAULT_LIBRARY_NAMING_TEMPLATE)) }
+    };
+
+    function normalizeLibraryNamingTemplates(raw) {
+        const fallback = {
+            active: 'default',
+            templates: { default: JSON.parse(JSON.stringify(DEFAULT_LIBRARY_NAMING_TEMPLATE)) }
+        };
+        if (!raw || typeof raw !== 'object') {
+            return fallback;
+        }
+        const templatesRaw = raw.templates && typeof raw.templates === 'object' ? raw.templates : {};
+        const templates = {};
+        Object.keys(templatesRaw).forEach(name => {
+            const entry = templatesRaw[name] || {};
+            templates[name] = {
+                base: {
+                    folder: String(entry.base?.folder || DEFAULT_LIBRARY_NAMING_TEMPLATE.base.folder),
+                    filename: String(entry.base?.filename || DEFAULT_LIBRARY_NAMING_TEMPLATE.base.filename),
+                },
+                update: {
+                    folder: String(entry.update?.folder || DEFAULT_LIBRARY_NAMING_TEMPLATE.update.folder),
+                    filename: String(entry.update?.filename || DEFAULT_LIBRARY_NAMING_TEMPLATE.update.filename),
+                },
+                dlc: {
+                    folder: String(entry.dlc?.folder || DEFAULT_LIBRARY_NAMING_TEMPLATE.dlc.folder),
+                    filename: String(entry.dlc?.filename || DEFAULT_LIBRARY_NAMING_TEMPLATE.dlc.filename),
+                },
+                other: {
+                    folder: String(entry.other?.folder || DEFAULT_LIBRARY_NAMING_TEMPLATE.other.folder),
+                    filename: String(entry.other?.filename || DEFAULT_LIBRARY_NAMING_TEMPLATE.other.filename),
+                }
+            };
+        });
+        if (!Object.keys(templates).length) {
+            return fallback;
+        }
+        const active = templates[raw.active] ? raw.active : Object.keys(templates)[0];
+        return { active: active, templates: templates };
+    }
+
+    function writeLibraryTemplateInputs(template) {
+        const t = template || DEFAULT_LIBRARY_NAMING_TEMPLATE;
+        setInputVal("libraryTemplateBaseFolderInput", t.base.folder);
+        setInputVal("libraryTemplateBaseFilenameInput", t.base.filename);
+        setInputVal("libraryTemplateUpdateFolderInput", t.update.folder);
+        setInputVal("libraryTemplateUpdateFilenameInput", t.update.filename);
+        setInputVal("libraryTemplateDlcFolderInput", t.dlc.folder);
+        setInputVal("libraryTemplateDlcFilenameInput", t.dlc.filename);
+        setInputVal("libraryTemplateOtherFolderInput", t.other.folder);
+        setInputVal("libraryTemplateOtherFilenameInput", t.other.filename);
+    }
+
+    function saveActiveLibraryTemplateInputs() {
+        const active = libraryNamingTemplatesState.active;
+        if (!active || !libraryNamingTemplatesState.templates[active]) {
+            return;
+        }
+        libraryNamingTemplatesState.templates[active] = {
+            base: {
+                folder: getInputVal("libraryTemplateBaseFolderInput"),
+                filename: getInputVal("libraryTemplateBaseFilenameInput"),
+            },
+            update: {
+                folder: getInputVal("libraryTemplateUpdateFolderInput"),
+                filename: getInputVal("libraryTemplateUpdateFilenameInput"),
+            },
+            dlc: {
+                folder: getInputVal("libraryTemplateDlcFolderInput"),
+                filename: getInputVal("libraryTemplateDlcFilenameInput"),
+            },
+            other: {
+                folder: getInputVal("libraryTemplateOtherFolderInput"),
+                filename: getInputVal("libraryTemplateOtherFilenameInput"),
+            },
+        };
+    }
+
+    function renderLibraryNamingTemplateSelect() {
+        const select = $('#libraryNamingTemplateSelect');
+        select.empty();
+        Object.keys(libraryNamingTemplatesState.templates).forEach(name => {
+            const selected = name === libraryNamingTemplatesState.active ? 'selected' : '';
+            select.append(`<option value="${name}" ${selected}>${name}</option>`);
+        });
+        writeLibraryTemplateInputs(libraryNamingTemplatesState.templates[libraryNamingTemplatesState.active]);
+    }
+
+    function onLibraryNamingTemplateChange() {
+        saveActiveLibraryTemplateInputs();
+        libraryNamingTemplatesState.active = getInputVal("libraryNamingTemplateSelect");
+        writeLibraryTemplateInputs(libraryNamingTemplatesState.templates[libraryNamingTemplatesState.active]);
+    }
+
+    function addLibraryNamingTemplate() {
+        saveActiveLibraryTemplateInputs();
+        const name = (window.prompt('New template name:') || '').trim();
+        if (!name) {
+            return;
+        }
+        if (libraryNamingTemplatesState.templates[name]) {
+            alert('Template already exists.');
+            return;
+        }
+        const source = libraryNamingTemplatesState.templates[libraryNamingTemplatesState.active] || DEFAULT_LIBRARY_NAMING_TEMPLATE;
+        libraryNamingTemplatesState.templates[name] = JSON.parse(JSON.stringify(source));
+        libraryNamingTemplatesState.active = name;
+        renderLibraryNamingTemplateSelect();
+        submitLibrarySettings();
+    }
+
+    function deleteLibraryNamingTemplate() {
+        saveActiveLibraryTemplateInputs();
+        const names = Object.keys(libraryNamingTemplatesState.templates);
+        if (names.length <= 1) {
+            alert('At least one naming template is required.');
+            return;
+        }
+        const active = libraryNamingTemplatesState.active;
+        delete libraryNamingTemplatesState.templates[active];
+        libraryNamingTemplatesState.active = Object.keys(libraryNamingTemplatesState.templates)[0];
+        renderLibraryNamingTemplateSelect();
+        submitLibrarySettings();
+    }
+
+    function applyLibraryNamingPreset(presetName) {
+        const preset = LIBRARY_NAMING_PRESETS[presetName];
+        if (!preset) {
+            return;
+        }
+        const active = libraryNamingTemplatesState.active;
+        if (!active || !libraryNamingTemplatesState.templates[active]) {
+            return;
+        }
+        libraryNamingTemplatesState.templates[active] = JSON.parse(JSON.stringify(preset));
+        writeLibraryTemplateInputs(libraryNamingTemplatesState.templates[active]);
+        submitLibrarySettings();
     }
 
     function scanLibrary(path = null) {
@@ -822,11 +1091,20 @@
 
     function submitShopSettings() {
         $('#submitShopSettingsBtn').prop('disabled', true);
+        const threshold = parsePositiveInt(getInputVal("authIpLockoutThresholdInput"), 5);
+        const windowSeconds = parsePositiveInt(getInputVal("authIpLockoutWindowInput"), 600);
+        const durationSeconds = parsePositiveInt(getInputVal("authIpLockoutDurationInput"), 1800);
         data = {
             host: $('#shopHostInput').val(),
             hauth: $('#shopHauthInput').val(),
             public: getCheckboxStatus("publicShopCheck"),
             encrypt: getCheckboxStatus("encryptShopCheck"),
+            fast_transfer_mode: getCheckboxStatus("fastTransferModeCheck"),
+            auth_ip_lockout_enabled: getCheckboxStatus("authIpLockoutEnabledCheck"),
+            auth_ip_lockout_threshold: threshold,
+            auth_ip_lockout_window_seconds: windowSeconds,
+            auth_ip_lockout_duration_seconds: durationSeconds,
+            auth_permanent_ip_blacklist: parseIpEntryList(getInputVal("authPermanentIpBlacklistInput")),
             public_key: getInputVal("shopPublicKeyInput"),
             motd: $('#motdTextArea').val(),
         }
@@ -861,11 +1139,110 @@
         return value.split(',').map(item => item.trim()).filter(Boolean);
     }
 
+    function parsePositiveInt(value, fallback) {
+        const out = parseInt(value, 10);
+        if (!Number.isFinite(out) || out <= 0) {
+            return fallback;
+        }
+        return out;
+    }
+
+    function parseIpEntryList(value) {
+        if (!value) {
+            return [];
+        }
+        const seen = new Set();
+        const out = [];
+        String(value).replaceAll('\r', '\n').replaceAll(',', '\n').split('\n').forEach(raw => {
+            const token = String(raw || '').trim();
+            if (!token) {
+                return;
+            }
+            const key = token.toLowerCase();
+            if (seen.has(key)) {
+                return;
+            }
+            seen.add(key);
+            out.push(token);
+        });
+        return out;
+    }
+
+    function formatIpEntryList(entries) {
+        if (!Array.isArray(entries)) {
+            return '';
+        }
+        return entries.map(item => String(item || '').trim()).filter(Boolean).join('\n');
+    }
+
+    function parseSearchCharReplacements(value) {
+        if (!value) {
+            return [];
+        }
+        const rules = [];
+        const seen = new Set();
+        value.split('\n').forEach(line => {
+            const raw = (line || '').trim();
+            if (!raw) {
+                return;
+            }
+            let fromText = raw;
+            let toText = '';
+            if (raw.includes('=>')) {
+                const parts = raw.split('=>');
+                fromText = (parts.shift() || '').trim();
+                toText = parts.join('=>').trim();
+            } else if (raw.includes('=')) {
+                const parts = raw.split('=');
+                fromText = (parts.shift() || '').trim();
+                toText = parts.join('=').trim();
+            }
+            if (!fromText || seen.has(fromText)) {
+                return;
+            }
+            rules.push({ from: fromText, to: toText });
+            seen.add(fromText);
+        });
+        return rules;
+    }
+
+    function formatSearchCharReplacements(rules) {
+        if (!Array.isArray(rules) || !rules.length) {
+            return '';
+        }
+        return rules
+            .map(rule => `${rule?.from || ''}=>${rule?.to || ''}`)
+            .filter(line => !line.startsWith('=>'))
+            .join('\n');
+    }
+
     function parseIndexerIds(value) {
         if (!value) {
             return [];
         }
         return value.split(',').map(item => parseInt(item.trim(), 10)).filter(id => !isNaN(id));
+    }
+
+    function parseProwlarrCategories(value) {
+        if (!value) {
+            return { values: [], invalid: [] };
+        }
+        const tokens = value.split(',').map(item => item.trim()).filter(item => item.length > 0);
+        const invalid = tokens.filter(item => !/^\d+$/.test(item));
+        const values = tokens.filter(item => /^\d+$/.test(item));
+        return { values: values, invalid: invalid };
+    }
+
+    function updateTorrentClientFieldState() {
+        const clientType = getInputVal("torrentClientTypeSelect");
+        const usernameInput = $("#torrentClientUserInput");
+        const isDeluge = clientType === "deluge";
+        usernameInput.prop("disabled", isDeluge);
+        if (isDeluge) {
+            usernameInput.attr("placeholder", "Not required for Deluge");
+        } else {
+            usernameInput.attr("placeholder", "");
+        }
     }
 
     function copyPublicKey() {
@@ -896,6 +1273,18 @@
 
     function submitDownloadSettings() {
         $('#submitDownloadSettingsBtn').prop('disabled', true);
+        const categoriesParsed = parseProwlarrCategories(getInputVal("prowlarrCategoriesInput"));
+        let prowlarrTimeout = parseInt(getInputVal("prowlarrTimeoutInput"), 10);
+        if (isNaN(prowlarrTimeout)) {
+            prowlarrTimeout = 15;
+        }
+        prowlarrTimeout = Math.max(5, Math.min(180, prowlarrTimeout));
+        setInputVal("prowlarrTimeoutInput", prowlarrTimeout);
+        if (categoriesParsed.invalid.length) {
+            alert('Prowlarr categories must be numeric IDs only. Invalid values: ' + categoriesParsed.invalid.join(', '));
+            $('#submitDownloadSettingsBtn').prop('disabled', false);
+            return;
+        }
         data = {
             enabled: getCheckboxStatus("downloadsEnabledCheck"),
             interval_minutes: parseInt(getInputVal("downloadsIntervalInput"), 10),
@@ -904,10 +1293,13 @@
             blacklist_terms: splitTerms(getInputVal("downloadsBlacklistTermsInput")),
             search_prefix: getInputVal("downloadsSearchPrefixInput"),
             search_suffix: getInputVal("downloadsSearchSuffixInput"),
+            search_char_replacements: parseSearchCharReplacements(getInputVal("downloadsSearchCharReplacementsInput")),
             prowlarr: {
                 url: getInputVal("prowlarrUrlInput"),
                 api_key: getInputVal("prowlarrApiKeyInput"),
-                indexer_ids: parseIndexerIds(getInputVal("prowlarrIndexerIdsInput"))
+                indexer_ids: parseIndexerIds(getInputVal("prowlarrIndexerIdsInput")),
+                categories: categoriesParsed.values,
+                timeout_seconds: prowlarrTimeout
             },
             torrent_client: {
                 type: getInputVal("torrentClientTypeSelect"),
@@ -942,10 +1334,12 @@
         }
         intervalVal = Math.max(30, intervalVal);
         setInputVal("libraryMaintenanceIntervalInput", intervalVal);
+        saveActiveLibraryTemplateInputs();
         const payload = {
             auto_maintenance: getCheckboxStatus("libraryAutoMaintenanceCheck"),
             maintenance_interval_minutes: intervalVal,
-            maintenance_delete_updates: getCheckboxStatus("libraryMaintenanceDeleteUpdatesCheck")
+            maintenance_delete_updates: getCheckboxStatus("libraryMaintenanceDeleteUpdatesCheck"),
+            naming_templates: libraryNamingTemplatesState,
         };
         $.ajax({
             url: "/api/settings/library",
@@ -961,10 +1355,17 @@
     function testProwlarrSettings() {
         $('#testProwlarrBtn').prop('disabled', true);
         $('#prowlarrTestResult').text('Testing...').removeClass('text-danger text-success').addClass('text-muted');
+        let prowlarrTimeout = parseInt(getInputVal("prowlarrTimeoutInput"), 10);
+        if (isNaN(prowlarrTimeout)) {
+            prowlarrTimeout = 15;
+        }
+        prowlarrTimeout = Math.max(5, Math.min(180, prowlarrTimeout));
+        setInputVal("prowlarrTimeoutInput", prowlarrTimeout);
         data = {
             url: getInputVal("prowlarrUrlInput"),
             api_key: getInputVal("prowlarrApiKeyInput"),
-            indexer_ids: parseIndexerIds(getInputVal("prowlarrIndexerIdsInput"))
+            indexer_ids: parseIndexerIds(getInputVal("prowlarrIndexerIdsInput")),
+            timeout_seconds: prowlarrTimeout
         };
         $.ajax({
             url: "/api/settings/downloads/test-prowlarr",
@@ -1057,7 +1458,7 @@
         $('#settingsSidebar').toggleClass('show');
         $('body').toggleClass('sidebar-open');
     });
-    
+
     // Close sidebar when clicking outside on mobile
     $(document).on('click', function(e) {
         if ($(window).width() < 768 && $('#settingsSidebar').hasClass('show')) {
@@ -1090,6 +1491,9 @@
         handleHashNavigation();
         
         fillLibraryTable();
+        $("#torrentClientTypeSelect").on("change", updateTorrentClientFieldState);
+        $('#libraryTemplateBaseFolderInput, #libraryTemplateBaseFilenameInput, #libraryTemplateUpdateFolderInput, #libraryTemplateUpdateFilenameInput, #libraryTemplateDlcFolderInput, #libraryTemplateDlcFilenameInput, #libraryTemplateOtherFolderInput, #libraryTemplateOtherFilenameInput')
+            .on('change', function () { submitLibrarySettings(); });
 
         initTooltips();
         
@@ -1123,6 +1527,8 @@
             $("#libraryAutoMaintenanceCheck").prop("checked", !!librarySettings['auto_maintenance']);
             setInputVal("libraryMaintenanceIntervalInput", librarySettings['maintenance_interval_minutes'] || 720);
             $("#libraryMaintenanceDeleteUpdatesCheck").prop("checked", librarySettings['maintenance_delete_updates'] !== false);
+            libraryNamingTemplatesState = normalizeLibraryNamingTemplates(librarySettings['naming_templates']);
+            renderLibraryNamingTemplateSelect();
             const maintenanceLastRun = librarySettings['maintenance_last_run'];
             if (maintenanceLastRun) {
                 try {
@@ -1149,7 +1555,14 @@
             setInputVal("motdTextArea", shopSettings['motd']);
             $("#publicShopCheck").prop("checked", shopSettings['public']);
             $("#encryptShopCheck").prop("checked", shopSettings['encrypt']);
+            $("#fastTransferModeCheck").prop("checked", !!shopSettings['fast_transfer_mode']);
             setInputVal("shopPublicKeyInput", shopSettings['public_key'] || '');
+            securitySettings = result['security'] || {};
+            $("#authIpLockoutEnabledCheck").prop("checked", securitySettings['auth_ip_lockout_enabled'] !== false);
+            setInputVal("authIpLockoutThresholdInput", securitySettings['auth_ip_lockout_threshold'] || 5);
+            setInputVal("authIpLockoutWindowInput", securitySettings['auth_ip_lockout_window_seconds'] || 600);
+            setInputVal("authIpLockoutDurationInput", securitySettings['auth_ip_lockout_duration_seconds'] || 1800);
+            setInputVal("authPermanentIpBlacklistInput", formatIpEntryList(securitySettings['auth_permanent_ip_blacklist'] || []));
             if (!shopSettings['host']) {
                 $("#missingShopHostAlert").css('display', '');
             } else if (!shopSettings['hauth']) {
@@ -1164,13 +1577,19 @@
             setInputVal("downloadsBlacklistTermsInput", (downloadsSettings['blacklist_terms'] || []).join(', '));
             setInputVal("downloadsSearchPrefixInput", downloadsSettings['search_prefix'] || '');
             setInputVal("downloadsSearchSuffixInput", downloadsSettings['search_suffix'] || '');
+            setInputVal(
+                "downloadsSearchCharReplacementsInput",
+                formatSearchCharReplacements(downloadsSettings['search_char_replacements'] || [])
+            );
             $("#downloadsEnabledCheck").prop("checked", !!downloadsSettings['enabled']);
-            setInputVal("downloadsCategoryInput", downloadsSettings['torrent_client']?.['category'] || 'ownfoil');
+            setInputVal("downloadsCategoryInput", downloadsSettings['torrent_client']?.['category'] || 'aerofoil');
 
             prowlarrSettings = downloadsSettings['prowlarr'] || {};
             setInputVal("prowlarrUrlInput", prowlarrSettings['url'] || '');
             setInputVal("prowlarrApiKeyInput", prowlarrSettings['api_key'] || '');
             setInputVal("prowlarrIndexerIdsInput", (prowlarrSettings['indexer_ids'] || []).join(', '));
+            setInputVal("prowlarrCategoriesInput", (prowlarrSettings['categories'] || []).join(', '));
+            setInputVal("prowlarrTimeoutInput", prowlarrSettings['timeout_seconds'] || 15);
 
             torrentSettings = downloadsSettings['torrent_client'] || {};
             setInputVal("torrentClientTypeSelect", torrentSettings['type'] || 'qbittorrent');
@@ -1178,6 +1597,7 @@
             setInputVal("torrentClientUserInput", torrentSettings['username'] || '');
             setInputVal("torrentClientPasswordInput", torrentSettings['password'] || '');
             setInputVal("torrentClientPathInput", torrentSettings['download_path'] || '');
+            updateTorrentClientFieldState();
         });
 
     });
@@ -1185,3 +1605,4 @@
 </script>
 
 {% endblock %}
+

@@ -1,6 +1,11 @@
 <nav class="navbar navbar-expand-lg bg-body-secondary bg-dark border-bottom border-body" data-bs-theme="dark">
     <div class="container-fluid">
-        <a class="navbar-brand" href="#">Ownfoil</a>
+        <a class="navbar-brand py-0" href="#">
+            <img
+                src="{{ url_for('static', filename='banner.png') }}"
+                alt="AeroFoil"
+                class="navbar-brand-banner">
+        </a>
         <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav"
             aria-controls="navbarNav" aria-expanded="false" aria-label="Toggle navigation">
             <span class="navbar-toggler-icon"></span>
@@ -21,6 +26,11 @@
                     </a>
                 </li>
                 {% endif %}
+                {% if current_user.is_authenticated and current_user.has_backup_access() %}
+                <li class="nav-item">
+                    <a class="nav-link{% if title == 'Save Data Backups' %} active" aria-current="page"{% else %}"{% endif %}" href="/saves">Save Data Backups</a>
+                </li>
+                {% endif %}
                 {% if current_user.is_admin or admin_account_created == false %}
                 <li class="nav-item">
                     <a class="nav-link{% if title == 'Settings' %} active" aria-current="page"{% else %}"{% endif %}" href="/settings">Settings</a>
@@ -29,6 +39,11 @@
                 {% if current_user.is_admin or admin_account_created == false %}
                 <li class="nav-item">
                     <a class="nav-link{% if title == 'Users' %} active" aria-current="page"{% else %}"{% endif %}" href="/users">Users</a>
+                </li>
+                {% endif %}
+                {% if current_user.is_admin or admin_account_created == false %}
+                <li class="nav-item">
+                    <a class="nav-link{% if title == 'Downloads' %} active" aria-current="page"{% else %}"{% endif %}" href="/downloads">Downloads</a>
                 </li>
                 {% endif %}
                 {% if current_user.is_admin or admin_account_created == false %}
@@ -80,3 +95,4 @@
         </div>
     </div>
 </nav>
+

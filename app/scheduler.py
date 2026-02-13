@@ -45,16 +45,27 @@ class JobScheduler:
                     self._reschedule(job)
 
     def _execute_job(self, job: Dict[str, Any]):
+        def _log_with_level(level, message):
+            lvl = str(level or 'info').strip().lower()
+            if lvl == 'debug':
+                logger.debug(message)
+            elif lvl == 'warning':
+                logger.warning(message)
+            elif lvl == 'error':
+                logger.error(message)
+            else:
+                logger.info(message)
+
         def job_wrapper():
             with self.app.app_context():
                 try:
-                    logger.info(f"Starting job {job['id']}")
+                    _log_with_level(job.get('log_level', 'info'), f"Starting job {job['id']}")
                     job['func'](*job.get('args', []), **job.get('kwargs', {}))
                     with self._lock:
                         job['last_run'] = datetime.now().replace(microsecond=0)
                         job['last_error'] = None
                     schedule_info = f" Next run at {job['next_run']}" if not job.get('run_once') else ""
-                    logger.info(f"Completed job {job['id']}.{schedule_info}")
+                    _log_with_level(job.get('log_level', 'info'), f"Completed job {job['id']}.{schedule_info}")
                 except Exception as e:
                     with self._lock:
                         job['last_error'] = str(e)
@@ -92,7 +103,8 @@ class JobScheduler:
         kwargs: Optional[Dict[str, Any]] = None,
         run_once: bool = False,
         run_first: bool = False,
-        start_date: Optional[datetime] = None # for delayed one-off jobs
+        start_date: Optional[datetime] = None, # for delayed one-off jobs
+        log_level: str = "info",
     ):
         with self._lock:
             if job_id in self.scheduled_jobs:
@@ -127,7 +139,8 @@ class JobScheduler:
                 'next_run': next_run,
                 'run_once': run_once,
                 'last_run': None,
-                'last_error': None
+                'last_error': None,
+                'log_level': str(log_level or 'info').strip().lower(),
             }
 
             schedule_info = f"cron: {cron}" if cron else f"interval: {interval}" if interval else "one-off"

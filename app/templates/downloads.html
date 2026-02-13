@@ -1,0 +1,211 @@
+{% extends "base.html" %}
+{% block content %}
+{% include 'nav.html' %}
+
+<div class="container-fluid setting-body">
+    <div class="row">
+        <div class="col">
+            <div class="settings-container container mt-3">
+                <div class="d-flex flex-column flex-lg-row justify-content-between gap-2 align-items-lg-center mb-2">
+                    <div>
+                        <h2 class="pb-2">Downloads</h2>
+                        <p class="text-muted mb-0">Live torrent status and pending AeroFoil download queue.</p>
+                    </div>
+                </div>
+
+                <div id="downloadsAlert" class="alert alert-info d-none mb-3" role="alert"></div>
+
+                <div class="row g-3">
+                    <div class="col-xl-8 col-lg-12">
+                        <div class="card mb-3">
+                            <div class="card-body">
+                                <div class="d-flex align-items-center justify-content-between mb-3">
+                                    <div>
+                                        <h5 class="card-title mb-1">Current Downloads</h5>
+                                        <div class="text-muted small">Active AeroFoil-managed torrents from your configured client.</div>
+                                    </div>
+                                    <button type="button" id="refreshActiveDownloadsBtn" class="btn btn-outline-primary btn-sm" onclick="loadActiveDownloads()">Refresh</button>
+                                </div>
+                                <div class="table-responsive">
+                                    <table class="table table-dark table-sm align-middle">
+                                        <thead>
+                                            <tr>
+                                                <th>Name</th>
+                                                <th>Status</th>
+                                                <th>Progress</th>
+                                                <th>Down</th>
+                                                <th>Up</th>
+                                                <th>Peers</th>
+                                                <th>Seeders</th>
+                                                <th>Leechers</th>
+                                                <th>ETA</th>
+                                                <th>Size</th>
+                                                <th>Done</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="activeDownloadsBody">
+                                            <tr><td colspan="11" class="text-muted">Loading...</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-xl-4 col-lg-12">
+                        <div class="card mb-3">
+                            <div class="card-body">
+                                <div class="d-flex align-items-center justify-content-between mb-2">
+                                    <h5 class="card-title mb-0">Queue</h5>
+                                    <button type="button" id="checkDownloadsBtn" class="btn btn-outline-primary btn-sm" onclick="checkCompletedDownloads()">Check completed</button>
+                                </div>
+                                <div class="small text-muted mb-2" id="downloadsQueueStatus">Loading...</div>
+                                <pre id="downloadsQueueList" class="mb-0" style="max-height: 280px; overflow: auto;"></pre>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let downloadsPollTimer = null;
+
+    function showDownloadsAlert(message, type = 'info') {
+        const alertBox = $('#downloadsAlert');
+        alertBox.removeClass('d-none alert-info alert-success alert-warning alert-danger');
+        alertBox.addClass(`alert-${type}`);
+        alertBox.text(message);
+    }
+
+    function formatBytes(bytes) {
+        const n = Number(bytes || 0);
+        if (!isFinite(n) || n <= 0) return '-';
+        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        let size = n;
+        let unitIndex = 0;
+        while (size >= 1024 && unitIndex < units.length - 1) {
+            size /= 1024;
+            unitIndex += 1;
+        }
+        return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[unitIndex]}`;
+    }
+
+    function formatSpeed(bytesPerSec) {
+        const label = formatBytes(bytesPerSec);
+        return label === '-' ? '-' : `${label}/s`;
+    }
+
+    function formatEta(seconds) {
+        const sec = Number(seconds);
+        if (!isFinite(sec) || sec < 0 || sec >= 8640000) return '-';
+        const h = Math.floor(sec / 3600);
+        const m = Math.floor((sec % 3600) / 60);
+        const s = Math.floor(sec % 60);
+        if (h > 0) return `${h}h ${m}m`;
+        if (m > 0) return `${m}m ${s}s`;
+        return `${s}s`;
+    }
+
+    function loadQueueState() {
+        $.getJSON('/api/downloads/queue', function (result) {
+            if (!result['success']) {
+                $('#downloadsQueueStatus').text('Failed to load queue state.');
+                return;
+            }
+            const state = result['state'] || {};
+            const pending = state['pending'] || [];
+            const running = state['running'] ? 'running' : 'idle';
+            const lastRun = state['last_run'] ? new Date(state['last_run'] * 1000).toLocaleString() : 'never';
+            $('#downloadsQueueStatus').text(`Status: ${running}. Last check: ${lastRun}. Pending: ${pending.length}.`);
+            if (!pending.length) {
+                $('#downloadsQueueList').text('No pending downloads.');
+                return;
+            }
+            const lines = pending.map(item => `${item['title_id']} v${item['version']} | ${item['expected_name'] || ''} | ${item['hash'] || ''}`);
+            $('#downloadsQueueList').text(lines.join('\n'));
+        });
+    }
+
+    function loadActiveDownloads() {
+        const body = $('#activeDownloadsBody');
+        body.html('<tr><td colspan="11" class="text-muted">Loading...</td></tr>');
+        $.getJSON('/api/downloads/active', function (result) {
+            if (!result['success']) {
+                const msg = result['message'] || 'Failed to load active downloads.';
+                body.html(`<tr><td colspan="11" class="text-danger">${msg}</td></tr>`);
+                return;
+            }
+            const items = result['items'] || [];
+            if (!items.length) {
+                body.html('<tr><td colspan="11" class="text-muted">No active downloads.</td></tr>');
+                return;
+            }
+            body.empty();
+            items.forEach(item => {
+                const progress = Number(item['progress'] || 0);
+                const row = $(`
+                    <tr>
+                        <td class="small">${(item['name'] || '').toString()}</td>
+                        <td class="small text-muted">${(item['status'] || '').toString()}</td>
+                        <td class="small">${progress.toFixed(1)}%</td>
+                        <td class="small">${formatSpeed(item['down_speed'])}</td>
+                        <td class="small">${formatSpeed(item['up_speed'])}</td>
+                        <td class="small">${item['peers'] ?? '-'}</td>
+                        <td class="small">${item['seeders'] ?? '-'}</td>
+                        <td class="small">${item['leechers'] ?? '-'}</td>
+                        <td class="small">${formatEta(item['eta'])}</td>
+                        <td class="small">${formatBytes(item['size'])}</td>
+                        <td class="small">${formatBytes(item['downloaded'])}</td>
+                    </tr>
+                `);
+                body.append(row);
+            });
+        });
+    }
+
+    function checkCompletedDownloads() {
+        $('#checkDownloadsBtn').prop('disabled', true);
+        $.ajax({
+            url: "/api/downloads/check-completed",
+            type: 'POST',
+            success: function (result) {
+                if (result['success']) {
+                    showDownloadsAlert(result['message'] || 'Checked completed downloads.', 'success');
+                } else {
+                    showDownloadsAlert(result['message'] || 'Check failed.', 'danger');
+                }
+                loadQueueState();
+                loadActiveDownloads();
+            },
+            complete: function () {
+                $('#checkDownloadsBtn').prop('disabled', false);
+            }
+        });
+    }
+
+    function pollDownloads() {
+        loadQueueState();
+        loadActiveDownloads();
+    }
+
+    $(document).ready(function () {
+        pollDownloads();
+        downloadsPollTimer = setInterval(pollDownloads, 5000);
+        document.addEventListener('visibilitychange', function () {
+            if (document.hidden) {
+                if (downloadsPollTimer) {
+                    clearInterval(downloadsPollTimer);
+                    downloadsPollTimer = null;
+                }
+            } else if (!downloadsPollTimer) {
+                pollDownloads();
+                downloadsPollTimer = setInterval(pollDownloads, 5000);
+            }
+        });
+    });
+</script>
+{% endblock %}
+

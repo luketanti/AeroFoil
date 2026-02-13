@@ -7,7 +7,7 @@ import email.utils
 import logging
 import time
 
-from constants import *
+from app.constants import *
 
 
 # Retrieve main logger
@@ -46,19 +46,41 @@ def is_titledb_update_available(rzf):
             logger.info(f'Titledb update available, current commit: {current_commit}, latest commit: {latest_remote_commit}')
             update_available = True
     
-    if update_available:
-        with open(local_commit_file, 'w') as f:
-            f.write(latest_remote_commit)
-    
-    return update_available
+    return update_available, latest_remote_commit
+
+
+def _write_latest_commit(latest_remote_commit):
+    local_commit_file = os.path.join(TITLEDB_DIR, '.latest')
+    with open(local_commit_file, 'w', encoding='utf-8') as f:
+        f.write(str(latest_remote_commit or ''))
+
+
+def _validate_downloaded_titledb_file(path, filename):
+    lower_name = str(filename or '').lower()
+    if lower_name.endswith('.json'):
+        return _is_valid_json_file(path)
+    if lower_name.endswith('.txt'):
+        return os.path.isfile(path) and os.path.getsize(path) > 0
+    return os.path.isfile(path)
 
 
 def download_titledb_files(rzf, files):
     for file in files:
         store_path = os.path.join(TITLEDB_DIR, file)
         rel_store_path = os.path.relpath(store_path, start=APP_DIR)
+        temp_path = f'{store_path}.tmp'
         logger.info(f'Downloading {file} from remote titledb to {rel_store_path}')
-        download_from_remote_zip(rzf, file, store_path)
+        try:
+            download_from_remote_zip(rzf, file, temp_path)
+            if not _validate_downloaded_titledb_file(temp_path, file):
+                raise ValueError(f'Downloaded TitleDB file is invalid: {file}')
+            os.replace(temp_path, store_path)
+        finally:
+            try:
+                if os.path.isfile(temp_path):
+                    os.remove(temp_path)
+            except Exception:
+                pass
 
 
 def _get_with_retry(url, max_retries=5, backoff_factor=2, headers=None, method="GET", allow_redirects=False):
@@ -201,10 +223,9 @@ def update_titledb_files(app_settings):
     
     region_titles_file = get_region_titles_file(app_settings)
     try:
-        region_titles_file_present = region_titles_file in os.listdir(TITLEDB_DIR)
+        current_files = set(os.listdir(TITLEDB_DIR))
     except FileNotFoundError:
-        # Directory doesn't exist yet
-        region_titles_file_present = False
+        current_files = set()
 
     try:
         r = _get_with_retry(TITLEDB_ARTEFACTS_URL, allow_redirects=False)
@@ -216,14 +237,22 @@ def update_titledb_files(app_settings):
         logger.error(f'Failed to fetch TitleDB artefacts: {e}')
         raise
     
-    if is_titledb_update_available(rzf):
+    update_available, latest_remote_commit = is_titledb_update_available(rzf)
+    if update_available:
         files_to_update = TITLEDB_DEFAULT_FILES + [region_titles_file]
         need_descriptions = True
         old_region_titles_files = [f for f in os.listdir(TITLEDB_DIR) if re.match(r"titles\.[A-Z]{2}\.[a-z]{2}\.json", f) and f not in files_to_update]
         files_to_update += old_region_titles_files
 
-    elif not region_titles_file_present:
-        files_to_update.append(region_titles_file)
+    required_core_files = list(TITLEDB_DEFAULT_FILES) + [region_titles_file]
+    missing_core_files = [file for file in required_core_files if file not in current_files]
+    if missing_core_files:
+        logger.warning(
+            "Missing required TitleDB file(s): %s. They will be downloaded.",
+            ", ".join(missing_core_files)
+        )
+        files_to_update.extend(missing_core_files)
+        need_descriptions = True
 
     # Ensure we have a local description index (used for game info descriptions).
     desc_url, desc_filename = _get_descriptions_url(app_settings)
@@ -231,7 +260,9 @@ def update_titledb_files(app_settings):
     descriptions_valid = _is_valid_json_file(descriptions_path)
     need_descriptions = True
 
-    if len(files_to_update):
+    if files_to_update:
+        # Keep deterministic order without duplicates.
+        files_to_update = list(dict.fromkeys(files_to_update))
         download_titledb_files(rzf, files_to_update)
 
     # Description index is not part of the nightly artefacts zip; download it directly.
@@ -243,6 +274,9 @@ def update_titledb_files(app_settings):
             _download_json_file(desc_url, store_path, conditional=descriptions_valid)
         except Exception as e:
             logger.warning(f'Failed to download {desc_filename}: {e}')
+
+    if update_available:
+        _write_latest_commit(latest_remote_commit)
 
 
 def update_titledb(app_settings):

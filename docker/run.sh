@@ -4,13 +4,14 @@
 gid=${PGID:-1000}
 uid=${PUID:-1000}
 
-! getent group "${gid}" && addgroup -g "${gid}" -S ownfoil
+! getent group "${gid}" && addgroup -g "${gid}" -S aerofoil
 GROUP=$(getent group "${gid}" | cut -d ":" -f 1)
-! getent passwd "${uid}" && adduser -u "${uid}" -G "${GROUP}" -S ownfoil
+! getent passwd "${uid}" && adduser -u "${uid}" -G "${GROUP}" -S aerofoil
 
 chown -R ${uid}:${gid} /app
 chown -R ${uid}:${gid} /root
 
-echo "Starting ownfoil"
+echo "Starting AeroFoil"
 
 exec sudo -E -u "#${uid}" python /app/app.py
+

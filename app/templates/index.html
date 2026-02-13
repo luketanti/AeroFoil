@@ -117,6 +117,15 @@
                                 Missing DLC
                             </label>
                         </li>
+                        <li>
+                            <hr class="dropdown-divider">
+                        </li>
+                        <li>
+                            <label class="form-check-label dropdown-item" for="filterCheckUnrecognized">
+                                <input class="form-check-input filterLabel" type="checkbox" value="" id="filterCheckUnrecognized">
+                                Unrecognized
+                            </label>
+                        </li>
                         <!-- <div class="text-center m-2">
                             <button id="btnApplyFilters" type="button" class="btn btn-primary" style="width: 85%;">Apply
                                 filters</button>
@@ -200,7 +209,7 @@
     </div>
 
     <div class="grid-container" id="gridContainer">
-        <div class="row g-4" id="gameGrid"></div>
+        <div class="row g-3" id="gameGrid"></div>
         <!-- <div class="row row-cols-1 row-cols-md-3 g-4" id="gameGrid"></div> -->
     </div>
 
@@ -246,6 +255,34 @@
                 </div>
                 <div id="gameInfoStatus" class="text-muted small mb-2"></div>
                 <div id="gameInfoBody" class="game-info-body"></div>
+                {% if current_user.is_admin or admin_account_created == false %}
+                <div id="manualTitleInfoEditor" class="border rounded p-3 mt-3 d-none">
+                    <div class="fw-semibold mb-2">Manual metadata override</div>
+                    <div class="text-muted small mb-2">Use this when TitleDB does not identify the title correctly.</div>
+                    <div class="row g-2">
+                        <div class="col-md-6">
+                            <label for="manualTitleNameInput" class="form-label">Title name</label>
+                            <input type="text" class="form-control form-control-sm" id="manualTitleNameInput">
+                        </div>
+                        <div class="col-md-6">
+                            <label for="manualTitleIconUrlInput" class="form-label">Icon URL</label>
+                            <input type="text" class="form-control form-control-sm" id="manualTitleIconUrlInput" placeholder="https://...">
+                        </div>
+                        <div class="col-12">
+                            <label for="manualTitleBannerUrlInput" class="form-label">Banner URL</label>
+                            <input type="text" class="form-control form-control-sm" id="manualTitleBannerUrlInput" placeholder="https://...">
+                        </div>
+                        <div class="col-12">
+                            <label for="manualTitleDescriptionInput" class="form-label">Description</label>
+                            <textarea class="form-control form-control-sm" id="manualTitleDescriptionInput" rows="4"></textarea>
+                        </div>
+                    </div>
+                    <div class="d-flex align-items-center gap-2 mt-2">
+                        <button type="button" class="btn btn-sm btn-primary" id="saveManualTitleInfoBtn">Save metadata</button>
+                        <span id="manualTitleInfoStatus" class="small text-muted"></span>
+                    </div>
+                </div>
+                {% endif %}
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
@@ -312,6 +349,9 @@
     let currentSort = 'title_asc';
     let selectedGenre = '';
     const canManageDownloads = {{ 'true' if current_user.is_admin or admin_account_created == false else 'false' }};
+    const canManageManualTitleInfo = {{ 'true' if current_user.is_admin or admin_account_created == false else 'false' }};
+    let gameInfoCurrentTitleId = '';
+    let gameInfoCurrentGame = null;
 
     function buildTitlesQuery() {
         const params = new URLSearchParams();
@@ -341,6 +381,9 @@
         }
         if (activeCompletionFilters.size === 1) {
             params.set('completion', activeCompletionFilters.has('Complete') ? 'complete' : 'missing_dlc');
+        }
+        if (activeRecognitionFilters.size === 1) {
+            params.set('recognized', activeRecognitionFilters.has('Unrecognized') ? 'unrecognized' : 'all');
         }
         return params.toString();
     }
@@ -536,7 +579,8 @@
             activeTypeFilters.size === 0 &&
             activeOwnershipFilters.size === 0 &&
             activeUpdateFilters.size === 0 &&
-            activeCompletionFilters.size === 0
+            activeCompletionFilters.size === 0 &&
+            activeRecognitionFilters.size === 0
         );
     }
 
@@ -1098,7 +1142,8 @@
         const filters = {
             type: [],
             update: [],
-            completion: []
+            completion: [],
+            recognition: []
         };
         if ($('#filterCheckBase').is(':checked')) filters.type.push('BASE');
         if ($('#filterCheckDlc').is(':checked')) filters.type.push('DLC');
@@ -1106,6 +1151,7 @@
         if ($('#filterCheckMissingUpdate').is(':checked')) filters.update.push('Outdated');
         if ($('#filterCheckComplete').is(':checked')) filters.completion.push('Complete');
         if ($('#filterCheckMissingDlc').is(':checked')) filters.completion.push('Missing DLC');
+        if ($('#filterCheckUnrecognized').is(':checked')) filters.recognition.push('Unrecognized');
 
         localStorage.setItem('activeFilters', JSON.stringify(filters));
     }
@@ -1166,6 +1212,7 @@
             $('#filterCheckMissingUpdate').prop('checked', filters.update?.includes('Outdated') || false);
             $('#filterCheckComplete').prop('checked', filters.completion?.includes('Complete') || false);
             $('#filterCheckMissingDlc').prop('checked', filters.completion?.includes('Missing DLC') || false);
+            $('#filterCheckUnrecognized').prop('checked', filters.recognition?.includes('Unrecognized') || false);
 
             updateFilter();
         }
@@ -1338,6 +1385,7 @@
             const button = $(this);
             const downloadUrl = button.data('download-url');
             const title = button.data('title');
+            const titleId = button.data('title-id');
             const updateOnly = button.data('update-only') === true || button.data('update-only') === 'true';
             const expectedVersion = button.data('expected-version');
             if (!downloadUrl) {
@@ -1351,6 +1399,7 @@
                 data: JSON.stringify({
                     download_url: downloadUrl,
                     title: title,
+                    title_id: titleId,
                     update_only: updateOnly,
                     expected_version: expectedVersion
                 }),
@@ -1548,6 +1597,8 @@
     }
 
     function renderGameInfoModalFromTitleDb(game, titleId, title) {
+        gameInfoCurrentTitleId = (titleId || '').trim().toUpperCase();
+        gameInfoCurrentGame = game || null;
         $('#gameInfoTitle').text(title || (game && (game.title_id_name || game.name)) || 'Game info');
         $('#gameInfoMeta').text(titleId ? `Title ID ${titleId}` : '');
         const body = $('#gameInfoBody');
@@ -1616,6 +1667,18 @@
                     .addClass('text-muted');
             });
         }
+
+        if (canManageManualTitleInfo && titleId) {
+            const unresolved = !game || String(game.name || '').trim().toLowerCase() === 'unrecognized'
+                || String(game.id || '').toLowerCase().includes('not found in titledb')
+                || !desc;
+            $('#manualTitleInfoEditor').toggleClass('d-none', !unresolved);
+            $('#manualTitleNameInput').val((game && game.name && game.name !== 'Unrecognized') ? game.name : '');
+            $('#manualTitleDescriptionInput').val((game && game.description) ? game.description : '');
+            $('#manualTitleIconUrlInput').val((game && game.iconUrl) ? game.iconUrl : '');
+            $('#manualTitleBannerUrlInput').val((game && game.bannerUrl) ? game.bannerUrl : '');
+            $('#manualTitleInfoStatus').text('').removeClass('text-danger text-success').addClass('text-muted');
+        }
     }
 
     const gameInfoModal = document.getElementById('gameInfoModal');
@@ -1634,6 +1697,63 @@
             renderGameInfoModalFromTitleDb(game, titleId, title);
         });
     }
+
+    $('#saveManualTitleInfoBtn').on('click', function () {
+        if (!canManageManualTitleInfo) return;
+        const titleId = gameInfoCurrentTitleId;
+        if (!titleId) return;
+
+        const button = $(this);
+        button.prop('disabled', true);
+        $('#manualTitleInfoStatus').text('Saving...').removeClass('text-danger text-success').addClass('text-muted');
+
+        const payload = {
+            title_id: titleId,
+            name: ($('#manualTitleNameInput').val() || '').trim(),
+            description: ($('#manualTitleDescriptionInput').val() || '').trim(),
+            iconUrl: ($('#manualTitleIconUrlInput').val() || '').trim(),
+            bannerUrl: ($('#manualTitleBannerUrlInput').val() || '').trim(),
+            screenshots: []
+        };
+
+        $.ajax({
+            url: "/api/title-info/manual",
+            type: "POST",
+            data: JSON.stringify(payload),
+            contentType: "application/json",
+            success: function (result) {
+                if (!result || result['success'] !== true) {
+                    $('#manualTitleInfoStatus').text('Failed to save metadata.').removeClass('text-muted text-success').addClass('text-danger');
+                    return;
+                }
+                $.getJSON(`/api/title-info/${encodeURIComponent(titleId)}`, function (info) {
+                    const merged = Object.assign({}, gameInfoCurrentGame || {}, {
+                        name: info.name || payload.name || (gameInfoCurrentGame && gameInfoCurrentGame.name) || 'Unrecognized',
+                        title_id_name: info.name || payload.name || (gameInfoCurrentGame && gameInfoCurrentGame.title_id_name) || 'Unrecognized',
+                        iconUrl: info.iconUrl || payload.iconUrl || '',
+                        bannerUrl: info.bannerUrl || payload.bannerUrl || '',
+                        description: info.description || payload.description || '',
+                        screenshots: Array.isArray(info.screenshots) ? info.screenshots : [],
+                        id: titleId
+                    });
+                    renderGameInfoModalFromTitleDb(merged, titleId, merged.name);
+                    $('#manualTitleInfoStatus').text('Saved.').removeClass('text-muted text-danger').addClass('text-success');
+                    fetchGames().then(() => {
+                        recomputeFilteredGames();
+                        renderGenresDropdown();
+                    }).catch(() => {});
+                }).fail(function () {
+                    $('#manualTitleInfoStatus').text('Saved, but refresh failed.').removeClass('text-muted text-success').addClass('text-danger');
+                });
+            },
+            error: function () {
+                $('#manualTitleInfoStatus').text('Failed to save metadata.').removeClass('text-muted text-success').addClass('text-danger');
+            },
+            complete: function () {
+                button.prop('disabled', false);
+            }
+        });
+    });
 
     const screenshotModalEl = document.getElementById('screenshotModal');
     const screenshotModal = screenshotModalEl ? new bootstrap.Modal(screenshotModalEl) : null;
@@ -1690,6 +1810,7 @@
                                 <button class="btn btn-sm btn-warning queue-torrent-btn"
                                     data-download-url="${item.download_url}"
                                     data-title="${item.title || ''}"
+                                    data-title-id="${titleId || ''}"
                                     data-update-only="true"
                                     data-expected-version="${version}">
                                     Queue update
@@ -1746,6 +1867,7 @@
                             <button class="btn btn-sm btn-warning queue-torrent-btn"
                                 data-download-url="${item.download_url}"
                                 data-title="${item.title || ''}"
+                                data-title-id="${titleId || ''}"
                                 data-update-only="true"
                                 data-expected-version="${version}">
                                 Queue update
@@ -1775,6 +1897,7 @@
     const activeOwnershipFilters = new Set();
     const activeUpdateFilters = new Set();
     const activeCompletionFilters = new Set();
+    const activeRecognitionFilters = new Set();
 
     function updateFilter() {
         // $('#filterDropdownBtn').toggle();
@@ -1821,6 +1944,12 @@
         }
         else {
             activeCompletionFilters.delete('Missing DLC');
+        }
+        if ($('#filterCheckUnrecognized').is(":checked")) {
+            activeRecognitionFilters.add('Unrecognized');
+        }
+        else {
+            activeRecognitionFilters.delete('Unrecognized');
         }
     }
 
