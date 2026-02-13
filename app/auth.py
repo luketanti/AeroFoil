@@ -382,13 +382,6 @@ def _peer_ip() -> str:
     return (request.remote_addr or '').strip()
 
 
-def _parse_first_ip_list(value: str) -> str:
-    if not value:
-        return ''
-    # X-Forwarded-For can be: "client, proxy1, proxy2"
-    return value.split(',', 1)[0].strip()
-
-
 def _parse_ip_for_match(value):
     try:
         import ipaddress
@@ -406,14 +399,18 @@ def _parse_ip_for_match(value):
         return None
 
 
-def _peer_is_trusted_proxy(settings: dict) -> bool:
+def _normalize_ip_text(value: str) -> str:
+    ip = _parse_ip_for_match(value)
+    if ip is None:
+        return ''
+    return str(ip)
+
+
+def _is_ip_in_trusted_proxy_ranges(ip_value: str, settings: dict) -> bool:
     try:
         import ipaddress
-        peer = _peer_ip()
-        if not peer:
-            return False
-        peer_ip = _parse_ip_for_match(peer)
-        if peer_ip is None:
+        ip_obj = _parse_ip_for_match(ip_value)
+        if ip_obj is None:
             return False
         entries = _trusted_proxies(settings)
         if not entries:
@@ -424,11 +421,11 @@ def _peer_is_trusted_proxy(settings: dict) -> bool:
                 continue
             try:
                 if '/' in entry:
-                    if peer_ip in ipaddress.ip_network(entry, strict=False):
+                    if ip_obj in ipaddress.ip_network(entry, strict=False):
                         return True
                 else:
                     entry_ip = _parse_ip_for_match(entry)
-                    if entry_ip is not None and peer_ip == entry_ip:
+                    if entry_ip is not None and ip_obj == entry_ip:
                         return True
             except Exception:
                 continue
@@ -437,14 +434,48 @@ def _peer_is_trusted_proxy(settings: dict) -> bool:
         return False
 
 
+def _parse_ip_header_list(value: str):
+    out = []
+    seen = set()
+    for raw in str(value or '').split(','):
+        normalized = _normalize_ip_text(raw)
+        if not normalized:
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+    return out
+
+
+def _peer_is_trusted_proxy(settings: dict) -> bool:
+    try:
+        peer = _peer_ip()
+        if not peer:
+            return False
+        return _is_ip_in_trusted_proxy_ranges(peer, settings)
+    except Exception:
+        return False
+
+
 def _effective_client_ip(settings: dict) -> str:
-    """Return client IP, trusting XFF only from configured proxies."""
+    """Return client IP, trusting proxy headers only from configured proxies."""
     peer = _peer_ip()
     xff = (request.headers.get('X-Forwarded-For') or '').strip()
     if xff and _trust_proxy_headers(settings) and _peer_is_trusted_proxy(settings):
-        candidate = _parse_first_ip_list(xff)
+        # Prefer the right-most non-trusted IP from XFF chain.
+        # This is resilient to multi-proxy append behavior and odd ordering.
+        xff_chain = _parse_ip_header_list(xff)
+        while xff_chain and _is_ip_in_trusted_proxy_ranges(xff_chain[-1], settings):
+            xff_chain.pop()
+        candidate = xff_chain[-1] if xff_chain else ''
         if candidate:
             return candidate
+        # Fallback for proxy stacks that only set one real-client header.
+        for header_name in ('CF-Connecting-IP', 'True-Client-IP', 'X-Real-IP'):
+            header_value = _normalize_ip_text(request.headers.get(header_name) or '')
+            if header_value and not _is_ip_in_trusted_proxy_ranges(header_value, settings):
+                return header_value
     return peer
 
 
