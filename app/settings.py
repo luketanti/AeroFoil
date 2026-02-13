@@ -2,6 +2,8 @@ from app.constants import *
 import yaml
 import os
 import time
+import hashlib
+import threading
 
 import logging
 
@@ -12,6 +14,66 @@ logger = logging.getLogger('main')
 _settings_cache = None
 _settings_cache_time = 0
 _settings_cache_ttl = 5  # Cache for 5 seconds
+
+# Cache key validation results by absolute path + file checksum to avoid
+# re-running nsz Keys.load() on every settings refresh.
+_keys_validation_cache = {}
+_keys_validation_lock = threading.Lock()
+_keys_validation_cache_max = 16
+
+
+def _hash_file_sha256(path):
+    hasher = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 64), b''):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _collect_keys_revisions(keys_module):
+    incorrect = []
+    loaded = []
+    try:
+        getter = getattr(keys_module, 'getIncorrectKeysRevisions', None)
+        if callable(getter):
+            incorrect = list(getter() or [])
+    except Exception:
+        incorrect = []
+    try:
+        getter = getattr(keys_module, 'getLoadedKeysRevisions', None)
+        if callable(getter):
+            loaded = list(getter() or [])
+    except Exception:
+        loaded = []
+    return loaded, incorrect
+
+
+def _resolve_keys_validation_result(valid_flag, loaded_revisions, incorrect_revisions, log_warnings=True):
+    valid = bool(valid_flag)
+    loaded = list(loaded_revisions or [])
+    incorrect = list(incorrect_revisions or [])
+    if valid:
+        return True, []
+    if loaded:
+        if log_warnings:
+            logger.warning(
+                "Keys loaded with warnings. Loaded revisions: %s, incorrect revisions: %s",
+                loaded,
+                incorrect,
+            )
+        return True, []
+    errors = []
+    if incorrect:
+        errors.extend([f"incorrect_{rev}" for rev in incorrect])
+    if not errors:
+        errors.append('no_valid_master_keys')
+    return False, errors
+
+
+def _cache_keys_validation_result(cache_key, value):
+    _keys_validation_cache[cache_key] = value
+    while len(_keys_validation_cache) > _keys_validation_cache_max:
+        _keys_validation_cache.pop(next(iter(_keys_validation_cache)))
 
 def _normalize_titles_manual_overrides(raw_overrides):
     if not isinstance(raw_overrides, dict):
@@ -238,51 +300,64 @@ def validate_keys_file(key_file=KEYS_FILE):
     """
     valid = False
     errors = []
-    if not os.path.isfile(key_file):
+    file_path = os.path.abspath(str(key_file or KEYS_FILE))
+    if not os.path.isfile(file_path):
         logger.debug(f'Keys file {key_file} does not exist.')
         return valid, ['keys_file_missing']
+
+    try:
+        checksum = _hash_file_sha256(file_path)
+    except Exception as e:
+        logger.error(f'Failed to hash keys file {file_path}: {e}')
+        return False, [str(e)]
+
+    cache_key = (file_path, checksum)
+    with _keys_validation_lock:
+        cached = _keys_validation_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
     try:
         from nsz.nut import Keys
     except Exception as e:
         msg = f'nsz_keys_module_unavailable: {e}'
         logger.debug(msg)
         return valid, [msg]
-    try:
-        valid = bool(Keys.load(key_file))
-        if valid:
-            return True, []
-
-        incorrect = []
-        loaded = []
+    with _keys_validation_lock:
+        cached = _keys_validation_cache.get(cache_key)
+        if cached is not None:
+            return cached
         try:
-            getter = getattr(Keys, 'getIncorrectKeysRevisions', None)
+            loaded_checksum = None
+            getter = getattr(Keys, 'getLoadedKeysChecksum', None)
             if callable(getter):
-                incorrect = list(getter() or [])
-        except Exception:
-            incorrect = []
-        try:
-            getter = getattr(Keys, 'getLoadedKeysRevisions', None)
-            if callable(getter):
-                loaded = list(getter() or [])
-        except Exception:
-            loaded = []
+                loaded_checksum = getter()
 
-        if loaded:
-            logger.warning(
-                "Keys loaded with warnings. Loaded revisions: %s, incorrect revisions: %s",
-                loaded,
-                incorrect,
+            can_reuse_loaded_state = (
+                bool(loaded_checksum)
+                and str(loaded_checksum).strip().lower() == checksum.lower()
+                and getattr(Keys, 'keys_loaded', None) is not None
             )
-            return True, []
 
-        if incorrect:
-            errors.extend([f"incorrect_{rev}" for rev in incorrect])
-        if not errors:
-            errors.append('no_valid_master_keys')
-        return False, errors
-    except Exception as e:
-        logger.error(f'Provided keys file {key_file} is invalid: {e}')
-        return False, [str(e)]
+            if can_reuse_loaded_state:
+                loaded, incorrect = _collect_keys_revisions(Keys)
+                result = _resolve_keys_validation_result(
+                    getattr(Keys, 'keys_loaded', False),
+                    loaded,
+                    incorrect,
+                    log_warnings=False,
+                )
+                _cache_keys_validation_result(cache_key, result)
+                return result
+
+            valid = bool(Keys.load(file_path))
+            loaded, incorrect = _collect_keys_revisions(Keys)
+            result = _resolve_keys_validation_result(valid, loaded, incorrect, log_warnings=True)
+            _cache_keys_validation_result(cache_key, result)
+            return result
+        except Exception as e:
+            logger.error(f'Provided keys file {key_file} is invalid: {e}')
+            return False, [str(e)]
 
 def load_settings(force_reload=False):
     global _settings_cache, _settings_cache_time
