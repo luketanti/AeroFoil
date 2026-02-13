@@ -4,6 +4,7 @@
 [![Docker Pulls](https://img.shields.io/docker/pulls/luketanti/aerofoil)](https://hub.docker.com/r/luketanti/aerofoil)
 [![Docker Image Size](https://img.shields.io/docker/image-size/luketanti/aerofoil/latest?arch=amd64)](https://hub.docker.com/r/luketanti/aerofoil/tags)
 ![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-8A2BE2)
+[![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?logo=discord&logoColor=white)](https://discord.gg/gGy7hWxJeP)
 
 
 AeroFoil is a Nintendo Switch library manager that turns your library into a fully customizable, self-hosted Tinfoil Shop. The goal of this project is to manage your library, identify any missing content (DLCs or updates) and provide a user friendly way to browse your content. Some of the features include:
