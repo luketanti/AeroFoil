@@ -196,6 +196,7 @@ In the `Settings` page under the `Shop` section is where you customize your Shop
 The `Encrypt shop` option only affects the Tinfoil payload; the web interface and admin UI remain accessible as normal.
 Encryption uses the Tinfoil public key and AES, and requires the `pycryptodome` dependency.
 `Fast transfer mode` prioritizes throughput for `/api/get_game` by skipping per-chunk transfer accounting; Activity live byte counters and exact transfer bytes may be less precise.
+The same section also includes login protection controls: temporary IP lockout after repeated failed auth attempts, and a permanent IP/CIDR blacklist.
 
 # Deployment notes
 - Recommended volumes: `/games`, `/app/config`, and `/app/data`.

@@ -41,6 +41,13 @@ DEFAULT_SETTINGS = {
         "trusted_proxies": [],
         # When true, use X-Forwarded-For only if request.remote_addr is trusted.
         "trust_proxy_headers": False,
+        # Temporary lockout after repeated failed login attempts from same client IP.
+        "auth_ip_lockout_enabled": True,
+        "auth_ip_lockout_threshold": 5,
+        "auth_ip_lockout_window_seconds": 600,
+        "auth_ip_lockout_duration_seconds": 1800,
+        # Permanent deny-list of IP/CIDR entries for authentication endpoints.
+        "auth_permanent_ip_blacklist": [],
     },
     "library": {
         "paths": ["/games"],

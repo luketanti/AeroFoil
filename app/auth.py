@@ -15,6 +15,9 @@ logger = logging.getLogger('main')
 
 _recent_auth_log_lock = threading.Lock()
 _recent_auth_log = {}
+_auth_ip_state_lock = threading.Lock()
+_auth_failed_attempts = {}
+_auth_ip_lockouts = {}
 
 
 def _auth_dedupe_allow(dedupe_key: str, window_s: int = 15) -> bool:
@@ -31,6 +34,172 @@ def _auth_dedupe_allow(dedupe_key: str, window_s: int = 15) -> bool:
             for k, ts in ordered[:2000]:
                 _recent_auth_log[k] = ts
     return True
+
+
+def _to_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ('1', 'true', 'yes', 'on'):
+            return True
+        if lowered in ('0', 'false', 'no', 'off'):
+            return False
+    return bool(default)
+
+
+def _to_int(value, default=0, minimum=None, maximum=None):
+    try:
+        out = int(value)
+    except Exception:
+        out = int(default)
+    if minimum is not None:
+        out = max(int(minimum), out)
+    if maximum is not None:
+        out = min(int(maximum), out)
+    return out
+
+
+def _normalize_ip_entries(raw):
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        entries = [raw]
+    elif isinstance(raw, (list, tuple, set)):
+        entries = list(raw)
+    else:
+        entries = []
+
+    out = []
+    seen = set()
+    for entry in entries:
+        text = str(entry or '').strip()
+        if not text:
+            continue
+        for segment in text.replace('\r', '\n').replace(',', '\n').split('\n'):
+            candidate = str(segment or '').strip()
+            if not candidate:
+                continue
+            key = candidate.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(candidate)
+    return out
+
+
+def _get_auth_protection_config(settings):
+    security = (settings or {}).get('security', {}) or {}
+    return {
+        'lockout_enabled': _to_bool(security.get('auth_ip_lockout_enabled'), default=True),
+        'threshold': _to_int(security.get('auth_ip_lockout_threshold'), default=5, minimum=1, maximum=1000),
+        'window_s': _to_int(security.get('auth_ip_lockout_window_seconds'), default=600, minimum=10, maximum=86400),
+        'duration_s': _to_int(security.get('auth_ip_lockout_duration_seconds'), default=1800, minimum=10, maximum=604800),
+        'permanent_blacklist': _normalize_ip_entries(security.get('auth_permanent_ip_blacklist')),
+    }
+
+
+def _ip_matches_entry(ip_value, entry):
+    try:
+        import ipaddress
+        target_ip = ipaddress.ip_address(str(ip_value or '').strip())
+        token = str(entry or '').strip()
+        if not token:
+            return False
+        if '/' in token:
+            return target_ip in ipaddress.ip_network(token, strict=False)
+        return target_ip == ipaddress.ip_address(token)
+    except Exception:
+        return False
+
+
+def _is_permanently_blocked_ip(client_ip, config):
+    if not client_ip:
+        return False
+    for entry in config.get('permanent_blacklist') or []:
+        if _ip_matches_entry(client_ip, entry):
+            return True
+    return False
+
+
+def _temporary_lockout_remaining_s(client_ip):
+    if not client_ip:
+        return 0
+    now = time.time()
+    with _auth_ip_state_lock:
+        lockout_until = float(_auth_ip_lockouts.get(client_ip) or 0.0)
+        if lockout_until <= now:
+            _auth_ip_lockouts.pop(client_ip, None)
+            return 0
+        return int(max(1, round(lockout_until - now)))
+
+
+def _is_ip_blocked(client_ip, config):
+    if _is_permanently_blocked_ip(client_ip, config):
+        return True, 'permanent', 0
+    remaining_s = _temporary_lockout_remaining_s(client_ip)
+    if remaining_s > 0:
+        return True, 'temporary', remaining_s
+    return False, None, 0
+
+
+def _record_auth_failure(client_ip, config):
+    if not client_ip:
+        return False, 0
+    if not bool(config.get('lockout_enabled')):
+        return False, 0
+
+    threshold = int(config.get('threshold') or 5)
+    window_s = int(config.get('window_s') or 600)
+    duration_s = int(config.get('duration_s') or 1800)
+    now = time.time()
+    cutoff = now - float(window_s)
+    lockout_triggered = False
+
+    with _auth_ip_state_lock:
+        attempts = [
+            ts for ts in (_auth_failed_attempts.get(client_ip) or [])
+            if float(ts) >= cutoff
+        ]
+        attempts.append(now)
+        # Bound per-IP attempt history.
+        attempts = attempts[-max(threshold * 4, threshold):]
+        _auth_failed_attempts[client_ip] = attempts
+        if len(attempts) >= threshold:
+            _auth_ip_lockouts[client_ip] = now + float(duration_s)
+            lockout_triggered = True
+
+        # Bound global structures.
+        if len(_auth_failed_attempts) > 5000:
+            ordered = sorted(
+                _auth_failed_attempts.items(),
+                key=lambda kv: (kv[1][-1] if kv[1] else 0),
+                reverse=True
+            )
+            _auth_failed_attempts.clear()
+            for key, value in ordered[:2000]:
+                _auth_failed_attempts[key] = value
+        if len(_auth_ip_lockouts) > 5000:
+            active = {
+                key: until for key, until in _auth_ip_lockouts.items()
+                if float(until or 0) > now
+            }
+            ordered = sorted(active.items(), key=lambda kv: kv[1], reverse=True)
+            _auth_ip_lockouts.clear()
+            for key, value in ordered[:2000]:
+                _auth_ip_lockouts[key] = value
+
+    return lockout_triggered, int(duration_s)
+
+
+def _clear_auth_failures(client_ip):
+    if not client_ip:
+        return
+    with _auth_ip_state_lock:
+        _auth_failed_attempts.pop(client_ip, None)
+        _auth_ip_lockouts.pop(client_ip, None)
 
 
 def _log_login_event(kind: str, username: str = None, ok: bool = None, status_code: int = None, window_s: int = 10):
@@ -278,6 +447,24 @@ def basic_auth(request):
     success = True
     error = ''
     is_admin = False
+    settings = {}
+    try:
+        settings = load_settings()
+    except Exception:
+        settings = {}
+    auth_config = _get_auth_protection_config(settings)
+    client_ip = _effective_client_ip(settings)
+
+    blocked, block_reason, remaining_s = _is_ip_blocked(client_ip, auth_config)
+    if blocked:
+        success = False
+        if block_reason == 'permanent':
+            error = 'Access blocked for this client IP.'
+            _log_login_event('shop_auth_blocked_permanent_ip', username=None, ok=False, status_code=403, window_s=30)
+        else:
+            error = f'Too many failed attempts from this client IP. Try again in {int(remaining_s)}s.'
+            _log_login_event('shop_auth_blocked_temporary_ip', username=None, ok=False, status_code=429, window_s=15)
+        return success, error, is_admin
 
     auth = request.authorization
     if auth is None:
@@ -293,11 +480,17 @@ def basic_auth(request):
         success = False
         error = f'Unknown user "{username}".'
         _log_login_event('shop_auth_failed_unknown_user', username=username, ok=False, status_code=401, window_s=30)
+        lockout_triggered, _ = _record_auth_failure(client_ip, auth_config)
+        if lockout_triggered:
+            _log_login_event('shop_auth_lockout_activated', username=username, ok=False, status_code=429, window_s=10)
     
     elif not check_password_hash(user.password, password):
         success = False
         error = f'Incorrect password for user "{username}".'
         _log_login_event('shop_auth_failed_bad_password', username=username, ok=False, status_code=401, window_s=30)
+        lockout_triggered, _ = _record_auth_failure(client_ip, auth_config)
+        if lockout_triggered:
+            _log_login_event('shop_auth_lockout_activated', username=username, ok=False, status_code=429, window_s=10)
 
     elif getattr(user, 'frozen', False):
         success = False
@@ -312,6 +505,7 @@ def basic_auth(request):
 
     else:
         is_admin = user.has_admin_access()
+        _clear_auth_failures(client_ip)
         # Basic auth may be sent on every request; dedupe to avoid log spam.
         _log_login_event('shop_auth_success', username=username, ok=True, status_code=200, window_s=60)
     return success, error, is_admin
@@ -388,6 +582,23 @@ def login():
     password = request.form.get('password')
     remember = bool(request.form.get('remember'))
     next_url = request.form.get('next', '')
+    settings = {}
+    try:
+        settings = load_settings()
+    except Exception:
+        settings = {}
+    auth_config = _get_auth_protection_config(settings)
+    client_ip = _effective_client_ip(settings)
+
+    blocked, block_reason, remaining_s = _is_ip_blocked(client_ip, auth_config)
+    if blocked:
+        if block_reason == 'permanent':
+            logger.warning(f'Blocked web login from permanently blacklisted IP {client_ip}')
+            _log_login_event('login_blocked_permanent_ip', username=username, ok=False, status_code=403, window_s=15)
+        else:
+            logger.warning(f'Blocked web login from temporarily locked IP {client_ip}, remaining {remaining_s}s')
+            _log_login_event('login_blocked_temporary_ip', username=username, ok=False, status_code=429, window_s=10)
+        return redirect(url_for('auth.login'))
 
     user = User.query.filter_by(user=username).first()
 
@@ -396,12 +607,18 @@ def login():
     if not user:
         logger.warning(f'Incorrect login for user {username}')
         _log_login_event('login_failed_unknown_user', username=username, ok=False, status_code=401, window_s=15)
+        lockout_triggered, _ = _record_auth_failure(client_ip, auth_config)
+        if lockout_triggered:
+            _log_login_event('login_lockout_activated', username=username, ok=False, status_code=429, window_s=10)
         return redirect(url_for('auth.login')) # if the user doesn't exist or password is wrong, reload the page
 
     # take the user-supplied password, hash it, and compare it to the hashed password in the database
     if not check_password_hash(user.password, password):
         logger.warning(f'Incorrect login for user {username}')
         _log_login_event('login_failed_bad_password', username=username, ok=False, status_code=401, window_s=15)
+        lockout_triggered, _ = _record_auth_failure(client_ip, auth_config)
+        if lockout_triggered:
+            _log_login_event('login_lockout_activated', username=username, ok=False, status_code=429, window_s=10)
         return redirect(url_for('auth.login'))
 
     if getattr(user, 'frozen', False):
@@ -411,6 +628,7 @@ def login():
 
     # if the above check passes, then we know the user has the right credentials
     logger.info(f'Sucessfull login for user {username}')
+    _clear_auth_failures(client_ip)
     login_user(user, remember=remember)
     _log_login_event('login_success', username=username, ok=True, status_code=200, window_s=0)
 

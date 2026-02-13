@@ -148,6 +148,83 @@ def _coerce_bool(value, default=False):
             return False
     return bool(default)
 
+def _coerce_int(value, default=0, minimum=None, maximum=None):
+    try:
+        out = int(value)
+    except Exception:
+        out = int(default)
+    if minimum is not None:
+        out = max(int(minimum), out)
+    if maximum is not None:
+        out = min(int(maximum), out)
+    return out
+
+def _normalize_ip_entries(raw):
+    if raw is None:
+        return []
+
+    entries = []
+    if isinstance(raw, str):
+        entries = [raw]
+    elif isinstance(raw, (list, tuple, set)):
+        entries = list(raw)
+
+    out = []
+    seen = set()
+    for item in entries:
+        text = str(item or '').strip()
+        if not text:
+            continue
+        # Accept comma and newline separated input.
+        for segment in text.replace('\r', '\n').replace(',', '\n').split('\n'):
+            candidate = str(segment or '').strip()
+            if not candidate:
+                continue
+            key = candidate.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(candidate)
+    return out
+
+def _normalize_security_settings(raw_security):
+    defaults = DEFAULT_SETTINGS.get('security', {}) or {}
+    merged = defaults.copy()
+    if isinstance(raw_security, dict):
+        merged.update(raw_security)
+
+    merged['trust_proxy_headers'] = _coerce_bool(
+        merged.get('trust_proxy_headers'),
+        default=defaults.get('trust_proxy_headers', False),
+    )
+    merged['trusted_proxies'] = _normalize_ip_entries(merged.get('trusted_proxies'))
+    merged['auth_ip_lockout_enabled'] = _coerce_bool(
+        merged.get('auth_ip_lockout_enabled'),
+        default=defaults.get('auth_ip_lockout_enabled', True),
+    )
+    merged['auth_ip_lockout_threshold'] = _coerce_int(
+        merged.get('auth_ip_lockout_threshold'),
+        default=defaults.get('auth_ip_lockout_threshold', 5),
+        minimum=1,
+        maximum=1000,
+    )
+    merged['auth_ip_lockout_window_seconds'] = _coerce_int(
+        merged.get('auth_ip_lockout_window_seconds'),
+        default=defaults.get('auth_ip_lockout_window_seconds', 600),
+        minimum=10,
+        maximum=86400,
+    )
+    merged['auth_ip_lockout_duration_seconds'] = _coerce_int(
+        merged.get('auth_ip_lockout_duration_seconds'),
+        default=defaults.get('auth_ip_lockout_duration_seconds', 1800),
+        minimum=10,
+        maximum=604800,
+    )
+    merged['auth_permanent_ip_blacklist'] = _normalize_ip_entries(
+        merged.get('auth_permanent_ip_blacklist')
+    )
+    return merged
+
 def load_keys(key_file=KEYS_FILE):
     valid, _ = validate_keys_file(key_file)
     return valid
@@ -247,6 +324,7 @@ def load_settings(force_reload=False):
         env_proxies = _read_env_csv('OWNFOIL_TRUSTED_PROXIES')
         if env_proxies is not None:
             settings['security']['trusted_proxies'] = env_proxies
+        settings['security'] = _normalize_security_settings(settings.get('security'))
 
         if 'downloads' not in settings:
             settings['downloads'] = DEFAULT_SETTINGS.get('downloads', {})
@@ -297,8 +375,10 @@ def load_settings(force_reload=False):
         env_proxies = _read_env_csv('OWNFOIL_TRUSTED_PROXIES')
         if env_proxies is not None:
             settings['security']['trusted_proxies'] = env_proxies
+        settings['security'] = _normalize_security_settings(settings.get('security'))
         with open(CONFIG_FILE, 'w') as yaml_file:
             yaml.dump(settings, yaml_file)
+    settings['security'] = _normalize_security_settings(settings.get('security'))
     settings.setdefault('library', {})
     settings['library']['naming_templates'] = _normalize_library_naming_templates(
         settings['library'].get('naming_templates')
@@ -328,6 +408,7 @@ def set_security_settings(data):
     settings = load_settings(force_reload=True)
     settings.setdefault('security', {})
     settings['security'].update(data or {})
+    settings['security'] = _normalize_security_settings(settings.get('security'))
     with open(CONFIG_FILE, 'w') as yaml_file:
         yaml.dump(settings, yaml_file)
     # Invalidate cache

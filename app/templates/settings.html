@@ -353,6 +353,35 @@
                         Prioritize throughput by skipping per-chunk transfer tracking. Activity live byte counters and exact transfer byte accounting may be less precise.
                     </div>
                 </div>
+                <div class="card mb-3">
+                    <div class="card-body">
+                        <h6 class="card-title mb-3">Login Protection</h6>
+                        <div class="form-check form-switch mb-3">
+                            <input type="checkbox" class="form-check-input" id="authIpLockoutEnabledCheck">
+                            <label class="form-check-label" for="authIpLockoutEnabledCheck">Enable failed-login IP lockout</label>
+                        </div>
+                        <div class="row g-3 mb-3">
+                            <div class="col-md-4">
+                                <label for="authIpLockoutThresholdInput" class="form-label">Failed attempts</label>
+                                <input type="number" min="1" max="1000" class="form-control" id="authIpLockoutThresholdInput">
+                            </div>
+                            <div class="col-md-4">
+                                <label for="authIpLockoutWindowInput" class="form-label">Window (seconds)</label>
+                                <input type="number" min="10" max="86400" class="form-control" id="authIpLockoutWindowInput">
+                            </div>
+                            <div class="col-md-4">
+                                <label for="authIpLockoutDurationInput" class="form-label">Lockout (seconds)</label>
+                                <input type="number" min="10" max="604800" class="form-control" id="authIpLockoutDurationInput">
+                            </div>
+                        </div>
+                        <div>
+                            <label for="authPermanentIpBlacklistInput" class="form-label">Permanent IP blacklist</label>
+                            <textarea class="form-control font-monospace" id="authPermanentIpBlacklistInput" rows="4"
+                                placeholder="203.0.113.4&#10;198.51.100.0/24"></textarea>
+                            <div class="form-text">One IP or CIDR per line. Blacklisted clients cannot authenticate.</div>
+                        </div>
+                    </div>
+                </div>
 
                 <div class="mb-3">
                     <div class="d-flex justify-content-between align-items-center mb-2">
@@ -1062,12 +1091,20 @@
 
     function submitShopSettings() {
         $('#submitShopSettingsBtn').prop('disabled', true);
+        const threshold = parsePositiveInt(getInputVal("authIpLockoutThresholdInput"), 5);
+        const windowSeconds = parsePositiveInt(getInputVal("authIpLockoutWindowInput"), 600);
+        const durationSeconds = parsePositiveInt(getInputVal("authIpLockoutDurationInput"), 1800);
         data = {
             host: $('#shopHostInput').val(),
             hauth: $('#shopHauthInput').val(),
             public: getCheckboxStatus("publicShopCheck"),
             encrypt: getCheckboxStatus("encryptShopCheck"),
             fast_transfer_mode: getCheckboxStatus("fastTransferModeCheck"),
+            auth_ip_lockout_enabled: getCheckboxStatus("authIpLockoutEnabledCheck"),
+            auth_ip_lockout_threshold: threshold,
+            auth_ip_lockout_window_seconds: windowSeconds,
+            auth_ip_lockout_duration_seconds: durationSeconds,
+            auth_permanent_ip_blacklist: parseIpEntryList(getInputVal("authPermanentIpBlacklistInput")),
             public_key: getInputVal("shopPublicKeyInput"),
             motd: $('#motdTextArea').val(),
         }
@@ -1100,6 +1137,42 @@
             return [];
         }
         return value.split(',').map(item => item.trim()).filter(Boolean);
+    }
+
+    function parsePositiveInt(value, fallback) {
+        const out = parseInt(value, 10);
+        if (!Number.isFinite(out) || out <= 0) {
+            return fallback;
+        }
+        return out;
+    }
+
+    function parseIpEntryList(value) {
+        if (!value) {
+            return [];
+        }
+        const seen = new Set();
+        const out = [];
+        String(value).replaceAll('\r', '\n').replaceAll(',', '\n').split('\n').forEach(raw => {
+            const token = String(raw || '').trim();
+            if (!token) {
+                return;
+            }
+            const key = token.toLowerCase();
+            if (seen.has(key)) {
+                return;
+            }
+            seen.add(key);
+            out.push(token);
+        });
+        return out;
+    }
+
+    function formatIpEntryList(entries) {
+        if (!Array.isArray(entries)) {
+            return '';
+        }
+        return entries.map(item => String(item || '').trim()).filter(Boolean).join('\n');
     }
 
     function parseSearchCharReplacements(value) {
@@ -1484,6 +1557,12 @@
             $("#encryptShopCheck").prop("checked", shopSettings['encrypt']);
             $("#fastTransferModeCheck").prop("checked", !!shopSettings['fast_transfer_mode']);
             setInputVal("shopPublicKeyInput", shopSettings['public_key'] || '');
+            securitySettings = result['security'] || {};
+            $("#authIpLockoutEnabledCheck").prop("checked", securitySettings['auth_ip_lockout_enabled'] !== false);
+            setInputVal("authIpLockoutThresholdInput", securitySettings['auth_ip_lockout_threshold'] || 5);
+            setInputVal("authIpLockoutWindowInput", securitySettings['auth_ip_lockout_window_seconds'] || 600);
+            setInputVal("authIpLockoutDurationInput", securitySettings['auth_ip_lockout_duration_seconds'] || 1800);
+            setInputVal("authPermanentIpBlacklistInput", formatIpEntryList(securitySettings['auth_permanent_ip_blacklist'] || []));
             if (!shopSettings['host']) {
                 $("#missingShopHostAlert").css('display', '');
             } else if (!shopSettings['hauth']) {

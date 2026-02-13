@@ -3281,8 +3281,24 @@ def set_titles_settings_api():
 @app.post('/api/settings/shop')
 @access_required('admin')
 def set_shop_settings_api():
-    data = request.json
-    set_shop_settings(data)
+    data = request.json or {}
+    security_fields = {
+        'auth_ip_lockout_enabled',
+        'auth_ip_lockout_threshold',
+        'auth_ip_lockout_window_seconds',
+        'auth_ip_lockout_duration_seconds',
+        'auth_permanent_ip_blacklist',
+    }
+    shop_data = dict(data)
+    security_data = {}
+    for key in list(shop_data.keys()):
+        if key in security_fields:
+            security_data[key] = shop_data.pop(key)
+
+    shop_data.setdefault('host', '')
+    set_shop_settings(shop_data)
+    if security_data:
+        set_security_settings(security_data)
     reload_conf()
     resp = {
         'success': True,
