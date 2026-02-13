@@ -389,13 +389,32 @@ def _parse_first_ip_list(value: str) -> str:
     return value.split(',', 1)[0].strip()
 
 
+def _parse_ip_for_match(value):
+    try:
+        import ipaddress
+        text = str(value or '').strip()
+        if not text:
+            return None
+        # Accept bracketed literals from some proxy/server representations.
+        if text.startswith('[') and text.endswith(']'):
+            text = text[1:-1].strip()
+        ip = ipaddress.ip_address(text)
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            return ip.ipv4_mapped
+        return ip
+    except Exception:
+        return None
+
+
 def _peer_is_trusted_proxy(settings: dict) -> bool:
     try:
         import ipaddress
         peer = _peer_ip()
         if not peer:
             return False
-        peer_ip = ipaddress.ip_address(peer)
+        peer_ip = _parse_ip_for_match(peer)
+        if peer_ip is None:
+            return False
         entries = _trusted_proxies(settings)
         if not entries:
             return False
@@ -408,7 +427,8 @@ def _peer_is_trusted_proxy(settings: dict) -> bool:
                     if peer_ip in ipaddress.ip_network(entry, strict=False):
                         return True
                 else:
-                    if peer_ip == ipaddress.ip_address(entry):
+                    entry_ip = _parse_ip_for_match(entry)
+                    if entry_ip is not None and peer_ip == entry_ip:
                         return True
             except Exception:
                 continue
