@@ -5595,6 +5595,8 @@ if __name__ == '__main__':
                 connection_limit=wsgi_connection_limit,
                 channel_timeout=wsgi_channel_timeout,
                 cleanup_interval=wsgi_cleanup_interval,
+                # Keep forwarded headers available for AeroFoil's own trusted-proxy checks.
+                clear_untrusted_proxy_headers=False,
                 ident='AeroFoil'
             )
         else:
