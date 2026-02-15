@@ -27,7 +27,7 @@ from app.library import organize_library, delete_older_updates, delete_duplicate
 from app.db import *
 from app.shop import *
 from app.auth import *
-from app.auth import _effective_client_ip
+from app.auth import _effective_client_ip, _is_private_ip
 from app import titles
 from app.utils import *
 from app.library import *
@@ -1702,7 +1702,7 @@ def _block_frozen_web_ui():
     """Frozen accounts should only see the MOTD page in the web UI."""
     try:
         # Let Tinfoil/Cyberfoil flows be handled by tinfoil_access.
-        if all(header in request.headers for header in TINFOIL_HEADERS):
+        if _is_shop_client_allowed_for_external():
             return None
 
         if not current_user.is_authenticated:
@@ -1793,7 +1793,7 @@ def _client_key():
     ua = request.headers.get('User-Agent') or '-'
     uid = ''
     try:
-        if all(header in request.headers for header in TINFOIL_HEADERS):
+        if _is_shop_client_allowed_for_external():
             uid = (request.headers.get('Uid') or '').strip()
     except Exception:
         uid = ''
@@ -1802,7 +1802,7 @@ def _client_key():
 
 def _extract_tinfoil_client_meta():
     try:
-        if not all(header in request.headers for header in TINFOIL_HEADERS):
+        if not _is_shop_client_allowed_for_external():
             return {}
     except Exception:
         return {}
@@ -1928,11 +1928,17 @@ def _touch_client():
 
 
 def _is_cyberfoil_request():
-    return all(header in request.headers for header in TINFOIL_HEADERS) and 'CyberFoil' in request.headers
+    ua = request.headers.get('User-Agent') or ''
+    return 'cyberfoil' in ua.lower()
+
+
+def _is_tinfoil_request():
+    ua = request.headers.get('User-Agent') or ''
+    return 'tinfoil' in ua.lower()
 
 
 def _is_shop_client_allowed_for_external():
-    return all(header in request.headers for header in TINFOIL_HEADERS) or _is_cyberfoil_request()
+    return _is_tinfoil_request() or _is_cyberfoil_request()
 
 
 def _log_access(
@@ -2475,8 +2481,8 @@ def tinfoil_access(f):
         hauth_success = None
         auth_success = None
         request.verified_host = None
-        is_tinfoil_client = all(header in request.headers for header in TINFOIL_HEADERS)
-        is_allowed_external_client = is_tinfoil_client or _is_cyberfoil_request()
+        is_shop_client = _is_shop_client_allowed_for_external()
+        is_allowed_external_client = is_shop_client
         if bool(app_settings.get('shop', {}).get('external_tinfoil_only', False)):
             remote = _effective_remote_addr()
             if remote and not _is_private_ip(remote) and not is_allowed_external_client:
@@ -2484,7 +2490,7 @@ def tinfoil_access(f):
         # Host verification to prevent hotlinking
         #Tinfoil doesn't send Hauth for file grabs, only directories, so ignore get_game endpoints.
         host_verification = (
-            is_tinfoil_client
+            is_shop_client
             and "/api/get_game" not in request.path
             and (request.is_secure or request.headers.get("X-Forwarded-Proto") == "https")
         )
@@ -2537,7 +2543,7 @@ def tinfoil_access(f):
             if not auth_success:
                 # If the account is frozen, return safe empty responses so clients can display the MOTD.
                 try:
-                    if is_tinfoil_client and request.path in ('/', '/api/shop/sections', '/api/frozen/notice'):
+                    if is_shop_client and request.path in ('/', '/api/shop/sections', '/api/frozen/notice'):
                         username = _get_request_user()
                         frozen_user = User.query.filter_by(user=username).first() if username else None
                         if frozen_user is not None and bool(getattr(frozen_user, 'frozen', False)):
@@ -2592,7 +2598,7 @@ def tinfoil_access(f):
                 message = (getattr(frozen_user, 'frozen_message', None) or '').strip() or 'Account is frozen.'
 
                 # Allow safe empty responses for the shop root + sections.
-                if is_tinfoil_client and request.path in ('/', '/api/shop/sections', '/api/frozen/notice'):
+                if is_shop_client and request.path in ('/', '/api/shop/sections', '/api/frozen/notice'):
                     if request.path == '/api/shop/sections':
                         placeholder_item = {
                             'name': 'Account frozen',
@@ -2658,7 +2664,7 @@ def access_shop_auth():
 
 @app.route('/')
 def index():
-    is_tinfoil_client = all(header in request.headers for header in TINFOIL_HEADERS)
+    is_shop_client = _is_shop_client_allowed_for_external()
     is_allowed_external_client = _is_shop_client_allowed_for_external()
     if bool(app_settings.get('shop', {}).get('external_tinfoil_only', False)):
         remote = _effective_remote_addr()
@@ -2697,9 +2703,9 @@ def index():
 
         return jsonify(shop)
     
-    if is_tinfoil_client:
+    if is_shop_client:
     # if True:
-        logger.info(f"Tinfoil connection from {request.remote_addr}")
+        logger.info(f"Shop client connection from {request.remote_addr}")
         return access_tinfoil_shop()
 
     # Frozen accounts: web UI should only show the MOTD message.
