@@ -157,38 +157,52 @@
                             <button type="button" class="btn btn-sm btn-outline-secondary" onclick="applyLibraryNamingPreset('scene')">Use Scene Preset</button>
                         </div>
 
-                        <div class="row g-3">
-                            <div class="col-md-6">
-                                <label for="libraryTemplateBaseFolderInput" class="form-label">Base folder template</label>
-                                <input id="libraryTemplateBaseFolderInput" class="form-control" type="text">
-                            </div>
-                            <div class="col-md-6">
-                                <label for="libraryTemplateBaseFilenameInput" class="form-label">Base filename template</label>
-                                <input id="libraryTemplateBaseFilenameInput" class="form-control" type="text">
-                            </div>
-                            <div class="col-md-6">
-                                <label for="libraryTemplateUpdateFolderInput" class="form-label">Update folder template</label>
-                                <input id="libraryTemplateUpdateFolderInput" class="form-control" type="text">
-                            </div>
-                            <div class="col-md-6">
-                                <label for="libraryTemplateUpdateFilenameInput" class="form-label">Update filename template</label>
-                                <input id="libraryTemplateUpdateFilenameInput" class="form-control" type="text">
-                            </div>
-                            <div class="col-md-6">
-                                <label for="libraryTemplateDlcFolderInput" class="form-label">DLC folder template</label>
-                                <input id="libraryTemplateDlcFolderInput" class="form-control" type="text">
-                            </div>
-                            <div class="col-md-6">
-                                <label for="libraryTemplateDlcFilenameInput" class="form-label">DLC filename template</label>
-                                <input id="libraryTemplateDlcFilenameInput" class="form-control" type="text">
-                            </div>
-                            <div class="col-md-6">
-                                <label for="libraryTemplateOtherFolderInput" class="form-label">Other folder template</label>
-                                <input id="libraryTemplateOtherFolderInput" class="form-control" type="text">
-                            </div>
-                            <div class="col-md-6">
-                                <label for="libraryTemplateOtherFilenameInput" class="form-label">Other filename template</label>
-                                <input id="libraryTemplateOtherFilenameInput" class="form-control" type="text">
+                        <div class="mb-3">
+                            <button
+                                class="btn btn-sm btn-success"
+                                type="button"
+                                data-bs-toggle="collapse"
+                                data-bs-target="#collapseLibraryTemplateFields"
+                                aria-expanded="false"
+                                aria-controls="collapseLibraryTemplateFields">
+                                Show template fields
+                            </button>
+                        </div>
+
+                        <div class="collapse" id="collapseLibraryTemplateFields">
+                            <div class="row g-3">
+                                <div class="col-md-6">
+                                    <label for="libraryTemplateBaseFolderInput" class="form-label">Base folder template</label>
+                                    <input id="libraryTemplateBaseFolderInput" class="form-control" type="text">
+                                </div>
+                                <div class="col-md-6">
+                                    <label for="libraryTemplateBaseFilenameInput" class="form-label">Base filename template</label>
+                                    <input id="libraryTemplateBaseFilenameInput" class="form-control" type="text">
+                                </div>
+                                <div class="col-md-6">
+                                    <label for="libraryTemplateUpdateFolderInput" class="form-label">Update folder template</label>
+                                    <input id="libraryTemplateUpdateFolderInput" class="form-control" type="text">
+                                </div>
+                                <div class="col-md-6">
+                                    <label for="libraryTemplateUpdateFilenameInput" class="form-label">Update filename template</label>
+                                    <input id="libraryTemplateUpdateFilenameInput" class="form-control" type="text">
+                                </div>
+                                <div class="col-md-6">
+                                    <label for="libraryTemplateDlcFolderInput" class="form-label">DLC folder template</label>
+                                    <input id="libraryTemplateDlcFolderInput" class="form-control" type="text">
+                                </div>
+                                <div class="col-md-6">
+                                    <label for="libraryTemplateDlcFilenameInput" class="form-label">DLC filename template</label>
+                                    <input id="libraryTemplateDlcFilenameInput" class="form-control" type="text">
+                                </div>
+                                <div class="col-md-6">
+                                    <label for="libraryTemplateOtherFolderInput" class="form-label">Other folder template</label>
+                                    <input id="libraryTemplateOtherFolderInput" class="form-control" type="text">
+                                </div>
+                                <div class="col-md-6">
+                                    <label for="libraryTemplateOtherFilenameInput" class="form-label">Other filename template</label>
+                                    <input id="libraryTemplateOtherFilenameInput" class="form-control" type="text">
+                                </div>
                             </div>
                         </div>
                     </div>

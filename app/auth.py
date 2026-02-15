@@ -22,6 +22,15 @@ _auth_ip_lockouts = {}
 _auth_failure_burst_lock = threading.Lock()
 _auth_failure_burst = {}
 _AUTH_FAILURE_BURST_WINDOW_S = 1.5
+_admin_exists_cache_lock = threading.Lock()
+_admin_exists_cache = {'value': None, 'ts': 0.0}
+_ADMIN_EXISTS_CACHE_TTL_S = 30
+
+
+def _invalidate_admin_exists_cache():
+    with _admin_exists_cache_lock:
+        _admin_exists_cache['value'] = None
+        _admin_exists_cache['ts'] = 0.0
 
 
 def _auth_dedupe_allow(dedupe_key: str, window_s: int = 15) -> bool:
@@ -345,7 +354,18 @@ def admin_account_created():
         pass
 
     try:
-        return User.query.filter_by(admin_access=True).count() > 0
+        now = time.time()
+        with _admin_exists_cache_lock:
+            cached_value = _admin_exists_cache.get('value')
+            cached_ts = float(_admin_exists_cache.get('ts') or 0.0)
+            if cached_value is not None and (now - cached_ts) < float(_ADMIN_EXISTS_CACHE_TTL_S):
+                return bool(cached_value)
+
+        exists = User.query.filter_by(admin_access=True).count() > 0
+        with _admin_exists_cache_lock:
+            _admin_exists_cache['value'] = bool(exists)
+            _admin_exists_cache['ts'] = time.time()
+        return bool(exists)
     except Exception:
         return False
 
@@ -685,6 +705,7 @@ def create_or_update_user(username, password, admin_access=False, shop_access=Fa
         new_user = User(user=username, password=generate_password_hash(password, method='scrypt'), admin_access=admin_access, shop_access=shop_access, backup_access=backup_access)
         db.session.add(new_user)
     db.session.commit()
+    _invalidate_admin_exists_cache()
 
 def init_user_from_environment(environment_name, admin=False):
     """
@@ -899,6 +920,7 @@ def delete_user():
     try:
         User.query.filter_by(id=user_id).delete()
         db.session.commit()
+        _invalidate_admin_exists_cache()
         logger.info(f'Successfully deleted user with id {user_id}.')
         return jsonify({'success': True})
     except Exception as e:
@@ -957,6 +979,7 @@ def update_user():
         if password:
             user.password = generate_password_hash(password, method='scrypt')
         db.session.commit()
+        _invalidate_admin_exists_cache()
         logger.info(f'Successfully updated user {user.id} ({username}).')
 
     resp = {

@@ -348,6 +348,10 @@
     let currentView = 'card'; // Default view is 'card'
     let currentSort = 'title_asc';
     let selectedGenre = '';
+    let fetchGamesRequest = null;
+    let fetchGamesSeq = 0;
+    let searchDebounceTimer = null;
+    const SEARCH_DEBOUNCE_MS = 250;
     const canManageDownloads = {{ 'true' if current_user.is_admin or admin_account_created == false else 'false' }};
     const canManageManualTitleInfo = {{ 'true' if current_user.is_admin or admin_account_created == false else 'false' }};
     let gameInfoCurrentTitleId = '';
@@ -389,16 +393,37 @@
     }
 
     function fetchGames() {
+        const requestSeq = ++fetchGamesSeq;
+        if (fetchGamesRequest && fetchGamesRequest.readyState !== 4) {
+            try {
+                fetchGamesRequest.abort();
+            } catch (e) {
+                // no-op
+            }
+        }
+
         return new Promise((resolve, reject) => {
-            $.get(`/api/titles?${buildTitlesQuery()}`, function (data) {
+            fetchGamesRequest = $.get(`/api/titles?${buildTitlesQuery()}`, function (data) {
+                if (requestSeq !== fetchGamesSeq) {
+                    resolve(false);
+                    return;
+                }
                 totalGames = data.total || 0;
                 games = data.games || [];
                 filteredGames = games;
                 availableGenres = data.genres || [];
                 discoverySections = data.discovery || null;
-                resolve();
-            }).fail(function() {
+                resolve(true);
+            }).fail(function(xhr, status) {
+                if (status === 'abort') {
+                    resolve(false);
+                    return;
+                }
                 reject();
+            }).always(function () {
+                if (requestSeq === fetchGamesSeq) {
+                    fetchGamesRequest = null;
+                }
             });
         });
     }
@@ -409,10 +434,12 @@
         }
         showLoadingPlaceholders();
         return fetchGames()
-            .then(() => {
+            .then((hasData) => {
+                if (!hasData) {
+                    return;
+                }
                 populateGenreDropdown();
                 renderGames();
-                updatePaginationControls(totalGames);
             })
             .catch(() => {});
     }
@@ -900,20 +927,6 @@
         });
     }
 
-    function fetchLibraryStatus() {
-        $.getJSON("/api/library/status", function (result) {
-            if (!result || result['success'] !== true) {
-                return;
-            }
-            const status = result['status'] || {};
-            if (status['in_progress']) {
-                $('#libraryRebuildLabel').removeClass('d-none');
-            } else {
-                $('#libraryRebuildLabel').addClass('d-none');
-            }
-        });
-    }
-
     function renderListView() {
         const gameGrid = $('#gameGrid');
         gameGrid.removeClass('row g-4 icon-grid').addClass('list-view');
@@ -1090,16 +1103,46 @@
         });
         paginationControls.append(prevButton);
 
-        // Page numbers
-        for (let i = 1; i <= totalPages; i++) {
-            const pageButton = $('<li class="page-item"></li>').addClass(`page-item ${i === currentPage ? 'active' : ''}`).html(`<a class="page-link" href="#">${i}</a>`);
+        // Page numbers (windowed for large catalogs to avoid huge DOM costs).
+        const pageWindow = 2;
+        const visiblePages = [];
+        const firstPage = 1;
+        const lastPage = totalPages;
+        const start = Math.max(2, currentPage - pageWindow);
+        const end = Math.min(lastPage - 1, currentPage + pageWindow);
+
+        visiblePages.push(firstPage);
+        if (start > 2) {
+            visiblePages.push('ellipsis_start');
+        }
+        for (let i = start; i <= end; i++) {
+            visiblePages.push(i);
+        }
+        if (end < lastPage - 1) {
+            visiblePages.push('ellipsis_end');
+        }
+        if (lastPage > 1) {
+            visiblePages.push(lastPage);
+        }
+
+        visiblePages.forEach((pageRef) => {
+            if (typeof pageRef !== 'number') {
+                paginationControls.append('<li class="page-item disabled"><span class="page-link">...</span></li>');
+                return;
+            }
+            const pageButton = $('<li class="page-item"></li>')
+                .addClass(`page-item ${pageRef === currentPage ? 'active' : ''}`)
+                .html(`<a class="page-link" href="#">${pageRef}</a>`);
             pageButton.click(function (e) {
                 e.preventDefault();
-                currentPage = i;
+                if (pageRef === currentPage) {
+                    return;
+                }
+                currentPage = pageRef;
                 refreshGames(false);
             });
             paginationControls.append(pageButton);
-        }
+        });
 
         // Next button
         const nextButton = $('<li class="page-item"></li>').addClass(`page-item ${currentPage >= totalPages ? 'disabled' : ''}`).html(`
@@ -1261,7 +1304,6 @@
         refreshGames(true)
             .then(() => {
                 fetchLibrarySize();
-                fetchLibraryStatus();
             });
 
         // Sort dropdown
@@ -1336,7 +1378,12 @@
         $("#textFilter").on("input", function () {
             const attributeText = $(this).val();
             localStorage.setItem('searchTerm', attributeText);
-            recomputeFilteredGames();
+            if (searchDebounceTimer) {
+                clearTimeout(searchDebounceTimer);
+            }
+            searchDebounceTimer = setTimeout(function () {
+                recomputeFilteredGames();
+            }, SEARCH_DEBOUNCE_MS);
         });
 
         if (canManageDownloads) {
@@ -1428,8 +1475,6 @@
     
     });
 
-    setInterval(fetchLibraryStatus, 4000);
-
     function findGameByKey(appId, appType) {
         if (!games || !appId || !appType) {
             return null;
@@ -1468,6 +1513,17 @@
                 resolve(local || null);
             });
         });
+    }
+
+    function buildDetailsSkeletonRows(rowCount = 4) {
+        return Array.from({ length: rowCount }, () => `
+            <tr>
+                <td><span class="details-skeleton-line details-skeleton-cell details-skeleton-cell-version"></span></td>
+                <td><span class="details-skeleton-line details-skeleton-cell details-skeleton-cell-status"></span></td>
+                <td><span class="details-skeleton-line details-skeleton-cell details-skeleton-cell-size"></span></td>
+                <td><span class="details-skeleton-line details-skeleton-cell details-skeleton-cell-date"></span></td>
+            </tr>
+        `).join('');
     }
 
     function renderDetails(game) {
@@ -1562,10 +1618,32 @@
     }
 
     function showDetailsLoading() {
-        $('#detailsTitle').text('Loading...');
-        $('#detailsSubtitle').text('');
-        $('#detailsMeta').empty();
-        $('#detailsVersions').html('<div class="text-muted">Loading details...</div>');
+        $('#detailsTitle').html('<span class="details-skeleton-line details-skeleton-line-title" aria-hidden="true"></span>');
+        $('#detailsSubtitle').html('<span class="details-skeleton-line details-skeleton-line-subtitle" aria-hidden="true"></span>');
+        $('#detailsMeta').html(`
+            <div class="details-skeleton-badges" aria-hidden="true">
+                <span class="details-skeleton-badge"></span>
+                <span class="details-skeleton-badge"></span>
+                <span class="details-skeleton-badge"></span>
+                <span class="details-skeleton-badge"></span>
+            </div>
+        `);
+        $('#detailsVersions').html(`
+            <table class="table table-sm table-striped details-skeleton-table mb-0" aria-hidden="true">
+                <thead>
+                    <tr>
+                        <th scope="col">Version</th>
+                        <th scope="col">Status</th>
+                        <th scope="col">Size</th>
+                        <th scope="col">Release date</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${buildDetailsSkeletonRows(4)}
+                </tbody>
+            </table>
+            <div class="visually-hidden" role="status">Loading content details...</div>
+        `);
         $('#detailsDownloadStatus').text('');
     }
 

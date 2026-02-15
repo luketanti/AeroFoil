@@ -9,11 +9,34 @@
             <div class="card">
                 <div class="card-body">
                     <div class="mb-3">
-                        <img
-                            src="{{ url_for('static', filename='banner.png') }}"
-                            alt="AeroFoil banner"
-                            class="img-fluid rounded w-100"
-                            style="max-height: 140px; object-fit: cover;">
+                        <picture>
+                            <source
+                                type="image/webp"
+                                srcset="
+                                    {{ url_for('static', filename='banner-200.webp') }} 200w,
+                                    {{ url_for('static', filename='banner-400.webp') }} 400w,
+                                    {{ url_for('static', filename='banner-800.webp') }} 800w,
+                                    {{ url_for('static', filename='banner-1211.webp') }} 1211w
+                                "
+                                sizes="(max-width: 576px) 90vw, 520px">
+                            <img
+                                src="{{ url_for('static', filename='banner-800.png') }}"
+                                srcset="
+                                    {{ url_for('static', filename='banner-200.png') }} 200w,
+                                    {{ url_for('static', filename='banner-400.png') }} 400w,
+                                    {{ url_for('static', filename='banner-800.png') }} 800w,
+                                    {{ url_for('static', filename='banner-1211.png') }} 1211w
+                                "
+                                sizes="(max-width: 576px) 90vw, 520px"
+                                width="1211"
+                                height="328"
+                                alt="AeroFoil banner"
+                                loading="eager"
+                                decoding="sync"
+                                fetchpriority="high"
+                                class="img-fluid rounded w-100"
+                                style="max-height: 140px; object-fit: cover;">
+                        </picture>
                     </div>
                     <h5 class="card-title">Login</h5>
 

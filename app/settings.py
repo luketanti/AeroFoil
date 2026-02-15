@@ -14,12 +14,39 @@ logger = logging.getLogger('main')
 _settings_cache = None
 _settings_cache_time = 0
 _settings_cache_ttl = 5  # Cache for 5 seconds
+_settings_cache_signature = None
+_settings_cache_lock = threading.Lock()
 
 # Cache key validation results by absolute path + file checksum to avoid
 # re-running nsz Keys.load() on every settings refresh.
 _keys_validation_cache = {}
 _keys_validation_lock = threading.Lock()
 _keys_validation_cache_max = 16
+
+
+def _get_config_signature():
+    try:
+        stat = os.stat(CONFIG_FILE)
+        return (int(stat.st_mtime_ns), int(stat.st_size))
+    except OSError:
+        return None
+
+
+def _is_settings_cache_valid(current_signature, current_time):
+    if _settings_cache is None:
+        return False
+    if _settings_cache_signature is not None and current_signature == _settings_cache_signature:
+        return True
+    if current_signature is None and (current_time - _settings_cache_time) < _settings_cache_ttl:
+        return True
+    return False
+
+
+def _invalidate_settings_cache():
+    global _settings_cache, _settings_cache_time, _settings_cache_signature
+    _settings_cache = None
+    _settings_cache_time = 0
+    _settings_cache_signature = None
 
 
 def _hash_file_sha256(path):
@@ -360,131 +387,139 @@ def validate_keys_file(key_file=KEYS_FILE):
             return False, [str(e)]
 
 def load_settings(force_reload=False):
-    global _settings_cache, _settings_cache_time
-    
+    global _settings_cache, _settings_cache_time, _settings_cache_signature
+
     current_time = time.time()
-    
-    # Return cached settings if still valid and not forcing reload
-    if not force_reload and _settings_cache is not None and (current_time - _settings_cache_time) < _settings_cache_ttl:
+    current_signature = _get_config_signature()
+
+    if not force_reload and _is_settings_cache_valid(current_signature, current_time):
         return _settings_cache
-    
-    if os.path.exists(CONFIG_FILE):
-        logger.debug('Reading configuration file.')
-        with open(CONFIG_FILE, 'r') as yaml_file:
-            settings = yaml.safe_load(yaml_file)
 
-        if 'security' not in settings:
-            settings['security'] = DEFAULT_SETTINGS.get('security', {})
-        else:
-            defaults = DEFAULT_SETTINGS.get('security', {})
-            merged = defaults.copy()
-            merged.update(settings.get('security', {}))
-            settings['security'] = merged
+    with _settings_cache_lock:
+        current_time = time.time()
+        current_signature = _get_config_signature()
+        if not force_reload and _is_settings_cache_valid(current_signature, current_time):
+            return _settings_cache
 
-        if 'shop' not in settings:
-            settings['shop'] = DEFAULT_SETTINGS.get('shop', {})
+        if os.path.exists(CONFIG_FILE):
+            logger.debug('Reading configuration file.')
+            with open(CONFIG_FILE, 'r') as yaml_file:
+                settings = yaml.safe_load(yaml_file) or {}
+            if not isinstance(settings, dict):
+                settings = {}
+
+            if 'security' not in settings:
+                settings['security'] = DEFAULT_SETTINGS.get('security', {})
+            else:
+                defaults = DEFAULT_SETTINGS.get('security', {})
+                merged = defaults.copy()
+                merged.update(settings.get('security', {}))
+                settings['security'] = merged
+
+            if 'shop' not in settings:
+                settings['shop'] = DEFAULT_SETTINGS.get('shop', {})
+            else:
+                defaults = DEFAULT_SETTINGS.get('shop', {})
+                merged = defaults.copy()
+                merged.update(settings.get('shop', {}))
+                settings['shop'] = merged
+            settings['shop']['fast_transfer_mode'] = _coerce_bool(
+                settings['shop'].get('fast_transfer_mode'),
+                default=False,
+            )
+
+            env_trust = _read_env_bool('AEROFOIL_TRUST_PROXY_HEADERS')
+            if env_trust is None:
+                env_trust = _read_env_bool('OWNFOIL_TRUST_PROXY_HEADERS')
+            if env_trust is not None:
+                settings['security']['trust_proxy_headers'] = env_trust
+            env_proxies = _read_env_csv('AEROFOIL_TRUSTED_PROXIES')
+            if env_proxies is None:
+                env_proxies = _read_env_csv('OWNFOIL_TRUSTED_PROXIES')
+            if env_proxies is not None:
+                settings['security']['trusted_proxies'] = env_proxies
+            settings['security'] = _normalize_security_settings(settings.get('security'))
+
+            if 'downloads' not in settings:
+                settings['downloads'] = DEFAULT_SETTINGS.get('downloads', {})
+            else:
+                defaults = DEFAULT_SETTINGS.get('downloads', {})
+                merged = defaults.copy()
+                merged.update(settings.get('downloads', {}))
+                settings['downloads'] = merged
+            # Keep nested downloads settings backward-compatible when new keys are added.
+            prowlarr_defaults = (DEFAULT_SETTINGS.get('downloads', {}) or {}).get('prowlarr', {})
+            merged_prowlarr = prowlarr_defaults.copy()
+            merged_prowlarr.update((settings['downloads'].get('prowlarr') or {}))
+            settings['downloads']['prowlarr'] = merged_prowlarr
+            settings['downloads']['search_char_replacements'] = _normalize_download_search_char_replacements(
+                settings['downloads'].get('search_char_replacements')
+            )
+
+            if 'titles' not in settings:
+                settings['titles'] = DEFAULT_SETTINGS.get('titles', {})
+            else:
+                defaults = DEFAULT_SETTINGS.get('titles', {})
+                merged = defaults.copy()
+                merged.update(settings.get('titles', {}))
+                settings['titles'] = merged
+            settings['titles']['manual_overrides'] = _normalize_titles_manual_overrides(
+                settings['titles'].get('manual_overrides')
+            )
+
+            if 'library' not in settings:
+                settings['library'] = DEFAULT_SETTINGS.get('library', {})
+            else:
+                defaults = DEFAULT_SETTINGS.get('library', {})
+                merged = defaults.copy()
+                merged.update(settings.get('library', {}))
+                settings['library'] = merged
+            settings['library']['naming_templates'] = _normalize_library_naming_templates(
+                settings['library'].get('naming_templates')
+            )
+
+            valid_keys = load_keys()
+            settings['titles']['valid_keys'] = valid_keys
+
         else:
-            defaults = DEFAULT_SETTINGS.get('shop', {})
-            merged = defaults.copy()
-            merged.update(settings.get('shop', {}))
-            settings['shop'] = merged
+            settings = DEFAULT_SETTINGS
+            env_trust = _read_env_bool('AEROFOIL_TRUST_PROXY_HEADERS')
+            if env_trust is None:
+                env_trust = _read_env_bool('OWNFOIL_TRUST_PROXY_HEADERS')
+            if env_trust is not None:
+                settings['security']['trust_proxy_headers'] = env_trust
+            env_proxies = _read_env_csv('AEROFOIL_TRUSTED_PROXIES')
+            if env_proxies is None:
+                env_proxies = _read_env_csv('OWNFOIL_TRUSTED_PROXIES')
+            if env_proxies is not None:
+                settings['security']['trusted_proxies'] = env_proxies
+            settings['security'] = _normalize_security_settings(settings.get('security'))
+            with open(CONFIG_FILE, 'w') as yaml_file:
+                yaml.dump(settings, yaml_file)
+
+        settings['security'] = _normalize_security_settings(settings.get('security'))
+        settings.setdefault('library', {})
+        settings['library']['naming_templates'] = _normalize_library_naming_templates(
+            settings['library'].get('naming_templates')
+        )
+        settings.setdefault('titles', {})
+        settings['titles']['manual_overrides'] = _normalize_titles_manual_overrides(
+            settings['titles'].get('manual_overrides')
+        )
+        settings.setdefault('downloads', {})
+        settings['downloads']['search_char_replacements'] = _normalize_download_search_char_replacements(
+            settings['downloads'].get('search_char_replacements')
+        )
+        settings.setdefault('shop', {})
         settings['shop']['fast_transfer_mode'] = _coerce_bool(
             settings['shop'].get('fast_transfer_mode'),
             default=False,
         )
 
-        env_trust = _read_env_bool('AEROFOIL_TRUST_PROXY_HEADERS')
-        if env_trust is None:
-            env_trust = _read_env_bool('OWNFOIL_TRUST_PROXY_HEADERS')
-        if env_trust is not None:
-            settings['security']['trust_proxy_headers'] = env_trust
-        env_proxies = _read_env_csv('AEROFOIL_TRUSTED_PROXIES')
-        if env_proxies is None:
-            env_proxies = _read_env_csv('OWNFOIL_TRUSTED_PROXIES')
-        if env_proxies is not None:
-            settings['security']['trusted_proxies'] = env_proxies
-        settings['security'] = _normalize_security_settings(settings.get('security'))
-
-        if 'downloads' not in settings:
-            settings['downloads'] = DEFAULT_SETTINGS.get('downloads', {})
-        else:
-            defaults = DEFAULT_SETTINGS.get('downloads', {})
-            merged = defaults.copy()
-            merged.update(settings.get('downloads', {}))
-            settings['downloads'] = merged
-        # Keep nested downloads settings backward-compatible when new keys are added.
-        prowlarr_defaults = (DEFAULT_SETTINGS.get('downloads', {}) or {}).get('prowlarr', {})
-        merged_prowlarr = prowlarr_defaults.copy()
-        merged_prowlarr.update((settings['downloads'].get('prowlarr') or {}))
-        settings['downloads']['prowlarr'] = merged_prowlarr
-        settings['downloads']['search_char_replacements'] = _normalize_download_search_char_replacements(
-            settings['downloads'].get('search_char_replacements')
-        )
-
-        if 'titles' not in settings:
-            settings['titles'] = DEFAULT_SETTINGS.get('titles', {})
-        else:
-            defaults = DEFAULT_SETTINGS.get('titles', {})
-            merged = defaults.copy()
-            merged.update(settings.get('titles', {}))
-            settings['titles'] = merged
-        settings['titles']['manual_overrides'] = _normalize_titles_manual_overrides(
-            settings['titles'].get('manual_overrides')
-        )
-
-        if 'library' not in settings:
-            settings['library'] = DEFAULT_SETTINGS.get('library', {})
-        else:
-            defaults = DEFAULT_SETTINGS.get('library', {})
-            merged = defaults.copy()
-            merged.update(settings.get('library', {}))
-            settings['library'] = merged
-        settings['library']['naming_templates'] = _normalize_library_naming_templates(
-            settings['library'].get('naming_templates')
-        )
-
-        valid_keys = load_keys()
-        settings['titles']['valid_keys'] = valid_keys
-
-    else:
-        settings = DEFAULT_SETTINGS
-        env_trust = _read_env_bool('AEROFOIL_TRUST_PROXY_HEADERS')
-        if env_trust is None:
-            env_trust = _read_env_bool('OWNFOIL_TRUST_PROXY_HEADERS')
-        if env_trust is not None:
-            settings['security']['trust_proxy_headers'] = env_trust
-        env_proxies = _read_env_csv('AEROFOIL_TRUSTED_PROXIES')
-        if env_proxies is None:
-            env_proxies = _read_env_csv('OWNFOIL_TRUSTED_PROXIES')
-        if env_proxies is not None:
-            settings['security']['trusted_proxies'] = env_proxies
-        settings['security'] = _normalize_security_settings(settings.get('security'))
-        with open(CONFIG_FILE, 'w') as yaml_file:
-            yaml.dump(settings, yaml_file)
-    settings['security'] = _normalize_security_settings(settings.get('security'))
-    settings.setdefault('library', {})
-    settings['library']['naming_templates'] = _normalize_library_naming_templates(
-        settings['library'].get('naming_templates')
-    )
-    settings.setdefault('titles', {})
-    settings['titles']['manual_overrides'] = _normalize_titles_manual_overrides(
-        settings['titles'].get('manual_overrides')
-    )
-    settings.setdefault('downloads', {})
-    settings['downloads']['search_char_replacements'] = _normalize_download_search_char_replacements(
-        settings['downloads'].get('search_char_replacements')
-    )
-    settings.setdefault('shop', {})
-    settings['shop']['fast_transfer_mode'] = _coerce_bool(
-        settings['shop'].get('fast_transfer_mode'),
-        default=False,
-    )
-    
-    # Update cache
-    _settings_cache = settings
-    _settings_cache_time = current_time
-    
-    return settings
+        _settings_cache = settings
+        _settings_cache_time = current_time
+        _settings_cache_signature = _get_config_signature()
+        return settings
 
 
 def set_security_settings(data):
@@ -494,9 +529,7 @@ def set_security_settings(data):
     settings['security'] = _normalize_security_settings(settings.get('security'))
     with open(CONFIG_FILE, 'w') as yaml_file:
         yaml.dump(settings, yaml_file)
-    # Invalidate cache
-    global _settings_cache
-    _settings_cache = None
+    _invalidate_settings_cache()
 
 def verify_settings(section, data):
     success = True
@@ -540,9 +573,7 @@ def add_library_path_to_settings(path):
     settings['library']['paths'] = library_paths
     with open(CONFIG_FILE, 'w') as yaml_file:
         yaml.dump(settings, yaml_file)
-    # Invalidate cache
-    global _settings_cache
-    _settings_cache = None
+    _invalidate_settings_cache()
     return success, errors
 
 def delete_library_path_from_settings(path):
@@ -556,9 +587,7 @@ def delete_library_path_from_settings(path):
             settings['library']['paths'] = library_paths
             with open(CONFIG_FILE, 'w') as yaml_file:
                 yaml.dump(settings, yaml_file)
-            # Invalidate cache
-            global _settings_cache
-            _settings_cache = None
+            _invalidate_settings_cache()
         else:
             success = False
             errors.append({
@@ -573,9 +602,7 @@ def set_titles_settings(region, language):
     settings['titles']['language'] = language
     with open(CONFIG_FILE, 'w') as yaml_file:
         yaml.dump(settings, yaml_file)
-    # Invalidate cache
-    global _settings_cache
-    _settings_cache = None
+    _invalidate_settings_cache()
 
 def set_manual_title_override(title_id, data):
     title_id = str(title_id or '').strip().upper()
@@ -604,8 +631,7 @@ def set_manual_title_override(title_id, data):
     settings['titles']['manual_overrides'] = overrides
     with open(CONFIG_FILE, 'w') as yaml_file:
         yaml.dump(settings, yaml_file)
-    global _settings_cache
-    _settings_cache = None
+    _invalidate_settings_cache()
     return True
 
 def set_shop_settings(data):
@@ -617,9 +643,7 @@ def set_shop_settings(data):
     settings['shop'].update(data)
     with open(CONFIG_FILE, 'w') as yaml_file:
         yaml.dump(settings, yaml_file)
-    # Invalidate cache
-    global _settings_cache
-    _settings_cache = None
+    _invalidate_settings_cache()
 
 def set_download_settings(data):
     settings = load_settings(force_reload=True)
@@ -631,9 +655,7 @@ def set_download_settings(data):
     settings['downloads'].update(data)
     with open(CONFIG_FILE, 'w') as yaml_file:
         yaml.dump(settings, yaml_file)
-    # Invalidate cache
-    global _settings_cache
-    _settings_cache = None
+    _invalidate_settings_cache()
 
 def set_library_settings(data):
     settings = load_settings(force_reload=True)
@@ -643,5 +665,4 @@ def set_library_settings(data):
     settings['library'].update(data)
     with open(CONFIG_FILE, 'w') as yaml_file:
         yaml.dump(settings, yaml_file)
-    global _settings_cache
-    _settings_cache = None
+    _invalidate_settings_cache()
