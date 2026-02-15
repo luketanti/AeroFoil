@@ -1083,6 +1083,21 @@ def _safe_int(value, default=0):
     except (TypeError, ValueError):
         return default
 
+def _format_version_txt(value):
+    text = str(value or '').strip()
+    if not text:
+        return '0.0.0'
+    # Already semantic-like (for example "1.0.0").
+    if re.fullmatch(r'\d+(?:\.\d+){1,3}', text):
+        return text
+    num = _safe_int(text, default=-1)
+    if num < 0:
+        return text
+    major = (num >> 16) & 0xFFFF
+    minor = (num >> 8) & 0xFF
+    patch = num & 0xFF
+    return f"{major}.{minor}.{patch}"
+
 def _ensure_unique_path(path):
     if not os.path.exists(path):
         return path
@@ -1414,8 +1429,17 @@ def _build_destination(library_path, file_entry, app, title_name, dlc_name, acti
     safe_ext = _sanitize_component(extension, fallback='nsp')
     safe_app_id = _sanitize_component(app.app_id or safe_title_id)
     safe_dlc_name = _sanitize_component(dlc_name or app.app_id)
+    version_txt = None
+    app_id_for_lookup = str(app.app_id or '').strip()
+    if app_id_for_lookup:
+        for candidate in (app_id_for_lookup, app_id_for_lookup.lower(), app_id_for_lookup.upper()):
+            version_txt = titles_lib.get_app_id_version_from_versions_txt(candidate)
+            if version_txt:
+                break
+    semantic_version_txt = _format_version_txt(version_txt or version)
+    safe_version_txt = _sanitize_component(semantic_version_txt, fallback='0.0.0')
 
-    template_vars = {
+    template_vars_common = {
         'title': safe_title,
         'title_id': safe_title_id,
         'app_id': safe_app_id,
@@ -1423,6 +1447,8 @@ def _build_destination(library_path, file_entry, app, title_name, dlc_name, acti
         'ext': safe_ext,
         'dlc_name': safe_dlc_name,
     }
+    template_vars_filename = dict(template_vars_common)
+    template_vars_filename['version_txt'] = safe_version_txt
 
     if app.app_type == APP_TYPE_BASE:
         section = active_template.get('base', {})
@@ -1441,12 +1467,12 @@ def _build_destination(library_path, file_entry, app, title_name, dlc_name, acti
         folder_tpl = section.get('folder')
         filename_tpl = section.get('filename')
 
-    folder_rel = _render_template(folder_tpl, template_vars)
+    folder_rel = _render_template(folder_tpl, template_vars_common)
     if not folder_rel:
         folder_rel = _sanitize_component(f"{safe_title} [{safe_title_id}]")
     folder_rel = _sanitize_relative_path(folder_rel, fallback='Other')
 
-    filename = _render_template(filename_tpl, template_vars)
+    filename = _render_template(filename_tpl, template_vars_filename)
     if not filename:
         filename = file_entry.filename or f"{safe_title} [{safe_title_id}] [UNKNOWN].{safe_ext}"
     filename = _sanitize_component(filename)
