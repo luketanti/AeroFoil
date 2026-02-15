@@ -353,6 +353,12 @@
                     </div>
                 </div>
                 <div class="mb-3 form-check">
+                    <input type="checkbox" class="form-check-input" id="externalTinfoilOnlyCheck"
+                        aria-describedby="externalTinfoilOnlyCheckHelp">
+                    <label class="form-check-label" for="externalTinfoilOnlyCheck">External access: Tinfoil/CyberFoil only</label>
+                    <div id="externalTinfoilOnlyCheckHelp" class="form-text">If enabled, requests from external/public IP addresses must be from Tinfoil headers or include the <code>CyberFoil</code> header. Private/local network access is unchanged.</div>
+                </div>
+                <div class="mb-3 form-check">
                     <input type="checkbox" class="form-check-input" id="encryptShopCheck"
                         aria-describedby="encryptShopCheckHelp">
                     <label class="form-check-label" for="encryptShopCheck">Encrypt shop</label>
@@ -1112,6 +1118,7 @@
             host: $('#shopHostInput').val(),
             hauth: $('#shopHauthInput').val(),
             public: getCheckboxStatus("publicShopCheck"),
+            external_tinfoil_only: getCheckboxStatus("externalTinfoilOnlyCheck"),
             encrypt: getCheckboxStatus("encryptShopCheck"),
             fast_transfer_mode: getCheckboxStatus("fastTransferModeCheck"),
             auth_ip_lockout_enabled: getCheckboxStatus("authIpLockoutEnabledCheck"),
@@ -1568,6 +1575,7 @@
             setInputVal("shopHauthInput", shopSettings['hauth_value'] || '');
             setInputVal("motdTextArea", shopSettings['motd']);
             $("#publicShopCheck").prop("checked", shopSettings['public']);
+            $("#externalTinfoilOnlyCheck").prop("checked", !!shopSettings['external_tinfoil_only']);
             $("#encryptShopCheck").prop("checked", shopSettings['encrypt']);
             $("#fastTransferModeCheck").prop("checked", !!shopSettings['fast_transfer_mode']);
             setInputVal("shopPublicKeyInput", shopSettings['public_key'] || '');

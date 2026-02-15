@@ -639,6 +639,7 @@ def set_shop_settings(data):
     shop_host = data['host']
     if '://' in shop_host:
         data['host'] = shop_host.split('://')[-1]
+    data['external_tinfoil_only'] = _coerce_bool(data.get('external_tinfoil_only'), default=False)
     data['fast_transfer_mode'] = _coerce_bool(data.get('fast_transfer_mode'), default=False)
     settings['shop'].update(data)
     with open(CONFIG_FILE, 'w') as yaml_file:

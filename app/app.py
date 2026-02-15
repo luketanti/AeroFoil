@@ -1928,8 +1928,11 @@ def _touch_client():
 
 
 def _is_cyberfoil_request():
-    ua = request.headers.get('User-Agent') or ''
-    return 'Cyberfoil' in ua
+    return 'CyberFoil' in request.headers
+
+
+def _is_shop_client_allowed_for_external():
+    return all(header in request.headers for header in TINFOIL_HEADERS) or _is_cyberfoil_request()
 
 
 def _log_access(
@@ -2473,6 +2476,11 @@ def tinfoil_access(f):
         auth_success = None
         request.verified_host = None
         is_tinfoil_client = all(header in request.headers for header in TINFOIL_HEADERS)
+        is_allowed_external_client = is_tinfoil_client or _is_cyberfoil_request()
+        if bool(app_settings.get('shop', {}).get('external_tinfoil_only', False)):
+            remote = _effective_remote_addr()
+            if remote and not _is_private_ip(remote) and not is_allowed_external_client:
+                return jsonify({'error': 'External access is restricted to Tinfoil/CyberFoil clients.'}), 403
         # Host verification to prevent hotlinking
         #Tinfoil doesn't send Hauth for file grabs, only directories, so ignore get_game endpoints.
         host_verification = (
@@ -2650,6 +2658,12 @@ def access_shop_auth():
 
 @app.route('/')
 def index():
+    is_tinfoil_client = all(header in request.headers for header in TINFOIL_HEADERS)
+    is_allowed_external_client = _is_shop_client_allowed_for_external()
+    if bool(app_settings.get('shop', {}).get('external_tinfoil_only', False)):
+        remote = _effective_remote_addr()
+        if remote and not _is_private_ip(remote) and not is_allowed_external_client:
+            return 'Forbidden', 403
 
     @tinfoil_access
     def access_tinfoil_shop():
@@ -2683,7 +2697,7 @@ def index():
 
         return jsonify(shop)
     
-    if all(header in request.headers for header in TINFOIL_HEADERS):
+    if is_tinfoil_client:
     # if True:
         logger.info(f"Tinfoil connection from {request.remote_addr}")
         return access_tinfoil_shop()
