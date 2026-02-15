@@ -27,6 +27,12 @@ _memory_diagnostics = {
     'updated_at': 0,
     'phases': {}
 }
+_library_state_token_lock = threading.Lock()
+_library_state_token_cache = {
+    'token': None,
+    'updated_at': 0.0,
+}
+_LIBRARY_STATE_TOKEN_CACHE_TTL_S = 1.0
 
 def _diag_phase_start(phase, **metadata):
     now = time.time()
@@ -771,16 +777,89 @@ def get_library_status(title_id):
     }
     return library_status
 
-def get_library_cache_state_token():
-    """Cheap invalidation token based on persistent state metadata."""
-    parts = []
-    for label, path in (('db', DB_FILE), ('config', CONFIG_FILE)):
-        try:
-            st = os.stat(path)
-            parts.append(f"{label}:{int(st.st_mtime_ns)}:{int(st.st_size)}")
-        except OSError:
-            parts.append(f"{label}:missing")
-    return "|".join(parts)
+def _compute_library_cache_state_token():
+    """Build a token from library-related table state (not whole DB file mtime)."""
+    try:
+        row = db.session.execute(
+            text(
+                """
+                SELECT
+                    COALESCE((SELECT COUNT(*) FROM files), 0),
+                    COALESCE((SELECT MAX(id) FROM files), 0),
+                    COALESCE((SELECT SUM(size) FROM files), 0),
+                    COALESCE((SELECT SUM(CASE WHEN identified THEN 1 ELSE 0 END) FROM files), 0),
+                    COALESCE((SELECT SUM(
+                        (LENGTH(COALESCE(filepath, '')) + LENGTH(COALESCE(filename, '')) + COALESCE(size, 0))
+                        * ((id % 131) + 1)
+                    ) FROM files), 0),
+                    COALESCE((SELECT COUNT(*) FROM apps), 0),
+                    COALESCE((SELECT MAX(id) FROM apps), 0),
+                    COALESCE((SELECT SUM(CASE WHEN owned THEN 1 ELSE 0 END) FROM apps), 0),
+                    COALESCE((SELECT SUM(COALESCE(app_version_num, 0)) FROM apps), 0),
+                    COALESCE((SELECT SUM(
+                        (COALESCE(title_id, 0) + COALESCE(app_version_num, 0))
+                        * ((id % 127) + 1)
+                    ) FROM apps), 0),
+                    COALESCE((SELECT COUNT(*) FROM titles), 0),
+                    COALESCE((SELECT MAX(id) FROM titles), 0),
+                    COALESCE((SELECT SUM(CASE WHEN have_base THEN 1 ELSE 0 END) FROM titles), 0),
+                    COALESCE((SELECT SUM(CASE WHEN up_to_date THEN 1 ELSE 0 END) FROM titles), 0),
+                    COALESCE((SELECT SUM(CASE WHEN complete THEN 1 ELSE 0 END) FROM titles), 0),
+                    COALESCE((SELECT COUNT(*) FROM app_files), 0),
+                    COALESCE((SELECT MAX(app_id) FROM app_files), 0),
+                    COALESCE((SELECT MAX(file_id) FROM app_files), 0)
+                """
+            )
+        ).first()
+    except Exception:
+        # Conservative fallback during migration/bootstrap windows.
+        row = None
+
+    if row is None:
+        parts = []
+        for label, path in (('db', DB_FILE), ('config', CONFIG_FILE)):
+            try:
+                st = os.stat(path)
+                mtime_ns = getattr(st, 'st_mtime_ns', int(st.st_mtime * 1e9))
+                parts.append(f"{label}:{int(mtime_ns)}:{int(st.st_size)}")
+            except OSError:
+                parts.append(f"{label}:missing")
+        return "|".join(parts)
+    else:
+        fingerprint = ":".join(str(int(value or 0)) for value in row)
+
+    try:
+        config_stat = os.stat(CONFIG_FILE)
+        config_token = f"{int(getattr(config_stat, 'st_mtime_ns', int(config_stat.st_mtime * 1e9)))}:{int(config_stat.st_size)}"
+    except OSError:
+        config_token = "missing"
+
+    return f"lib:{fingerprint}|cfg:{config_token}"
+
+
+def invalidate_library_cache_state_token():
+    with _library_state_token_lock:
+        _library_state_token_cache['token'] = None
+        _library_state_token_cache['updated_at'] = 0.0
+
+
+def get_library_cache_state_token(force_refresh=False):
+    now = time.time()
+    with _library_state_token_lock:
+        cached_token = _library_state_token_cache.get('token')
+        cached_ts = float(_library_state_token_cache.get('updated_at') or 0.0)
+        if (
+            not force_refresh
+            and cached_token
+            and (now - cached_ts) < _LIBRARY_STATE_TOKEN_CACHE_TTL_S
+        ):
+            return str(cached_token)
+
+    token = _compute_library_cache_state_token()
+    with _library_state_token_lock:
+        _library_state_token_cache['token'] = token
+        _library_state_token_cache['updated_at'] = time.time()
+    return token
 
 
 # Bump this when the cached library schema changes.
@@ -802,7 +881,7 @@ def is_library_unchanged():
     if not saved_state_token:
         return False
 
-    current_state_token = get_library_cache_state_token()
+    current_state_token = get_library_cache_state_token(force_refresh=True)
     return saved_state_token == current_state_token
 
 def save_library_to_disk(library_data):
@@ -958,7 +1037,7 @@ def generate_library():
 
         library_data = {
             'version': LIBRARY_CACHE_VERSION,
-            'state_token': get_library_cache_state_token(),
+            'state_token': get_library_cache_state_token(force_refresh=True),
             'library': sorted(games_info, key=lambda x: (
                 "title_id_name" not in x,
                 x.get("title_id_name", "Unrecognized") or "Unrecognized",
