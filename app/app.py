@@ -2489,13 +2489,9 @@ def tinfoil_access(f):
         _maybe_sync_request_settings()
         hauth_success = None
         auth_success = None
+        auth_error = None
         request.verified_host = None
         is_shop_client = _is_shop_client_request()
-        is_allowed_external_client = _is_shop_client_request()
-        if bool(app_settings.get('shop', {}).get('external_tinfoil_only', False)):
-            remote = _effective_remote_addr()
-            if remote and not _is_private_ip(remote) and not is_allowed_external_client:
-                return jsonify({'error': 'External access is restricted to Tinfoil/CyberFoil clients.'}), 403
         # Host verification to prevent hotlinking
         #Tinfoil doesn't send Hauth for file grabs, only directories, so ignore get_game endpoints.
         host_verification = (
@@ -2594,6 +2590,19 @@ def tinfoil_access(f):
                 except Exception:
                     pass
                 return tinfoil_error(auth_error)
+
+        # External-client restriction: allow authenticated get_game requests even when
+        # the client omits Tinfoil/CyberFoil markers on file-transfer requests.
+        if bool(app_settings.get('shop', {}).get('external_tinfoil_only', False)):
+            remote = _effective_remote_addr()
+            if remote and not _is_private_ip(remote) and not is_shop_client:
+                allow_via_auth_for_get_game = False
+                if request.path.startswith('/api/get_game/'):
+                    if auth_success is None:
+                        auth_success, auth_error, _ = basic_auth(request)
+                    allow_via_auth_for_get_game = bool(auth_success)
+                if not allow_via_auth_for_get_game:
+                    return jsonify({'error': 'External access is restricted to Tinfoil/CyberFoil clients.'}), 403
 
         # Auth success: block frozen accounts from accessing the library.
         try:
