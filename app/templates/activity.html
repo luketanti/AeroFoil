@@ -1177,6 +1177,10 @@
     }
 
     function loadAuthLockouts() {
+        if (document.hidden || loadAuthLockouts.inFlight) {
+            return;
+        }
+        loadAuthLockouts.inFlight = true;
         $('#refreshAuthLockoutsBtnActivity').prop('disabled', true);
         $.getJSON('/api/auth/lockouts', function (result) {
             if (!result || result.success !== true) {
@@ -1189,6 +1193,7 @@
             renderAuthLockouts([]);
             setAuthLockoutsPlaceholder('Failed to load lockouts.');
         }).always(function () {
+            loadAuthLockouts.inFlight = false;
             $('#refreshAuthLockoutsBtnActivity').prop('disabled', false);
         });
     }
@@ -1227,6 +1232,10 @@
     }
 
     function loadClientsHistory() {
+        if (document.hidden || loadClientsHistory.inFlight) {
+            return;
+        }
+        loadClientsHistory.inFlight = true;
         const limit = parseInt($('#clientsHistoryLimit').val() || '250', 10);
         $.getJSON(`/api/admin/clients-history?limit=${encodeURIComponent(limit)}`, function (result) {
             if (!result || result.success !== true) {
@@ -1238,10 +1247,16 @@
             updateLastRefreshLabel();
         }).fail(function () {
             renderClientsHistory([]);
+        }).always(function () {
+            loadClientsHistory.inFlight = false;
         });
     }
 
     function loadActivity() {
+        if (document.hidden || loadActivity.inFlight) {
+            return;
+        }
+        loadActivity.inFlight = true;
         hideError();
         const limit = parseInt($('#activityLimit').val() || '100', 10);
         $.getJSON(`/api/admin/activity?limit=${encodeURIComponent(limit)}`, function (result) {
@@ -1260,6 +1275,8 @@
             updateLastRefreshLabel();
         }).fail(function () {
             showError('Failed to load activity.');
+        }).always(function () {
+            loadActivity.inFlight = false;
         });
     }
 
@@ -1394,6 +1411,13 @@
         setInterval(loadActivity, 2500);
         setInterval(loadClientsHistory, 15000);
         setInterval(loadAuthLockouts, 15000);
+        document.addEventListener('visibilitychange', function () {
+            if (!document.hidden) {
+                loadActivity();
+                loadClientsHistory();
+                loadAuthLockouts();
+            }
+        });
     });
 </script>
 

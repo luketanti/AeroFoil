@@ -9,11 +9,91 @@
 }
 
 .navbar-brand-banner {
-    height: 28px;
+    height: 30px;
     width: auto;
-    max-width: 180px;
+    max-width: 200px;
     object-fit: contain;
     display: block;
+}
+
+#detailsModal .details-skeleton-line,
+#detailsModal .details-skeleton-badge {
+    position: relative;
+    overflow: hidden;
+    display: inline-block;
+    background: rgba(255, 255, 255, 0.16);
+    border-radius: 6px;
+}
+
+#detailsModal .details-skeleton-line::after,
+#detailsModal .details-skeleton-badge::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    transform: translateX(-100%);
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.28), transparent);
+    animation: details-skeleton-shimmer 1.2s infinite;
+}
+
+#detailsModal .details-skeleton-line-title {
+    width: min(420px, 70%);
+    height: 1.15rem;
+}
+
+#detailsModal .details-skeleton-line-subtitle {
+    width: min(520px, 85%);
+    height: 0.92rem;
+    margin-top: 0.35rem;
+}
+
+#detailsModal .details-skeleton-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+}
+
+#detailsModal .details-skeleton-badge {
+    width: 120px;
+    height: 1.4rem;
+    border-radius: 999px;
+}
+
+#detailsModal .details-skeleton-table td {
+    vertical-align: middle;
+}
+
+#detailsModal .details-skeleton-cell {
+    width: 100%;
+    height: 0.9rem;
+}
+
+#detailsModal .details-skeleton-cell-version {
+    width: 55%;
+}
+
+#detailsModal .details-skeleton-cell-status {
+    width: 70%;
+}
+
+#detailsModal .details-skeleton-cell-size {
+    width: 48%;
+}
+
+#detailsModal .details-skeleton-cell-date {
+    width: 78%;
+}
+
+@keyframes details-skeleton-shimmer {
+    100% {
+        transform: translateX(100%);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #detailsModal .details-skeleton-line::after,
+    #detailsModal .details-skeleton-badge::after {
+        animation: none;
+    }
 }
 
 .discover-columns {

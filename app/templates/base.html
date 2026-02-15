@@ -20,6 +20,8 @@
 
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
+    <link rel="preload" as="image" href="{{ url_for('static', filename='banner-400.webp') }}" type="image/webp" fetchpriority="high">
+    <link rel="preload" as="image" href="{{ url_for('static', filename='banner-400.png') }}" type="image/png" fetchpriority="high">
 </head>
 
 <body>
@@ -62,6 +64,10 @@
             }
 
             function pollStatus() {
+                if (document.hidden || pollStatus.inFlight) {
+                    return;
+                }
+                pollStatus.inFlight = true;
                 $.getJSON("/api/manage/jobs?limit=1", function (result) {
                     if (!result['success']) {
                         return;
@@ -75,6 +81,8 @@
                         statusEl.classList.add('d-none');
                         jobPollingKeys.forEach((key) => localStorage.removeItem(key));
                     }
+                }).always(function () {
+                    pollStatus.inFlight = false;
                 });
             }
 
@@ -101,6 +109,10 @@
             }
 
             function pollRequestsBadge() {
+                if (document.hidden || pollRequestsBadge.inFlight) {
+                    return;
+                }
+                pollRequestsBadge.inFlight = true;
                 $.getJSON('/api/requests/unseen-count', function (result) {
                     if (!result || result['success'] !== true) {
                         setBadge(0);
@@ -109,6 +121,8 @@
                     setBadge(result['count'] || 0);
                 }).fail(function () {
                     setBadge(0);
+                }).always(function () {
+                    pollRequestsBadge.inFlight = false;
                 });
             }
 
@@ -126,6 +140,10 @@
             }
 
             function pollLibraryStatus() {
+                if (document.hidden || pollLibraryStatus.inFlight) {
+                    return;
+                }
+                pollLibraryStatus.inFlight = true;
                 $.getJSON("/api/library/status", function (result) {
                     if (!result || result['success'] !== true) {
                         return;
@@ -149,6 +167,8 @@
                         rebuildTextEl.textContent = 'Library: Ready';
                         rebuildSpinnerEl.classList.add('d-none');
                     }
+                }).always(function () {
+                    pollLibraryStatus.inFlight = false;
                 });
             }
 
@@ -159,4 +179,3 @@
 </body>
 
 </html>
-
