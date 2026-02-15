@@ -4678,11 +4678,11 @@ def get_all_titles_api():
         else:
             query = query.filter(Titles.id == -1)
 
+    use_name_sort = sort_key in ('title_asc', 'title_desc')
     if sort_key == 'newest':
         query = query.order_by(Titles.id.desc(), Apps.id.desc())
-    elif sort_key == 'title_desc':
-        query = query.order_by(Titles.title_id.desc(), Apps.app_id.desc())
     else:
+        # Title sorts are applied after metadata lookup so ordering follows display names.
         query = query.order_by(Titles.title_id.asc(), Apps.app_id.asc())
 
     state_token = _get_titledb_aware_state_token()
@@ -4701,7 +4701,46 @@ def get_all_titles_api():
         total = query.order_by(None).count()
         _store_titles_total(count_cache_key, total)
     start = (page - 1) * per_page
-    rows = query.offset(start).limit(per_page).all()
+
+    rows = []
+    rows_for_sort = []
+    base_title_fk_ids = set()
+    title_id_by_fk = {}
+    dlc_app_ids = set()
+    all_lookup_ids = set()
+    info_cache = {}
+    release_dates_by_title = {}
+    if use_name_sort:
+        rows_for_sort = query.order_by(None).all()
+        total = len(rows_for_sort)
+        all_lookup_ids.update([row.title_id for row in rows_for_sort if row.title_id])
+        all_lookup_ids.update([row.app_id for row in rows_for_sort if row.app_type == APP_TYPE_DLC and row.app_id])
+
+        with titles.titledb_session() as titledb_loaded:
+            if titledb_loaded:
+                for lookup_id in all_lookup_ids:
+                    info_cache[lookup_id] = titles.get_game_info(lookup_id) or {}
+
+        def _row_sort_key(row):
+            title_info_local = info_cache.get(row.title_id) or {}
+            app_info_local = title_info_local if row.app_type == APP_TYPE_BASE else (info_cache.get(row.app_id) or title_info_local)
+            display_name = (
+                app_info_local.get('name')
+                or title_info_local.get('name')
+                or row.app_id
+                or row.title_id
+                or ''
+            )
+            return (
+                str(display_name).lower(),
+                str(row.title_id or ''),
+                str(row.app_id or ''),
+            )
+
+        rows_for_sort.sort(key=_row_sort_key, reverse=(sort_key == 'title_desc'))
+        rows = rows_for_sort[start:start + per_page]
+    else:
+        rows = query.offset(start).limit(per_page).all()
 
     base_title_fk_ids = {row.title_fk for row in rows if row.app_type == APP_TYPE_BASE and row.title_fk is not None}
     title_id_by_fk = {row.title_fk: row.title_id for row in rows if row.title_fk is not None and row.title_id}
@@ -4748,15 +4787,16 @@ def get_all_titles_api():
             'release_date': 'Unknown',
         })
 
-    all_lookup_ids = set()
-    all_lookup_ids.update([tid for tid in title_id_by_fk.values() if tid])
-    all_lookup_ids.update([aid for aid in dlc_app_ids if aid])
-    info_cache = {}
-    release_dates_by_title = {}
+    if not use_name_sort:
+        all_lookup_ids.update([tid for tid in title_id_by_fk.values() if tid])
+        all_lookup_ids.update([aid for aid in dlc_app_ids if aid])
+        with titles.titledb_session() as titledb_loaded:
+            if titledb_loaded:
+                for lookup_id in all_lookup_ids:
+                    info_cache[lookup_id] = titles.get_game_info(lookup_id) or {}
+
     with titles.titledb_session() as titledb_loaded:
         if titledb_loaded:
-            for lookup_id in all_lookup_ids:
-                info_cache[lookup_id] = titles.get_game_info(lookup_id) or {}
             for title_fk, title_id in title_id_by_fk.items():
                 versions = titles.get_all_existing_versions(title_id) or []
                 release_dates_by_title[title_fk] = {
