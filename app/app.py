@@ -1928,7 +1928,7 @@ def _touch_client():
 
 
 def _is_cyberfoil_request():
-    return 'CyberFoil' in request.headers
+    return all(header in request.headers for header in TINFOIL_HEADERS) and 'CyberFoil' in request.headers
 
 
 def _is_shop_client_allowed_for_external():
