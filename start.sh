@@ -20,6 +20,7 @@ USAGE
 ADMIN_USER="admin"
 ADMIN_PASSWORD="admin"
 FLASK_KEY="MyyR9E6O9mAeJMUTtsBgLxbuY9OZdT742psExUsnPnT72veQ7rnPkAdhiDNihNR_KPvCj5K85DgL0Rmo4hUiSQj"
+FLASK_KEY_FROM_ARG="0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -36,6 +37,7 @@ while [[ $# -gt 0 ]]; do
     --flask-key)
       [[ $# -ge 2 ]] || { echo "Missing value for --flask-key" >&2; usage; exit 1; }
       FLASK_KEY="$2"
+      FLASK_KEY_FROM_ARG="1"
       shift 2
       ;;
     -h|--help)
@@ -52,7 +54,22 @@ done
 
 export USER_ADMIN_NAME="$ADMIN_USER"
 export USER_ADMIN_PASSWORD="$ADMIN_PASSWORD"
-export AEROFOIL_SECRET_KEY="$FLASK_KEY"
+
+# Env precedence for compatibility:
+# 1) CLI argument
+# 2) new name AEROFOIL_SECRET_KEY
+# 3) legacy OWNFOIL_SECRET_KEY
+# 4) built-in fallback
+if [[ "$FLASK_KEY_FROM_ARG" == "1" ]]; then
+  EFFECTIVE_FLASK_KEY="$FLASK_KEY"
+elif [[ -n "${AEROFOIL_SECRET_KEY:-}" ]]; then
+  EFFECTIVE_FLASK_KEY="$AEROFOIL_SECRET_KEY"
+elif [[ -n "${OWNFOIL_SECRET_KEY:-}" ]]; then
+  EFFECTIVE_FLASK_KEY="$OWNFOIL_SECRET_KEY"
+else
+  EFFECTIVE_FLASK_KEY="$FLASK_KEY"
+fi
+
+export AEROFOIL_SECRET_KEY="$EFFECTIVE_FLASK_KEY"
 
 exec python app/app.py
-
