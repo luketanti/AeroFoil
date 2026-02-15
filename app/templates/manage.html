@@ -163,7 +163,16 @@
                                         <div class="form-text">Only NSP/XCI files are listed.</div>
                                     </div>
                                     <div class="border rounded p-3">
-                                        <div class="fw-semibold mb-2">Batch conversion settings</div>
+                                        <div class="d-flex justify-content-between align-items-center mb-2">
+                                            <div class="fw-semibold mb-0">Batch conversion settings</div>
+                                            <button type="button" class="btn btn-sm btn-outline-secondary" id="convertBatchSettingsToggleBtn" data-bs-toggle="collapse" data-bs-target="#convertBatchSettingsCollapse" aria-expanded="false" aria-controls="convertBatchSettingsCollapse">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16" style="vertical-align: -0.125em;">
+                                                    <path fill-rule="evenodd" d="M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z"/>
+                                                </svg>
+                                                Show
+                                            </button>
+                                        </div>
+                                        <div class="collapse" id="convertBatchSettingsCollapse">
                                         <div class="d-flex flex-wrap gap-3 align-items-center">
                                             <div class="input-group" style="max-width: 220px;">
                                                 <span class="input-group-text">Library</span>
@@ -195,6 +204,7 @@
                                             </div>
                                             <button type="button" id="convertNszBtn" class="btn btn-warning ms-auto"
                                                 onClick='convertToNsz()'>Start Library Conversion</button>
+                                        </div>
                                         </div>
                                     </div>
                                 </div>
@@ -977,6 +987,12 @@
                 $('#manageOutput').text('');
             }
         });
+        $('#convertBatchSettingsCollapse').on('show.bs.collapse', function () {
+            $('#convertBatchSettingsToggleBtn').html('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16" style="vertical-align: -0.125em;"><path fill-rule="evenodd" d="M1.646 11.354a.5.5 0 0 0 .708 0L8 5.707l5.646 5.647a.5.5 0 0 0 .708-.708l-6-6a.5.5 0 0 0-.708 0l-6 6a.5.5 0 0 0 0 .708z"/></svg> Hide');
+        });
+        $('#convertBatchSettingsCollapse').on('hide.bs.collapse', function () {
+            $('#convertBatchSettingsToggleBtn').html('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16" style="vertical-align: -0.125em;"><path fill-rule="evenodd" d="M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z"/></svg> Show');
+        });
         $.getJSON("/api/manage/jobs?limit=1", function (result) {
             if (!result['success']) {
                 return;
@@ -1002,4 +1018,3 @@
 </script>
 
 {% endblock %}
-
