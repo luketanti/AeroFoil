@@ -449,6 +449,14 @@ titles_metadata_cache = {
     'genre_title_ids': {},
     'unrecognized_title_ids': set(),
 }
+titles_total_cache_lock = threading.Lock()
+titles_total_cache = {}
+library_size_cache_lock = threading.Lock()
+library_size_cache = {
+    'state_token': None,
+    'total_bytes': 0,
+    'updated_at': 0.0,
+}
 request_settings_sync_lock = threading.Lock()
 request_settings_last_sync_ts = 0.0
 missing_files_sweep_lock = threading.Lock()
@@ -510,6 +518,44 @@ def _get_titledb_aware_state_token():
         titledb_token = 'missing'
     return f"{library_token}::{titledb_token}"
 
+
+def _get_cached_titles_total(cache_key):
+    if TITLES_TOTAL_CACHE_TTL_S == 0:
+        return None
+    now = time.time()
+    with titles_total_cache_lock:
+        cached = titles_total_cache.get(cache_key)
+        if not isinstance(cached, dict):
+            return None
+        if TITLES_TOTAL_CACHE_TTL_S is not None:
+            age = now - float(cached.get('timestamp') or 0.0)
+            if age > float(TITLES_TOTAL_CACHE_TTL_S):
+                titles_total_cache.pop(cache_key, None)
+                return None
+        try:
+            return int(cached.get('total') or 0)
+        except Exception:
+            return None
+
+
+def _store_titles_total(cache_key, total):
+    if TITLES_TOTAL_CACHE_TTL_S == 0:
+        return
+    with titles_total_cache_lock:
+        titles_total_cache[cache_key] = {
+            'total': int(total or 0),
+            'timestamp': time.time(),
+        }
+        if len(titles_total_cache) > TITLES_TOTAL_CACHE_MAX_ENTRIES:
+            ordered = sorted(
+                titles_total_cache.items(),
+                key=lambda kv: float((kv[1] or {}).get('timestamp') or 0.0),
+                reverse=True,
+            )[:TITLES_TOTAL_CACHE_MAX_ENTRIES]
+            titles_total_cache.clear()
+            for key, value in ordered:
+                titles_total_cache[key] = value
+
 def _get_cached_shop_files():
     state_token = get_library_cache_state_token()
     with shop_root_cache_lock:
@@ -517,7 +563,7 @@ def _get_cached_shop_files():
             shop_root_cache.get('state_token') == state_token
             and isinstance(shop_root_cache.get('files'), list)
         ):
-            return list(shop_root_cache['files'])
+            return shop_root_cache['files']
 
     rows = db.session.query(Files.id, Files.filename, Files.size).all()
     files_payload = [
@@ -532,7 +578,7 @@ def _get_cached_shop_files():
         shop_root_cache['state_token'] = state_token
         shop_root_cache['files'] = files_payload
         shop_root_cache['encrypted'] = {}
-    return list(files_payload)
+    return files_payload
 
 def _get_cached_encrypted_shop_payload(shop_payload, public_key, verified_host):
     state_token = get_library_cache_state_token()
@@ -747,6 +793,10 @@ SHOP_SECTIONS_MAX_IN_MEMORY_BYTES = _read_cache_ttl('SHOP_SECTIONS_MAX_IN_MEMORY
 MEDIA_INDEX_TTL_S = _read_cache_ttl('MEDIA_INDEX_TTL_S', None)
 REQUEST_SETTINGS_SYNC_INTERVAL_S = _read_cache_ttl('REQUEST_SETTINGS_SYNC_INTERVAL_S', 5)
 MISSING_FILES_SWEEP_INTERVAL_S = _read_cache_ttl('MISSING_FILES_SWEEP_INTERVAL_S', 21600)
+TITLES_TOTAL_CACHE_TTL_S = _read_cache_ttl('AEROFOIL_TITLES_TOTAL_CACHE_TTL_S', 300)
+TITLES_TOTAL_CACHE_TTL_S = _read_cache_ttl('OWNFOIL_TITLES_TOTAL_CACHE_TTL_S', TITLES_TOTAL_CACHE_TTL_S)
+TITLES_TOTAL_CACHE_MAX_ENTRIES = _read_int_env('AEROFOIL_TITLES_TOTAL_CACHE_MAX_ENTRIES', 256, minimum=16, maximum=4096)
+TITLES_TOTAL_CACHE_MAX_ENTRIES = _read_int_env('OWNFOIL_TITLES_TOTAL_CACHE_MAX_ENTRIES', TITLES_TOTAL_CACHE_MAX_ENTRIES, minimum=16, maximum=4096)
 # ===============================
 
 def _load_shop_sections_cache_from_disk():
@@ -867,7 +917,7 @@ def _read_proc_meminfo_bytes():
         'vms_bytes': values.get('VmSize')
     }
 
-def _build_shop_sections_payload(limit):
+def _build_shop_sections_payload(limit, full_catalog=False):
     try:
         limit = int(limit or 50)
     except (TypeError, ValueError):
@@ -985,13 +1035,14 @@ def _build_shop_sections_payload(limit):
             recommended_items = new_items[:discovery_limit]
 
         all_limit = None
-        if SHOP_SECTIONS_ALL_ITEMS_CAP is not None:
-            cap_value = int(SHOP_SECTIONS_ALL_ITEMS_CAP)
-            if not titledb_loaded and SHOP_SECTIONS_ALL_ITEMS_CAP_NO_TITLEDB is not None:
-                cap_value = min(cap_value, int(SHOP_SECTIONS_ALL_ITEMS_CAP_NO_TITLEDB))
-            all_limit = max(limit, cap_value)
-
-        updates_dlc_limit = all_limit if all_limit is not None else limit
+        updates_dlc_limit = None
+        if not full_catalog:
+            if SHOP_SECTIONS_ALL_ITEMS_CAP is not None:
+                cap_value = int(SHOP_SECTIONS_ALL_ITEMS_CAP)
+                if not titledb_loaded and SHOP_SECTIONS_ALL_ITEMS_CAP_NO_TITLEDB is not None:
+                    cap_value = min(cap_value, int(SHOP_SECTIONS_ALL_ITEMS_CAP_NO_TITLEDB))
+                all_limit = max(limit, cap_value)
+            updates_dlc_limit = all_limit if all_limit is not None else limit
 
         latest_update_by_title_id = {}
         for row in rows:
@@ -1011,7 +1062,10 @@ def _build_shop_sections_payload(limit):
             if item
         ]
         update_items_full.sort(key=lambda item: _safe_int(item['app_version']), reverse=True)
-        update_items = update_items_full[:updates_dlc_limit]
+        if updates_dlc_limit is None:
+            update_items = update_items_full
+        else:
+            update_items = update_items_full[:updates_dlc_limit]
 
         latest_dlc_by_app_id = {}
         for row in rows:
@@ -1031,7 +1085,10 @@ def _build_shop_sections_payload(limit):
             if item
         ]
         dlc_items_full.sort(key=lambda item: _safe_int(item['app_version']), reverse=True)
-        dlc_items = dlc_items_full[:updates_dlc_limit]
+        if updates_dlc_limit is None:
+            dlc_items = dlc_items_full
+        else:
+            dlc_items = dlc_items_full[:updates_dlc_limit]
 
         all_total = len(base_items) + len(update_items_full) + len(dlc_items_full)
         all_items = sorted(
@@ -1616,6 +1673,9 @@ def on_library_change(events):
 def create_app():
     app = Flask(__name__)
     app.config["SQLALCHEMY_DATABASE_URI"] = AEROFOIL_DB
+    static_max_age = _read_int_env('AEROFOIL_STATIC_MAX_AGE_S', 3600, minimum=0, maximum=31536000)
+    static_max_age = _read_int_env('OWNFOIL_STATIC_MAX_AGE_S', static_max_age, minimum=0, maximum=31536000)
+    app.config['SEND_FILE_MAX_AGE_DEFAULT'] = int(static_max_age)
     # Generate secret key from environment variable or create random one
     secret_key = os.getenv('AEROFOIL_SECRET_KEY') or os.getenv('OWNFOIL_SECRET_KEY')
     if not secret_key:
@@ -4486,6 +4546,8 @@ def get_all_titles_api():
     recognized = (request.args.get('recognized') or '').strip().lower()
     app_version_num_expr = func.coalesce(Apps.app_version_num, 0)
     titles_metadata = None
+    search_normalized = ''
+    allowed_types = set()
 
     size_subquery = (
         db.session.query(
@@ -4623,16 +4685,30 @@ def get_all_titles_api():
     else:
         query = query.order_by(Titles.title_id.asc(), Apps.app_id.asc())
 
-    total = query.count()
+    state_token = _get_titledb_aware_state_token()
+    count_cache_key = (
+        state_token,
+        search_normalized,
+        ','.join(sorted(allowed_types)),
+        str(owned or ''),
+        str(updates or ''),
+        str(completion or ''),
+        str(genre or '').lower(),
+        'unrecognized' if recognized == 'unrecognized' else ('recognized' if recognized == 'recognized' else ''),
+    )
+    total = _get_cached_titles_total(count_cache_key)
+    if total is None:
+        total = query.order_by(None).count()
+        _store_titles_total(count_cache_key, total)
     start = (page - 1) * per_page
     rows = query.offset(start).limit(per_page).all()
 
-    title_fk_ids = {row.title_fk for row in rows if row.title_fk is not None}
+    base_title_fk_ids = {row.title_fk for row in rows if row.app_type == APP_TYPE_BASE and row.title_fk is not None}
     title_id_by_fk = {row.title_fk: row.title_id for row in rows if row.title_fk is not None and row.title_id}
     dlc_app_ids = {row.app_id for row in rows if row.app_type == APP_TYPE_DLC and row.app_id}
 
     update_rows = []
-    if title_fk_ids:
+    if base_title_fk_ids:
         update_rows = (
             db.session.query(
                 Apps.title_id.label('title_fk'),
@@ -4641,7 +4717,7 @@ def get_all_titles_api():
                 func.coalesce(size_subquery.c.size, 0).label('size'),
             )
             .outerjoin(size_subquery, size_subquery.c.app_pk == Apps.id)
-            .filter(Apps.app_type == APP_TYPE_UPD, Apps.title_id.in_(title_fk_ids))
+            .filter(Apps.app_type == APP_TYPE_UPD, Apps.title_id.in_(base_title_fk_ids))
             .all()
         )
     update_versions_by_title_fk = {}
@@ -4933,7 +5009,17 @@ def set_manual_title_info_api():
 @app.get('/api/library/size')
 @access_required('shop')
 def get_library_size_api():
+    state_token = get_library_cache_state_token()
+    with library_size_cache_lock:
+        cached_token = str(library_size_cache.get('state_token') or '')
+        if cached_token and cached_token == str(state_token):
+            return jsonify({'success': True, 'total_bytes': int(library_size_cache.get('total_bytes') or 0)})
+
     total = db.session.query(func.sum(Files.size)).scalar() or 0
+    with library_size_cache_lock:
+        library_size_cache['state_token'] = str(state_token)
+        library_size_cache['total_bytes'] = int(total or 0)
+        library_size_cache['updated_at'] = time.time()
     return jsonify({'success': True, 'total_bytes': int(total)})
 
 @app.get('/api/library/status')
@@ -5103,6 +5189,10 @@ def shop_sections_api():
         limit = 50
 
     is_cyberfoil = _is_cyberfoil_request()
+    # Keep CyberFoil payload uncapped so clients can browse the full owned catalog.
+    # Use a dedicated cache key so capped web payloads and uncapped CyberFoil payloads
+    # do not overwrite each other.
+    cache_limit = -1 if is_cyberfoil else limit
 
     now = time.time()
     state_token = _get_titledb_aware_state_token()
@@ -5115,7 +5205,7 @@ def shop_sections_api():
         cache_hit = (
             cache_enabled
             and shop_sections_cache['payload'] is not None
-            and shop_sections_cache['limit'] == limit
+            and shop_sections_cache['limit'] == cache_limit
             and shop_sections_cache.get('state_token') == state_token
             and cache_valid
         )
@@ -5133,7 +5223,7 @@ def shop_sections_api():
             disk_cache = _load_shop_sections_cache_from_disk()
             if (
                 disk_cache
-                and disk_cache.get('limit') == limit
+                and disk_cache.get('limit') == cache_limit
                 and str(disk_cache.get('state_token') or '') == state_token
             ):
                 disk_payload = disk_cache.get('payload')
@@ -5143,12 +5233,12 @@ def shop_sections_api():
                     disk_ok = (now - disk_ts) <= SHOP_SECTIONS_CACHE_TTL_S
                 if disk_payload and disk_ok:
                     payload = disk_payload
-                    _store_shop_sections_cache(payload, limit, disk_ts, state_token, persist_disk=False)
+                    _store_shop_sections_cache(payload, cache_limit, disk_ts, state_token, persist_disk=False)
 
     if payload is None:
-        payload = _build_shop_sections_payload(limit)
+        payload = _build_shop_sections_payload(limit, full_catalog=is_cyberfoil)
         if SHOP_SECTIONS_CACHE_TTL_S is None or SHOP_SECTIONS_CACHE_TTL_S > 0:
-            _store_shop_sections_cache(payload, limit, now, state_token, persist_disk=True)
+            _store_shop_sections_cache(payload, cache_limit, now, state_token, persist_disk=True)
 
     if is_cyberfoil:
         _log_access(
@@ -5478,6 +5568,7 @@ def post_library_change():
         library_rebuild_status['updated_at'] = time.time()
     with app.app_context():
         try:
+            invalidate_library_cache_state_token()
             titles.load_titledb()
             process_library_identification(app)
             add_missing_apps_to_db()
@@ -5487,6 +5578,7 @@ def post_library_change():
             organize_pending_downloads()
             # Generate the library after organization tasks so cache/UI reflect final file layout.
             generate_library()
+            invalidate_library_cache_state_token()
             with shop_sections_cache_lock:
                 shop_sections_cache['payload'] = None
                 shop_sections_cache['timestamp'] = 0
