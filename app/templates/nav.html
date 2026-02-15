@@ -1,10 +1,31 @@
 <nav class="navbar navbar-expand-lg bg-body-secondary bg-dark border-bottom border-body" data-bs-theme="dark">
     <div class="container-fluid">
-        <a class="navbar-brand py-0" href="#">
-            <img
-                src="{{ url_for('static', filename='banner.png') }}"
-                alt="AeroFoil"
-                class="navbar-brand-banner">
+        <a class="navbar-brand py-0" href="/" aria-label="AeroFoil">
+            <picture>
+                <source
+                    type="image/webp"
+                    srcset="
+                        {{ url_for('static', filename='banner-400.webp') }} 400w,
+                        {{ url_for('static', filename='banner-800.webp') }} 800w,
+                        {{ url_for('static', filename='banner-1211.webp') }} 1211w
+                    "
+                    sizes="200px">
+                <img
+                    src="{{ url_for('static', filename='banner-800.png') }}"
+                    srcset="
+                        {{ url_for('static', filename='banner-400.png') }} 400w,
+                        {{ url_for('static', filename='banner-800.png') }} 800w,
+                        {{ url_for('static', filename='banner-1211.png') }} 1211w
+                    "
+                    sizes="200px"
+                    width="1211"
+                    height="328"
+                    alt=""
+                    loading="eager"
+                    decoding="sync"
+                    fetchpriority="high"
+                    class="navbar-brand-banner">
+            </picture>
         </a>
         <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav"
             aria-controls="navbarNav" aria-expanded="false" aria-label="Toggle navigation">
@@ -95,4 +116,3 @@
         </div>
     </div>
 </nav>
-
