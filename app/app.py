@@ -2491,7 +2491,7 @@ def tinfoil_access(f):
         auth_success = None
         request.verified_host = None
         is_shop_client = _is_shop_client_request()
-        is_allowed_external_client = _is_shop_client_allowed_for_external()
+        is_allowed_external_client = _is_shop_client_request()
         if bool(app_settings.get('shop', {}).get('external_tinfoil_only', False)):
             remote = _effective_remote_addr()
             if remote and not _is_private_ip(remote) and not is_allowed_external_client:
@@ -2674,7 +2674,7 @@ def access_shop_auth():
 @app.route('/')
 def index():
     is_shop_client = _is_shop_client_request()
-    is_allowed_external_client = _is_shop_client_allowed_for_external()
+    is_allowed_external_client = _is_shop_client_request()
     if bool(app_settings.get('shop', {}).get('external_tinfoil_only', False)):
         remote = _effective_remote_addr()
         if remote and not _is_private_ip(remote) and not is_allowed_external_client:
