@@ -12,7 +12,7 @@ AeroFoil is a Personal library manager that turns your library into a fully cust
  - multi user authentication
  - web interface for configuration
  - web interface for browsing the library
- - content identification using decryption or filename
+ - content identification
  - shop customization
 
 The project is still in development, expect things to break or change without notice.
