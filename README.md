@@ -145,7 +145,7 @@ In the `Manage` page, you can organize your library structure, delete older upda
 - Icon view: the `Game info` button is shown as an overlay on the game tile.
 
 ## Game info (TitleDB)
-The `Game info` modal uses TitleDB metadata (not Nintendo website scraping):
+The `Game info` modal uses TitleDB metadata:
 - `description`: shown as the game summary.
 - `screenshots`: displayed in a grid; click a screenshot to open it larger.
 
