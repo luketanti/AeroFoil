@@ -760,6 +760,17 @@ def login():
         next_url = request.args.get('next', '')
         if current_user.is_authenticated:
             return redirect(next_url if len(next_url) else '/')
+        if not admin_account_created():
+            app_settings = {}
+            try:
+                app_settings = load_settings()
+            except Exception:
+                app_settings = {}
+
+            if _bootstrap_private_only(app_settings) and not _bootstrap_request_allowed(app_settings):
+                reason = 'Access denied from this network during initial setup.'
+                return _render_setup_required(reason)
+            return redirect(url_for('users_page'))
         return render_template('login.html', title='Login')
         
     # login code goes here
