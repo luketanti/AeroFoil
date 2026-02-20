@@ -104,7 +104,7 @@ DEFAULT_SETTINGS = {
         "min_seeders": 2,
         "required_terms": [],
         "blacklist_terms": [],
-        "search_prefix": "Nintendo Switch",
+        "search_prefix": "",
         "search_suffix": "",
         "search_char_replacements": [
             {"from": "™", "to": ""},
