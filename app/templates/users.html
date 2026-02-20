@@ -93,6 +93,7 @@
                             <tr>
                                 <th scope="col" role="button" id="usersSortUser" data-sort="user">User <span class="text-muted" id="sortUserIcon"></span></th>
                                 <th scope="col" role="button" id="usersSortPerms" data-sort="perms">Permissions <span class="text-muted" id="sortPermsIcon"></span></th>
+                                <th scope="col">Client</th>
                                 <th scope="col" class="text-end">Actions</th>
                             </tr>
                         </thead>
@@ -230,6 +231,28 @@
     </div>
 </div>
 
+<style>
+    .client-meta {
+        display: grid;
+        gap: 0.2rem;
+        font-size: 0.82rem;
+    }
+
+    .client-meta code {
+        font-size: 0.78rem;
+    }
+
+    .flag-icon {
+        width: 16px;
+        height: 12px;
+        border-radius: 2px;
+        box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12);
+        flex-shrink: 0;
+        margin-right: 0.35rem;
+        vertical-align: -1px;
+    }
+</style>
+
 <script>
     let allUsers = [];
     let allUsernames = [];
@@ -352,6 +375,18 @@
         addItem('Next', currentPage + 1, currentPage >= totalPages, false);
     }
 
+    function _formatTimestamp(tsSeconds) {
+        const sec = parseInt(tsSeconds, 10);
+        if (!Number.isFinite(sec) || sec <= 0) {
+            return '-';
+        }
+        const dt = new Date(sec * 1000);
+        if (Number.isNaN(dt.getTime())) {
+            return '-';
+        }
+        return dt.toLocaleString();
+    }
+
     function renderUsers() {
         const users = _filteredUsers();
         const total = users.length;
@@ -365,7 +400,7 @@
         const $tbody = $('#userTable tbody');
         $tbody.empty();
         if (!pageItems.length) {
-            $tbody.append('<tr><td colspan="3" class="text-muted">No users found.</td></tr>');
+            $tbody.append('<tr><td colspan="4" class="text-muted">No users found.</td></tr>');
             return;
         }
 
@@ -392,9 +427,22 @@
             }
 
             const username = _escapeHtml(user['user']);
+            const uidValue = _escapeHtml(user['client_uid'] || '-');
+            const lastLoginAt = _formatTimestamp(user['last_login_at']);
+            const lastLoginIp = _escapeHtml(user['last_login_ip'] || '-');
+            const locationLabel = user['last_login_country'] ? user['last_login_country'] : '-';
+            const countryCode = String(user['last_login_country_code'] || '').trim().toLowerCase();
+            const flagIcon = countryCode ? `<img src="https://cdn.jsdelivr.net/npm/flag-icons@7.2.3/flags/4x3/${countryCode}.svg" alt="" class="flag-icon" loading="lazy" />` : '';
+            const clientMeta = [
+                `<div class="text-muted">UID: <code>${uidValue}</code></div>`,
+                `<div class="text-muted">Last login: ${_escapeHtml(lastLoginAt)}</div>`,
+                `<div class="text-muted">IP: ${lastLoginIp}</div>`,
+                `<div class="text-muted">${flagIcon}${_escapeHtml(locationLabel)}</div>`,
+            ].join('');
             const tr = $('<tr>');
             tr.append(`<td><code>${username}</code></td>`);
             tr.append(`<td>${badges}</td>`);
+            tr.append(`<td><div class="client-meta">${clientMeta}</div></td>`);
             tr.append(
                 '<td class="text-end">'
                 + '<div class="d-inline-flex gap-1">'

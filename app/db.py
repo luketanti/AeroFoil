@@ -175,6 +175,11 @@ class User(UserMixin, db.Model):
     backup_access = db.Column(db.Boolean)
     frozen = db.Column(db.Boolean, default=False)
     frozen_message = db.Column(db.String)
+    client_uid = db.Column(db.String)
+    last_login_at = db.Column(db.DateTime)
+    last_login_ip = db.Column(db.String)
+    last_login_country = db.Column(db.String)
+    last_login_country_code = db.Column(db.String)
 
     @property
     def is_admin(self):
@@ -572,6 +577,44 @@ def ensure_access_events_geo_schema():
         logger.warning("Failed to apply access_events geo schema: %s", e)
 
 
+def ensure_user_client_schema():
+    try:
+        if db.engine.dialect.name != 'sqlite':
+            return
+    except Exception:
+        return
+
+    try:
+        result = db.session.execute(text("PRAGMA table_info(user)"))
+        existing = {row[1] for row in result if row and len(row) > 1}
+    except Exception as e:
+        logger.warning("Failed to read user schema: %s", e)
+        return
+
+    columns = [
+        ('client_uid', 'TEXT'),
+        ('last_login_at', 'DATETIME'),
+        ('last_login_ip', 'TEXT'),
+        ('last_login_country', 'TEXT'),
+        ('last_login_country_code', 'TEXT'),
+    ]
+
+    try:
+        added = False
+        for name, col_type in columns:
+            if name in existing:
+                continue
+            ddl = f"ALTER TABLE user ADD COLUMN {name} {col_type}"
+            db.session.execute(text(ddl))
+            added = True
+        if added:
+            db.session.commit()
+            logger.info("Added missing client columns to user.")
+    except Exception as e:
+        db.session.rollback()
+        logger.warning("Failed to apply user client schema: %s", e)
+
+
 def init_db(app):
     with app.app_context():
         # Ensure foreign keys are enforced when the SQLite connection is opened
@@ -595,6 +638,7 @@ def init_db(app):
                     logger.info("Database migration applied successfully.")
             ensure_performance_schema()
             ensure_access_events_geo_schema()
+            ensure_user_client_schema()
 
 def file_exists_in_db(filepath):
     return Files.query.filter_by(filepath=filepath).first() is not None

@@ -1966,6 +1966,64 @@ def _touch_client():
     except Exception:
         pass
 
+    try:
+        try:
+            is_shop_client = _is_shop_client_request()
+        except Exception:
+            is_shop_client = False
+        if not is_shop_client:
+            return
+        username = meta.get('user')
+        if not username:
+            return
+        user = User.query.filter_by(user=username).first()
+        if user is None:
+            return
+        uid_value = (tinfoil_meta.get('uid') or '').strip() if tinfoil_meta else ''
+        remote = (meta.get('remote_addr') or '').strip()
+        geo = {}
+        if remote:
+            try:
+                if not _is_private_ip(remote):
+                    geo = lookup_geoip(remote) or {}
+            except Exception:
+                geo = {}
+        updated = False
+        if uid_value and uid_value != (user.client_uid or ''):
+            user.client_uid = uid_value
+            updated = True
+        user.last_login_at = datetime.datetime.utcnow()
+        user.last_login_ip = remote or user.last_login_ip
+        user.last_login_country = geo.get('country') or user.last_login_country
+        user.last_login_country_code = geo.get('country_code') or user.last_login_country_code
+        updated = True
+        if updated:
+            db.session.commit()
+    except Exception:
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+
+    try:
+        if tinfoil_meta and (tinfoil_meta.get('uid') or '').strip():
+            username = meta.get('user')
+            if username:
+                user = User.query.filter_by(user=username).first()
+                if user is not None:
+                    uid_value = (tinfoil_meta.get('uid') or '').strip()
+                    updated = False
+                    if uid_value and uid_value != (user.client_uid or ''):
+                        user.client_uid = uid_value
+                        updated = True
+                    if updated:
+                        db.session.commit()
+    except Exception:
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+
 
 def _is_cyberfoil_request():
     ua = request.headers.get('User-Agent') or ''

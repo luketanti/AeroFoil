@@ -840,8 +840,22 @@ def get_users():
             User.backup_access,
             User.frozen,
             User.frozen_message,
+            User.client_uid,
+            User.last_login_at,
+            User.last_login_ip,
+            User.last_login_country,
+            User.last_login_country_code,
         ).all()
     ]
+    for item in all_users:
+        ts = item.get('last_login_at')
+        if ts:
+            try:
+                item['last_login_at'] = int(ts.timestamp())
+            except Exception:
+                item['last_login_at'] = None
+        item['last_login_country'] = item.get('last_login_country') or ''
+        item['last_login_country_code'] = item.get('last_login_country_code') or ''
     return jsonify(all_users)
 
 
