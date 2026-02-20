@@ -315,7 +315,13 @@ def _normalize_security_settings(raw_security):
     return merged
 
 def load_keys(key_file=KEYS_FILE):
-    valid, _ = validate_keys_file(key_file)
+    try:
+        file_path = os.path.abspath(str(key_file or KEYS_FILE))
+    except Exception:
+        file_path = os.path.abspath(str(KEYS_FILE))
+    if not os.path.isfile(file_path):
+        return False
+    valid, _ = validate_keys_file(file_path)
     return valid
 
 
@@ -330,7 +336,7 @@ def validate_keys_file(key_file=KEYS_FILE):
     file_path = os.path.abspath(str(key_file or KEYS_FILE))
     if not os.path.isfile(file_path):
         logger.debug(f'Keys file {key_file} does not exist.')
-        return valid, ['keys_file_missing']
+        return valid, []
 
     try:
         checksum = _hash_file_sha256(file_path)
