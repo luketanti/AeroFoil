@@ -206,6 +206,7 @@
             <!-- <label for="cardSizeRange" class="form-label">Card Size</label> -->
             <input type="range" class="form-range" min="1" max="5" step="1" id="cardSizeRange">
         </div>
+        <div class="col-auto d-none" id="activeFiltersBar"></div>
     </div>
 
     <div class="grid-container" id="gridContainer">
@@ -1215,6 +1216,79 @@
         btn.textContent = selectedGenre ? `Genre: ${selectedGenre}` : 'Genre';
     }
 
+    function renderActiveFilters() {
+        const bar = $('#activeFiltersBar');
+        if (!bar.length) {
+            return;
+        }
+
+        const chips = [];
+        const searchText = ($('#textFilter').val() || '').trim();
+        if (searchText) {
+            chips.push(`Search: "${escapeHtml(searchText)}"`);
+        }
+        if (selectedGenre) {
+            chips.push(`Genre: ${escapeHtml(selectedGenre)}`);
+        }
+
+        const typeLabels = Array.from(activeTypeFilters).map(item => item === 'BASE' ? 'Base' : item);
+        typeLabels.forEach(label => chips.push(`Type: ${escapeHtml(label)}`));
+
+        Array.from(activeOwnershipFilters).forEach(label => chips.push(`Ownership: ${escapeHtml(label)}`));
+
+        Array.from(activeUpdateFilters).forEach(label => {
+            const text = label === 'Outdated' ? 'Missing Update' : label;
+            chips.push(`Updates: ${escapeHtml(text)}`);
+        });
+
+        Array.from(activeCompletionFilters).forEach(label => chips.push(`Completion: ${escapeHtml(label)}`));
+
+        Array.from(activeRecognitionFilters).forEach(label => chips.push(`Recognition: ${escapeHtml(label)}`));
+
+        if (!chips.length) {
+            bar.addClass('d-none').empty();
+            return;
+        }
+
+        bar.removeClass('d-none').empty();
+        const wrap = $('<div class="d-flex flex-wrap align-items-center gap-2"></div>');
+        wrap.append('<span class="text-muted small">Active filters:</span>');
+        chips.forEach(text => {
+            wrap.append(`<span class="badge text-bg-secondary">${text}</span>`);
+        });
+        wrap.append('<button type="button" class="btn btn-outline-light btn-sm" id="clearActiveFiltersBtn">Clear all</button>');
+        bar.append(wrap);
+    }
+
+    function clearAllFilters() {
+        $('#textFilter').val('');
+        selectedGenre = '';
+        updateGenreButtonLabel();
+        localStorage.removeItem('selectedGenre');
+
+        activeTypeFilters.clear();
+        activeOwnershipFilters.clear();
+        activeUpdateFilters.clear();
+        activeCompletionFilters.clear();
+        activeRecognitionFilters.clear();
+
+        $('#filterCheckBase').prop('checked', false);
+        $('#filterCheckDlc').prop('checked', false);
+        $('#filterCheckOwned').prop('checked', false);
+        $('#filterCheckMissing').prop('checked', false);
+        $('#filterCheckUpToDate').prop('checked', false);
+        $('#filterCheckMissingUpdate').prop('checked', false);
+        $('#filterCheckComplete').prop('checked', false);
+        $('#filterCheckMissingDlc').prop('checked', false);
+        $('#filterCheckUnrecognized').prop('checked', false);
+
+        localStorage.removeItem('activeFilters');
+        localStorage.removeItem('searchTerm');
+
+        renderActiveFilters();
+        recomputeFilteredGames();
+    }
+
     function populateGenreDropdown() {
         const menu = $('#genreDropdownMenu');
         if (!menu.length) return;
@@ -1264,6 +1338,7 @@
         if (savedSearch) {
             $('#textFilter').val(savedSearch);
         }
+        renderActiveFilters();
     }
 
     $(document).ready(function () {
@@ -1317,6 +1392,7 @@
             selectedGenre = String($(this).attr('data-genre') || '');
             saveGenreToStorage();
             updateGenreButtonLabel();
+            renderActiveFilters();
             recomputeFilteredGames();
         });
 
@@ -1370,8 +1446,13 @@
         // Handle filter checkbox
         $('.filterLabel').click(function() {
             updateFilter();
+            renderActiveFilters();
             applyFilters();
             saveFiltersToStorage();
+        });
+
+        $('#activeFiltersBar').on('click', '#clearActiveFiltersBtn', function () {
+            clearAllFilters();
         });
 
         // Listen to input changes in the text filter input
@@ -1382,6 +1463,7 @@
                 clearTimeout(searchDebounceTimer);
             }
             searchDebounceTimer = setTimeout(function () {
+                renderActiveFilters();
                 recomputeFilteredGames();
             }, SEARCH_DEBOUNCE_MS);
         });
