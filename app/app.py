@@ -4928,6 +4928,16 @@ def get_title_details_api():
     if not app_id and not title_id:
         return jsonify({'success': False, 'error': 'missing_identifier'}), 400
 
+    size_subquery = (
+        db.session.query(
+            app_files.c.app_id.label('app_pk'),
+            func.coalesce(func.sum(Files.size), 0).label('size'),
+        )
+        .outerjoin(Files, Files.id == app_files.c.file_id)
+        .group_by(app_files.c.app_id)
+        .subquery()
+    )
+
     query = (
         db.session.query(
             Apps.id.label('app_pk'),
@@ -4940,8 +4950,10 @@ def get_title_details_api():
             Apps.app_version.label('app_version'),
             Apps.app_type.label('app_type'),
             Apps.owned.label('owned'),
+            func.coalesce(size_subquery.c.size, 0).label('size'),
         )
         .join(Titles, Apps.title_id == Titles.id)
+        .outerjoin(size_subquery, size_subquery.c.app_pk == Apps.id)
     )
     if app_id and app_type:
         query = query.filter(Apps.app_id == app_id, Apps.app_type == app_type.upper())
@@ -4972,6 +4984,7 @@ def get_title_details_api():
                 'app_version': row.app_version,
                 'app_type': row.app_type,
                 'owned': bool(row.owned),
+                'size': int(row.size or 0),
             }
             if row.app_type == APP_TYPE_BASE:
                 versions = []
