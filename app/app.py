@@ -5186,6 +5186,58 @@ def get_title_details_api():
                 game['has_base'] = bool(row.have_base)
                 game['has_latest_version'] = bool(row.have_base) and bool(row.up_to_date)
                 game['has_all_dlcs'] = bool(row.complete)
+                dlc_rows = (
+                    db.session.query(Apps.app_id, Apps.app_version, Apps.owned)
+                    .filter(Apps.title_id == row.title_fk, Apps.app_type == APP_TYPE_DLC)
+                    .all()
+                )
+                dlc_state = {}
+                for dlc in dlc_rows:
+                    app_id = str(dlc.app_id or '').upper()
+                    if not app_id:
+                        continue
+                    entry = dlc_state.setdefault(app_id, {'max_version': 0, 'max_owned': 0})
+                    version_value = int(dlc.app_version or 0)
+                    if version_value > entry['max_version']:
+                        entry['max_version'] = version_value
+                    if dlc.owned and version_value > entry['max_owned']:
+                        entry['max_owned'] = version_value
+
+                dlc_items = []
+                dlc_app_ids = set(titles.get_all_existing_dlc(row.title_id) or [])
+                if not dlc_app_ids:
+                    dlc_app_ids = set(dlc_state.keys())
+                for app_id in sorted(dlc_app_ids):
+                    entry = dlc_state.get(app_id) or {'max_version': 0, 'max_owned': 0}
+                    versions_list = titles.get_all_app_existing_versions(app_id) or []
+                    max_version = None
+                    if versions_list:
+                        try:
+                            max_version = max(int(v or 0) for v in versions_list)
+                        except Exception:
+                            max_version = None
+                    if not max_version:
+                        try:
+                            max_version = int(entry.get('max_version') or 0) or None
+                        except Exception:
+                            max_version = None
+                    owned_max = int(entry.get('max_owned') or 0)
+                    dlc_info = titles.get_game_info(app_id) or {}
+                    owned_flag = bool(max_version and owned_max >= max_version)
+                    dlc_items.append({
+                        'app_id': app_id,
+                        'name': dlc_info.get('name') or app_id,
+                        'latest_version': max_version,
+                        'owned_version': owned_max,
+                        'owned': owned_flag,
+                    })
+
+                dlc_items.sort(key=lambda item: str(item.get('name') or '').lower())
+                game['dlc_list'] = dlc_items
+                game['missing_dlcs'] = [
+                    item for item in dlc_items
+                    if not item.get('owned')
+                ]
             elif row.app_type == APP_TYPE_DLC:
                 dlc_versions = []
                 for dlc in (

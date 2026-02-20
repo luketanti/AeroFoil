@@ -1644,9 +1644,48 @@
         }
         $('#detailsMeta').html(metaItems.join(' '));
 
+        const dlcList = Array.isArray(game.dlc_list) ? game.dlc_list : [];
+        if (dlcList.length) {
+            const rows = dlcList.map(dlc => {
+                const name = escapeHtml(dlc.name || dlc.app_id || '-');
+                const status = dlc.owned ? 'Owned' : 'Missing';
+                const statusClass = dlc.owned ? 'text-bg-success' : 'text-bg-warning';
+                const latest = dlc.latest_version ? `v${dlc.latest_version}` : '-';
+                const owned = dlc.owned_version ? `v${dlc.owned_version}` : '-';
+                return `
+                    <tr>
+                        <td>${name}</td>
+                        <td><span class="badge ${statusClass}">${status}</span></td>
+                        <td>${owned}</td>
+                        <td>${latest}</td>
+                    </tr>
+                `;
+            }).join('');
+            $('#detailsVersions').html(`
+                <div class="mb-3">
+                    <div class="fw-semibold">Title DLCs</div>
+                    <table class="table table-sm table-striped mb-0">
+                        <thead>
+                            <tr>
+                                <th scope="col">DLC</th>
+                                <th scope="col">Status</th>
+                                <th scope="col">Owned</th>
+                                <th scope="col">Latest</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${rows}
+                        </tbody>
+                    </table>
+                </div>
+            `);
+        }
+
         const versions = Array.isArray(game.version) ? game.version : [];
         if (!versions.length) {
-            $('#detailsVersions').html('<div class="text-muted">No version data available.</div>');
+            if (!dlcList.length) {
+                $('#detailsVersions').html('<div class="text-muted">No version data available.</div>');
+            }
             $('#detailsDownloadStatus').text('');
             return;
         }
@@ -1680,7 +1719,7 @@
             `
             : '';
 
-        $('#detailsVersions').html(`
+        const tableHtml = `
             <table class="table table-sm table-striped">
                  <thead>
                      <tr>
@@ -1695,7 +1734,12 @@
                 </tbody>
             </table>
             ${actionRow}
-        `);
+        `;
+        if (dlcList.length) {
+            $('#detailsVersions').append(tableHtml);
+        } else {
+            $('#detailsVersions').html(tableHtml);
+        }
         $('#detailsDownloadStatus').text('');
     }
 
