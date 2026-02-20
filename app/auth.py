@@ -5,6 +5,7 @@ from functools import wraps
 from app.db import *
 from flask_login import LoginManager
 from app.settings import load_settings, set_security_settings
+from app.utils import lookup_geoip
 import hashlib
 
 import logging
@@ -318,6 +319,12 @@ def _log_login_event(kind: str, username: str = None, ok: bool = None, status_co
             settings = {}
         remote = _effective_client_ip(settings)
         ua = request.headers.get('User-Agent')
+        geo = {}
+        try:
+            if remote and not _is_private_ip(remote):
+                geo = lookup_geoip(remote) or {}
+        except Exception:
+            geo = {}
 
         # Dedupe noisy auth failures (scanners, repeated retries).
         dedupe_key = f"{kind}|{(username or '').strip()}|{remote}|{ua}"[:512]
@@ -329,6 +336,12 @@ def _log_login_event(kind: str, username: str = None, ok: bool = None, status_co
             user=(username or '').strip() or None,
             remote_addr=remote,
             user_agent=ua,
+            country=geo.get('country'),
+            country_code=geo.get('country_code'),
+            region=geo.get('region'),
+            city=geo.get('city'),
+            latitude=geo.get('latitude'),
+            longitude=geo.get('longitude'),
             ok=bool(ok) if ok is not None else None,
             status_code=(
                 int(status_code)

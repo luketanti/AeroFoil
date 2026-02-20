@@ -8,6 +8,16 @@ import tempfile
 import time
 import logging
 import subprocess
+import ipaddress
+import requests
+
+_geoip_lock = threading.Lock()
+_geoip_db = None
+_geoip_db_error = None
+_geoip_last_check = 0.0
+_geoip_ttl_s = 900
+_geoip_download_lock = threading.Lock()
+_geoip_download_inflight = False
 
 # Global lock for all JSON writes in this process
 _json_write_lock = threading.Lock()
@@ -161,3 +171,153 @@ def get_app_version(fallback=None):
     _version_cache = version
     _version_cache_time = now
     return version
+
+
+def _safe_geoip_db_path():
+    try:
+        from app.constants import GEOLITE_DB_FILE
+        return GEOLITE_DB_FILE
+    except Exception:
+        return ''
+
+
+def _safe_geoip_download_url():
+    try:
+        from app.constants import GEOLITE_DB_URL
+        return GEOLITE_DB_URL
+    except Exception:
+        return ''
+
+
+def _safe_geoip_db_dir():
+    try:
+        from app.constants import GEOLITE_DB_DIR
+        return GEOLITE_DB_DIR
+    except Exception:
+        return ''
+
+
+def _download_geoip_db():
+    global _geoip_download_inflight
+    url = _safe_geoip_download_url()
+    path = _safe_geoip_db_path()
+    if not url or not path:
+        return
+    tmp_path = f"{path}.tmp"
+    try:
+        db_dir = _safe_geoip_db_dir() or os.path.dirname(path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+        headers = {
+            'User-Agent': 'AeroFoil-GeoIP-Downloader'
+        }
+        with requests.get(url, timeout=30, stream=True, headers=headers) as resp:
+            resp.raise_for_status()
+            with open(tmp_path, 'wb') as handle:
+                for chunk in resp.iter_content(chunk_size=1024 * 256):
+                    if not chunk:
+                        continue
+                    handle.write(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+    finally:
+        with _geoip_download_lock:
+            _geoip_download_inflight = False
+
+
+def _schedule_geoip_download():
+    global _geoip_download_inflight
+    with _geoip_download_lock:
+        if _geoip_download_inflight:
+            return
+        _geoip_download_inflight = True
+    thread = threading.Thread(target=_download_geoip_db, daemon=True)
+    thread.start()
+
+
+def _load_geoip_db(db_path):
+    global _geoip_db, _geoip_db_error
+    if not db_path:
+        _geoip_db_error = 'GeoIP DB path not configured.'
+        return None
+    try:
+        import geoip2.database
+    except Exception:
+        _geoip_db_error = 'geoip2 not installed.'
+        return None
+    try:
+        if not os.path.isfile(db_path):
+            _geoip_db_error = f'Missing GeoIP database at {db_path}.'
+            _schedule_geoip_download()
+            return None
+        _geoip_db = geoip2.database.Reader(db_path)
+        _geoip_db_error = None
+        return _geoip_db
+    except Exception as e:
+        _geoip_db_error = str(e)
+        return None
+
+
+def _normalize_geoip_ip(ip_value):
+    try:
+        if not ip_value:
+            return ''
+        ip_obj = ipaddress.ip_address(str(ip_value).strip())
+        if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped is not None:
+            ip_obj = ip_obj.ipv4_mapped
+        return str(ip_obj)
+    except Exception:
+        return ''
+
+
+def lookup_geoip(ip_value):
+    """Lookup geo data for an IP using the local GeoLite2 database."""
+    global _geoip_db, _geoip_last_check
+    normalized = _normalize_geoip_ip(ip_value)
+    if not normalized:
+        return {}
+
+    with _geoip_lock:
+        now = time.time()
+        if _geoip_db is None or (now - float(_geoip_last_check)) >= _geoip_ttl_s:
+            _geoip_last_check = now
+            _load_geoip_db(_safe_geoip_db_path())
+        reader = _geoip_db
+
+    if reader is None:
+        return {}
+    try:
+        record = reader.city(normalized)
+    except Exception:
+        return {}
+
+    country = (record.country.names or {}).get('en') or ''
+    country_code = (record.country.iso_code or '') if record.country else ''
+    region = ''
+    if record.subdivisions and len(record.subdivisions) > 0:
+        region = (record.subdivisions[0].names or {}).get('en') or ''
+    city = (record.city.names or {}).get('en') or ''
+    latitude = None
+    longitude = None
+    try:
+        latitude = float(record.location.latitude) if record.location and record.location.latitude is not None else None
+        longitude = float(record.location.longitude) if record.location and record.location.longitude is not None else None
+    except Exception:
+        latitude = None
+        longitude = None
+
+    return {
+        'country': country,
+        'country_code': country_code,
+        'region': region,
+        'city': city,
+        'latitude': latitude,
+        'longitude': longitude,
+    }

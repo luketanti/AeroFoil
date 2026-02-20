@@ -27,7 +27,7 @@ from app.library import organize_library, delete_older_updates, delete_duplicate
 from app.db import *
 from app.shop import *
 from app.auth import *
-from app.auth import _effective_client_ip, _is_private_ip
+from app.auth import _effective_client_ip, _is_private_ip, _get_auth_protection_config, _is_permanently_blocked_ip
 from app import titles
 from app.utils import *
 from app.library import *
@@ -1698,6 +1698,46 @@ app = create_app()
 
 
 @app.before_request
+def _block_permanent_blacklist_requests():
+    try:
+        settings = {}
+        try:
+            settings = load_settings()
+        except Exception:
+            settings = {}
+        auth_config = _get_auth_protection_config(settings)
+        client_ip = _effective_client_ip(settings)
+        if _is_permanently_blocked_ip(client_ip, auth_config):
+            try:
+                geo = {}
+                try:
+                    geo = lookup_geoip(client_ip) or {}
+                except Exception:
+                    geo = {}
+                _log_access_dedup(
+                    kind='permanent_ip_blocked',
+                    dedupe_key=f"{client_ip}|{request.path}",
+                    ok=False,
+                    status_code=404,
+                    filename=request.path,
+                    remote_addr=client_ip,
+                    user_agent=request.headers.get('User-Agent'),
+                    country=geo.get('country'),
+                    country_code=geo.get('country_code'),
+                    region=geo.get('region'),
+                    city=geo.get('city'),
+                    latitude=geo.get('latitude'),
+                    longitude=geo.get('longitude'),
+                )
+            except Exception:
+                pass
+            return Response(status=404)
+    except Exception:
+        return None
+    return None
+
+
+@app.before_request
 def _block_frozen_web_ui():
     """Frozen accounts should only see the MOTD page in the web UI."""
     try:
@@ -1962,6 +2002,12 @@ def _log_access(
     user=None,
     remote_addr=None,
     user_agent=None,
+    country=None,
+    country_code=None,
+    region=None,
+    city=None,
+    latitude=None,
+    longitude=None,
 ):
     if has_request_context():
         if user is None:
@@ -1970,6 +2016,19 @@ def _log_access(
             remote_addr = _effective_remote_addr()
         if user_agent is None:
             user_agent = request.headers.get('User-Agent')
+        if country is None:
+            try:
+                from app.auth import _is_private_ip
+                if remote_addr and not _is_private_ip(remote_addr):
+                    geo = lookup_geoip(remote_addr) or {}
+                    country = geo.get('country')
+                    country_code = geo.get('country_code')
+                    region = geo.get('region')
+                    city = geo.get('city')
+                    latitude = geo.get('latitude')
+                    longitude = geo.get('longitude')
+            except Exception:
+                pass
 
     def _do_write():
         add_access_event(
@@ -1977,6 +2036,12 @@ def _log_access(
             user=user,
             remote_addr=remote_addr,
             user_agent=user_agent,
+            country=country,
+            country_code=country_code,
+            region=region,
+            city=city,
+            latitude=latitude,
+            longitude=longitude,
             title_id=title_id,
             file_id=file_id,
             filename=filename,
@@ -3163,6 +3228,38 @@ def admin_activity_api():
     clients = sorted(clients, key=lambda item: item.get('last_seen_at', 0), reverse=True)[:250]
     _attach_client_meta(clients)
 
+    geo_cache = {}
+    def _attach_geo(items):
+        for item in (items or []):
+            if not isinstance(item, dict):
+                continue
+            remote = (item.get('remote_addr') or '').strip()
+            if not remote:
+                continue
+            if _is_private_ip(remote):
+                continue
+            if item.get('country') or item.get('region') or item.get('city'):
+                continue
+            if remote in geo_cache:
+                geo = geo_cache[remote]
+            else:
+                try:
+                    geo = lookup_geoip(remote) or {}
+                except Exception:
+                    geo = {}
+                geo_cache[remote] = geo
+            if not geo:
+                continue
+            item['country'] = geo.get('country')
+            item['country_code'] = geo.get('country_code')
+            item['region'] = geo.get('region')
+            item['city'] = geo.get('city')
+            item['latitude'] = geo.get('latitude')
+            item['longitude'] = geo.get('longitude')
+
+    _attach_geo(live)
+    _attach_geo(clients)
+
     # Recent access events.
     history_error = None
     try:
@@ -3310,6 +3407,27 @@ def admin_access_history_clear_api():
         if not ok:
             return jsonify({'success': False, 'error': 'Failed to clear access history.'}), 500
         return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.post('/api/admin/blacklist-ip')
+@access_required('admin')
+def admin_blacklist_ip_api():
+    data = request.json or {}
+    ip_value = str(data.get('ip') or '').strip()
+    if not ip_value:
+        return jsonify({'success': False, 'error': 'Missing IP.'}), 400
+    try:
+        settings = load_settings(force_reload=True)
+        security = settings.get('security') or {}
+        existing = security.get('auth_permanent_ip_blacklist') or []
+        entries = [str(item).strip() for item in existing if str(item).strip()]
+        if ip_value not in entries:
+            entries.append(ip_value)
+        set_security_settings({'auth_permanent_ip_blacklist': entries})
+        reload_conf()
+        return jsonify({'success': True, 'blacklist': entries})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 

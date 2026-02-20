@@ -31,6 +31,14 @@ def get_alembic_cfg():
     cfg.set_main_option("script_location", ALEMBIC_DIR)
     return cfg
 
+def get_alembic_heads():
+    alembic_cfg = get_alembic_cfg()
+    script = ScriptDirectory.from_config(alembic_cfg)
+    try:
+        return script.get_heads()
+    except Exception:
+        return []
+
 def get_current_db_version():
     engine = create_engine(AEROFOIL_DB)
     with engine.connect() as connection:
@@ -49,14 +57,27 @@ def create_db_backup():
 def is_migration_needed():
     alembic_cfg = get_alembic_cfg()
     script = ScriptDirectory.from_config(alembic_cfg)
-    latest_revision = script.get_current_head()
     current_revision = get_current_db_version()
-    if current_revision != latest_revision:
-        logger.info(f'Database migration needed, from {current_revision} to {latest_revision}')
-        return True
-    else:
-        logger.info(f"Database version is up to date ({current_revision})")
+    heads = []
+    latest_revision = None
+    try:
+        latest_revision = script.get_current_head()
+        heads = [latest_revision] if latest_revision else []
+    except Exception:
+        heads = get_alembic_heads()
+        if len(heads) > 1:
+            logger.warning("Multiple alembic heads detected: %s", ", ".join(heads))
+
+    if not heads:
+        logger.info("Database version is up to date (%s)", current_revision)
         return False
+
+    if current_revision not in heads:
+        logger.info("Database migration needed, from %s to %s", current_revision, ", ".join(heads))
+        return True
+
+    logger.info("Database version is up to date (%s)", current_revision)
+    return False
 
 def to_dict(db_results):
     return {c.name: getattr(db_results, c.name) for c in db_results.__table__.columns}
@@ -207,6 +228,12 @@ class AccessEvents(db.Model):
     user = db.Column(db.String)
     remote_addr = db.Column(db.String)
     user_agent = db.Column(db.String)
+    country = db.Column(db.String)
+    country_code = db.Column(db.String)
+    region = db.Column(db.String)
+    city = db.Column(db.String)
+    latitude = db.Column(db.Float)
+    longitude = db.Column(db.Float)
     title_id = db.Column(db.String)
     file_id = db.Column(db.Integer)
     filename = db.Column(db.String)
@@ -321,6 +348,12 @@ def add_access_event(
     user=None,
     remote_addr=None,
     user_agent=None,
+    country=None,
+    country_code=None,
+    region=None,
+    city=None,
+    latitude=None,
+    longitude=None,
     title_id=None,
     file_id=None,
     filename=None,
@@ -336,6 +369,12 @@ def add_access_event(
             'user': user,
             'remote_addr': remote_addr,
             'user_agent': user_agent,
+            'country': country,
+            'country_code': country_code,
+            'region': region,
+            'city': city,
+            'latitude': latitude,
+            'longitude': longitude,
             'title_id': title_id,
             'file_id': file_id,
             'filename': filename,
@@ -381,6 +420,12 @@ def get_access_events(limit=100, kind=None, kinds=None):
             'user': e.user,
             'remote_addr': e.remote_addr,
             'user_agent': e.user_agent,
+            'country': e.country,
+            'country_code': e.country_code,
+            'region': e.region,
+            'city': e.city,
+            'latitude': e.latitude,
+            'longitude': e.longitude,
             'title_id': e.title_id,
             'file_id': e.file_id,
             'filename': e.filename,
@@ -488,6 +533,45 @@ def ensure_performance_schema():
         logger.warning("Failed to apply performance schema optimizations: %s", e)
 
 
+def ensure_access_events_geo_schema():
+    try:
+        if db.engine.dialect.name != 'sqlite':
+            return
+    except Exception:
+        return
+
+    try:
+        result = db.session.execute(text("PRAGMA table_info(access_events)"))
+        existing = {row[1] for row in result if row and len(row) > 1}
+    except Exception as e:
+        logger.warning("Failed to read access_events schema: %s", e)
+        return
+
+    columns = [
+        ('country', 'TEXT'),
+        ('country_code', 'TEXT'),
+        ('region', 'TEXT'),
+        ('city', 'TEXT'),
+        ('latitude', 'REAL'),
+        ('longitude', 'REAL'),
+    ]
+
+    try:
+        added = False
+        for name, col_type in columns:
+            if name in existing:
+                continue
+            ddl = f"ALTER TABLE access_events ADD COLUMN {name} {col_type}"
+            db.session.execute(text(ddl))
+            added = True
+        if added:
+            db.session.commit()
+            logger.info("Added missing geo columns to access_events.")
+    except Exception as e:
+        db.session.rollback()
+        logger.warning("Failed to apply access_events geo schema: %s", e)
+
+
 def init_db(app):
     with app.app_context():
         # Ensure foreign keys are enforced when the SQLite connection is opened
@@ -507,9 +591,10 @@ def init_db(app):
                 logger.info('Checking database migration...')
                 if is_migration_needed():
                     create_db_backup()
-                    upgrade()
+                    command.upgrade(get_alembic_cfg(), "head")
                     logger.info("Database migration applied successfully.")
             ensure_performance_schema()
+            ensure_access_events_geo_schema()
 
 def file_exists_in_db(filepath):
     return Files.query.filter_by(filepath=filepath).first() is not None

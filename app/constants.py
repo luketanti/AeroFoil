@@ -32,6 +32,10 @@ TITLEDB_DEFAULT_FILES = [
     'languages.json',
 ]
 
+GEOLITE_DB_DIR = os.path.join(DATA_DIR, 'geoip')
+GEOLITE_DB_FILE = os.path.join(GEOLITE_DB_DIR, 'GeoLite2-City.mmdb')
+GEOLITE_DB_URL = 'https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-City.mmdb'
+
 APP_VERSION = os.environ.get('AEROFOIL_VERSION') or os.environ.get('OWNFOIL_VERSION') or os.environ.get('APP_VERSION') or 'dev'
 
 AEROFOIL_DB = 'sqlite:///' + DB_FILE

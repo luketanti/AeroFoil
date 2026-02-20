@@ -234,7 +234,7 @@
     }
 
     th.sortable::after {
-        content: "\\2195";
+        content: "\2195";
         position: absolute;
         right: 0.2rem;
         top: 50%;
@@ -244,12 +244,12 @@
     }
 
     th.sortable.sorted-asc::after {
-        content: "\\2191";
+        content: "\2191";
         color: var(--activity-accent);
     }
 
     th.sortable.sorted-desc::after {
-        content: "\\2193";
+        content: "\2193";
         color: var(--activity-accent);
     }
 
@@ -284,6 +284,24 @@
     .mono-value {
         font-family: Consolas, "Courier New", monospace;
         font-size: 0.73rem;
+    }
+
+    .location-cell {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+    }
+
+    .flag-icon {
+        width: 16px;
+        height: 12px;
+        border-radius: 2px;
+        box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12);
+        flex-shrink: 0;
+    }
+
+    .blacklist-ip-btn {
+        white-space: nowrap;
     }
 
     .table-muted-empty {
@@ -412,6 +430,7 @@
                 <a class="nav-link active" href="#" data-section="overview"><i class="bi bi-grid-1x2"></i>Overview</a>
                 <a class="nav-link" href="#" data-section="realtime"><i class="bi bi-activity"></i>Realtime</a>
                 <a class="nav-link" href="#" data-section="access"><i class="bi bi-clock-history"></i>Access History</a>
+                <a class="nav-link" href="#" data-section="blocked"><i class="bi bi-slash-circle"></i>Blocked IPs</a>
                 <a class="nav-link" href="#" data-section="clients"><i class="bi bi-phone"></i>Client History</a>
                 <a class="nav-link" href="#" data-section="lockouts"><i class="bi bi-shield-lock"></i>Lockouts</a>
             </nav>
@@ -514,13 +533,14 @@
                                                         <th scope="col">Started</th>
                                                         <th scope="col">User</th>
                                                         <th scope="col">Remote</th>
+                                                        <th scope="col">Location</th>
                                                         <th scope="col">Title</th>
                                                         <th scope="col">File</th>
                                                         <th scope="col">Sent</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody id="liveTransfersBody">
-                                                    <tr><td colspan="6" class="table-muted-empty">Loading...</td></tr>
+                                                    <tr><td colspan="7" class="table-muted-empty">Loading...</td></tr>
                                                 </tbody>
                                             </table>
                                         </div>
@@ -542,12 +562,13 @@
                                                         <th scope="col">Last seen</th>
                                                         <th scope="col">User</th>
                                                         <th scope="col">Remote</th>
+                                                        <th scope="col">Location</th>
                                                         <th scope="col">User-Agent</th>
                                                         <th scope="col">Client details</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody id="connectedClientsBody">
-                                                    <tr><td colspan="5" class="table-muted-empty">Loading...</td></tr>
+                                                    <tr><td colspan="6" class="table-muted-empty">Loading...</td></tr>
                                                 </tbody>
                                             </table>
                                         </div>
@@ -604,6 +625,7 @@
                                                 <th scope="col" class="sortable" data-sort-key="kind">Kind</th>
                                                 <th scope="col" class="sortable" data-sort-key="user">User</th>
                                                 <th scope="col" class="sortable" data-sort-key="remote_addr">Remote</th>
+                                                <th scope="col" class="sortable" data-sort-key="country">Location</th>
                                                 <th scope="col" class="sortable" data-sort-key="title_id">Title</th>
                                                 <th scope="col" class="sortable" data-sort-key="filename">File</th>
                                                 <th scope="col" class="sortable" data-sort-key="bytes_sent">Bytes</th>
@@ -611,7 +633,7 @@
                                             </tr>
                                         </thead>
                                         <tbody id="accessHistoryBody">
-                                            <tr><td colspan="8" class="table-muted-empty">Loading...</td></tr>
+                                            <tr><td colspan="9" class="table-muted-empty">Loading...</td></tr>
                                         </tbody>
                                     </table>
                                 </div>
@@ -659,12 +681,14 @@
                                                 <th scope="col">When</th>
                                                 <th scope="col">User</th>
                                                 <th scope="col">Remote</th>
+                                                <th scope="col">Location</th>
                                                 <th scope="col">User-Agent</th>
                                                 <th scope="col">Client details</th>
+                                                <th scope="col"></th>
                                             </tr>
                                         </thead>
                                         <tbody id="clientsHistoryBody">
-                                            <tr><td colspan="5" class="table-muted-empty">Loading...</td></tr>
+                                            <tr><td colspan="7" class="table-muted-empty">Loading...</td></tr>
                                         </tbody>
                                     </table>
                                 </div>
@@ -673,6 +697,54 @@
                     </section>
                 </div>
 
+                <div class="activity-section-pane d-none" id="section-blocked" data-section="blocked">
+                    <section class="activity-section">
+                        <div class="activity-section-head">
+                            <div>
+                                <h5 class="mb-0">Blocked IPs</h5>
+                                <div class="activity-section-subtitle">Requests blocked by the permanent IP blacklist</div>
+                            </div>
+                        </div>
+
+                        <div class="card activity-card">
+                            <div class="card-body">
+                                <div class="activity-toolbar">
+                                    <div>
+                                        <h6 class="card-title mb-0">Blocked requests <span class="badge text-bg-secondary ms-1" id="blockedIpsCount">0</span></h6>
+                                        <div class="activity-section-subtitle">404 responses returned for blacklisted IPs</div>
+                                    </div>
+                                    <div class="activity-toolbar-group">
+                                        <input
+                                            id="blockedIpsSearch"
+                                            class="form-control form-control-sm"
+                                            style="width: 260px;"
+                                            placeholder="Search by IP, path, UA"
+                                            autocomplete="off"
+                                        />
+                                    </div>
+                                </div>
+                                <div class="table-responsive mt-3 activity-scroll-full">
+                                    <table class="table table-sm table-striped align-middle activity-table">
+                                        <thead>
+                                            <tr>
+                                                <th scope="col">When</th>
+                                                <th scope="col">Remote</th>
+                                                <th scope="col">Location</th>
+                                                <th scope="col">Path</th>
+                                                <th scope="col">User-Agent</th>
+                                                <th scope="col">Status</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="blockedIpsBody">
+                                            <tr><td colspan="6" class="table-muted-empty">Loading...</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+                
                 <div class="activity-section-pane d-none" id="section-lockouts" data-section="lockouts">
                     <section class="activity-section">
                         <div class="activity-section-head">
@@ -831,7 +903,7 @@
     }
 
     function showActivitySection(sectionName) {
-        const section = ['overview', 'realtime', 'access', 'clients', 'lockouts'].includes(String(sectionName))
+        const section = ['overview', 'realtime', 'access', 'blocked', 'clients', 'lockouts'].includes(String(sectionName))
             ? String(sectionName)
             : 'overview';
         $('.activity-section-pane').addClass('d-none');
@@ -863,17 +935,31 @@
         setText('kpiLiveTransfers', list.length);
 
         if (!list.length) {
-            body.html('<tr><td colspan="6" class="table-muted-empty">No active transfers.</td></tr>');
+            body.html('<tr><td colspan="7" class="table-muted-empty">No active transfers.</td></tr>');
             return;
         }
 
         body.empty();
         list.forEach(item => {
+            const locParts = [];
+            if (item.city) {
+                locParts.push(item.city);
+            }
+            if (item.region) {
+                locParts.push(item.region);
+            }
+            if (item.country) {
+                locParts.push(item.country);
+            }
+            const locationLabel = locParts.length ? locParts.join(', ') : '-';
+            const countryCode = String(item.country_code || '').trim().toLowerCase();
+            const flagIcon = countryCode ? `<img src="https://cdn.jsdelivr.net/npm/flag-icons@7.2.3/flags/4x3/${countryCode}.svg" alt="" class="flag-icon" loading="lazy" />` : '';
             const row = $(
                 `<tr>
                     <td>${escapeHtml(formatTime(item.started_at))}</td>
                     <td>${escapeHtml(item.user || '-')}</td>
                     <td>${escapeHtml(item.remote_addr || '-')}</td>
+                    <td><span class="location-cell">${flagIcon}${escapeHtml(locationLabel)}</span></td>
                     <td>${escapeHtml(item.title_id || '-')}${item.title_name ? ` <span class="text-muted">(${escapeHtml(item.title_name)})</span>` : ''}</td>
                     <td class="text-truncate" style="max-width: 300px;">${escapeHtml(item.filename || '-') }</td>
                     <td>${escapeHtml(formatBytes(item.bytes_sent))}</td>
@@ -888,6 +974,7 @@
     let accessHistorySortKey = 'at';
     let accessHistorySortDir = 'desc';
     let accessHistoryQuery = '';
+    let blockedIpsQuery = '';
 
     function formatIsoTime(tsSeconds) {
         if (!tsSeconds) {
@@ -935,6 +1022,11 @@
                     item.kind,
                     item.user,
                     item.remote_addr,
+                    item.country,
+                    item.region,
+                    item.city,
+                    item.latitude,
+                    item.longitude,
                     item.title_id,
                     item.title_name,
                     item.filename,
@@ -1013,17 +1105,31 @@
         setText('kpiConnectedClients', list.length);
 
         if (!list.length) {
-            body.html('<tr><td colspan="5" class="table-muted-empty">No recent clients.</td></tr>');
+            body.html('<tr><td colspan="6" class="table-muted-empty">No recent clients.</td></tr>');
             return;
         }
 
         body.empty();
         list.forEach(item => {
+            const locParts = [];
+            if (item.city) {
+                locParts.push(item.city);
+            }
+            if (item.region) {
+                locParts.push(item.region);
+            }
+            if (item.country) {
+                locParts.push(item.country);
+            }
+            const locationLabel = locParts.length ? locParts.join(', ') : '-';
+            const countryCode = String(item.country_code || '').trim().toLowerCase();
+            const flagIcon = countryCode ? `<img src="https://cdn.jsdelivr.net/npm/flag-icons@7.2.3/flags/4x3/${countryCode}.svg" alt="" class="flag-icon" loading="lazy" />` : '';
             const row = $(
                 `<tr>
                     <td>${escapeHtml(formatTime(item.last_seen_at))}</td>
                     <td>${escapeHtml(item.user || '-')}</td>
                     <td>${escapeHtml(item.remote_addr || '-')}</td>
+                    <td><span class="location-cell">${flagIcon}${escapeHtml(locationLabel)}</span></td>
                     <td class="text-truncate" style="max-width: 520px;">${escapeHtml(item.user_agent || '-')}</td>
                     <td style="min-width: 280px;">${renderClientDetails(item)}</td>
                 </tr>`
@@ -1058,11 +1164,24 @@
             const msg = (accessHistoryQuery || '').trim()
                 ? 'No history rows match your search.'
                 : 'No history yet.';
-            body.html(`<tr><td colspan="8" class="table-muted-empty">${escapeHtml(msg)}</td></tr>`);
+            body.html(`<tr><td colspan="9" class="table-muted-empty">${escapeHtml(msg)}</td></tr>`);
             return;
         }
         body.empty();
         list.forEach(item => {
+            const locParts = [];
+            if (item.city) {
+                locParts.push(item.city);
+            }
+            if (item.region) {
+                locParts.push(item.region);
+            }
+            if (item.country) {
+                locParts.push(item.country);
+            }
+            const locationLabel = locParts.length ? locParts.join(', ') : '-';
+            const countryCode = String(item.country_code || '').trim().toLowerCase();
+            const flagIcon = countryCode ? `<img src="https://cdn.jsdelivr.net/npm/flag-icons@7.2.3/flags/4x3/${countryCode}.svg" alt="" class="flag-icon" loading="lazy" />` : '';
             const statusText = item.ok === true ? 'OK' : (item.ok === false ? 'Fail' : '-');
             const statusClass = item.ok === true
                 ? 'text-bg-success'
@@ -1078,6 +1197,7 @@
                     <td><span class="badge kind-badge ${kindBadgeClass(item.kind)}">${escapeHtml(item.kind || '-')}</span></td>
                     <td>${escapeHtml(item.user || '-')}</td>
                     <td>${escapeHtml(item.remote_addr || '-')}</td>
+                    <td><span class="location-cell">${flagIcon}${escapeHtml(locationLabel)}</span></td>
                     <td>${escapeHtml(item.title_id || '-')}${item.title_name ? ` <span class="text-muted">(${escapeHtml(item.title_name)})</span>` : ''}</td>
                     <td class="text-truncate" style="max-width: 420px;">${escapeHtml(item.filename || '-') }</td>
                     <td>${escapeHtml(bytesLabel)}</td>
@@ -1094,23 +1214,104 @@
         setText('clientHistoryCount', list.length);
         setText('kpiClientHistoryRows', list.length);
         if (!list.length) {
-            body.html('<tr><td colspan="5" class="table-muted-empty">No client history yet.</td></tr>');
+            body.html('<tr><td colspan="7" class="table-muted-empty">No client history yet.</td></tr>');
             return;
         }
 
         body.empty();
         list.forEach(item => {
+            const locParts = [];
+            if (item.city) {
+                locParts.push(item.city);
+            }
+            if (item.region) {
+                locParts.push(item.region);
+            }
+            if (item.country) {
+                locParts.push(item.country);
+            }
+            const locationLabel = locParts.length ? locParts.join(', ') : '-';
+            const countryCode = String(item.country_code || '').trim().toLowerCase();
+            const flagIcon = countryCode ? `<img src="https://cdn.jsdelivr.net/npm/flag-icons@7.2.3/flags/4x3/${countryCode}.svg" alt="" class="flag-icon" loading="lazy" />` : '';
             const row = $(
                 `<tr>
                     <td>${escapeHtml(formatTime(item.at))}</td>
                     <td>${escapeHtml(item.user || '-')}</td>
                     <td>${escapeHtml(item.remote_addr || '-')}</td>
+                    <td><span class="location-cell">${flagIcon}${escapeHtml(locationLabel)}</span></td>
                     <td class="text-truncate" style="max-width: 520px;">${escapeHtml(item.user_agent || '-')}</td>
                     <td style="min-width: 280px;">${renderClientDetails(item)}</td>
+                    <td class="text-end"><button type="button" class="btn btn-outline-danger btn-sm blacklist-ip-btn" data-ip="${escapeHtml(item.remote_addr || '')}"><i class="bi bi-shield-slash"></i> Block</button></td>
                 </tr>`
             );
             body.append(row);
         });
+    }
+
+    function renderBlockedIps(items) {
+        const body = $('#blockedIpsBody');
+        const list = Array.isArray(items) ? items : [];
+        setText('blockedIpsCount', list.length);
+        if (!list.length) {
+            const msg = (blockedIpsQuery || '').trim()
+                ? 'No blocked requests match your search.'
+                : 'No blocked requests yet.';
+            body.html(`<tr><td colspan="6" class="table-muted-empty">${escapeHtml(msg)}</td></tr>`);
+            return;
+        }
+
+        body.empty();
+        list.forEach(item => {
+            const locParts = [];
+            if (item.city) {
+                locParts.push(item.city);
+            }
+            if (item.region) {
+                locParts.push(item.region);
+            }
+            if (item.country) {
+                locParts.push(item.country);
+            }
+            const locationLabel = locParts.length ? locParts.join(', ') : '-';
+            const countryCode = String(item.country_code || '').trim().toLowerCase();
+            const flagIcon = countryCode ? `<img src="https://cdn.jsdelivr.net/npm/flag-icons@7.2.3/flags/4x3/${countryCode}.svg" alt="" class="flag-icon" loading="lazy" />` : '';
+            const statusLabel = item.status_code ? ` ${escapeHtml(item.status_code)}` : '';
+            const row = $(
+                `<tr>
+                    <td>${escapeHtml(formatTime(item.at))}</td>
+                    <td>${escapeHtml(item.remote_addr || '-')}</td>
+                    <td><span class="location-cell">${flagIcon}${escapeHtml(locationLabel)}</span></td>
+                    <td class="text-truncate" style="max-width: 420px;">${escapeHtml(item.filename || '-')}</td>
+                    <td class="text-truncate" style="max-width: 520px;">${escapeHtml(item.user_agent || '-')}</td>
+                    <td><span class="badge text-bg-danger">Blocked${statusLabel}</span></td>
+                </tr>`
+            );
+            body.append(row);
+        });
+    }
+
+    function applyBlockedIpsView() {
+        const q = (blockedIpsQuery || '').trim().toLowerCase();
+        let list = Array.isArray(accessHistoryAll) ? accessHistoryAll.slice() : [];
+        list = list.filter(item => String(item?.kind || '') === 'permanent_ip_blocked');
+        if (q) {
+            list = list.filter(item => {
+                const hay = [
+                    item.at,
+                    item.remote_addr,
+                    item.country,
+                    item.region,
+                    item.city,
+                    item.latitude,
+                    item.longitude,
+                    item.filename,
+                    item.user_agent,
+                    item.status_code,
+                ].map(v => String(v ?? '')).join(' ').toLowerCase();
+                return hay.includes(q);
+            });
+        }
+        renderBlockedIps(list);
     }
 
     function formatDurationSeconds(totalSeconds) {
@@ -1198,6 +1399,29 @@
         });
     }
 
+    function blockIpFromClientHistory(ip) {
+        const trimmed = String(ip || '').trim();
+        if (!trimmed) {
+            return;
+        }
+        $.ajax({
+            url: '/api/admin/blacklist-ip',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ ip: trimmed }),
+        }).done(function (resp) {
+            if (!resp || !resp.success) {
+                const msg = (resp && resp.error) ? resp.error : 'Failed to add IP to blacklist.';
+                showError(msg);
+                return;
+            }
+            showToast(`Blacklisted ${trimmed}`, 'success');
+        }).fail(function (xhr) {
+            const msg = xhr?.responseJSON?.error || 'Failed to add IP to blacklist.';
+            showError(msg);
+        });
+    }
+
     function unlockAuthLockout(ip) {
         const value = String(ip || '').trim();
         if (!value) {
@@ -1271,6 +1495,7 @@
             renderConnectedClients(result.connected_clients);
             accessHistoryAll = Array.isArray(result.access_history) ? result.access_history : [];
             applyAccessHistoryView();
+            applyBlockedIpsView();
             lastActivityRefreshAt = Date.now();
             updateLastRefreshLabel();
         }).fail(function () {
@@ -1293,6 +1518,22 @@
         $('#activityNav .nav-link').on('click', function (e) {
             e.preventDefault();
             showActivitySection($(this).data('section'));
+        });
+
+        $('#blockedIpsSearch').on('input', function () {
+            blockedIpsQuery = String($(this).val() || '');
+            applyBlockedIpsView();
+        });
+
+        $('#clientsHistoryBody').on('click', '.blacklist-ip-btn', function () {
+            const ip = $(this).data('ip');
+            if (!ip) {
+                return;
+            }
+            if (!confirm(`Add ${ip} to the permanent blacklist?`)) {
+                return;
+            }
+            blockIpFromClientHistory(ip);
         });
 
         $('#activitySidebarToggle, #activitySidebarToggleMobile').on('click', function (e) {
