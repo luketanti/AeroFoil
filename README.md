@@ -7,13 +7,13 @@
 [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?logo=discord&logoColor=white)](https://discord.gg/gGy7hWxJeP)
 
 
-AeroFoil is a Nintendo Switch library manager that turns your library into a fully customizable, self-hosted Tinfoil Shop. The goal of this project is to manage your library, identify any missing content (DLCs or updates) and provide a user friendly way to browse your content. Some of the features include:
+AeroFoil is a Personal library manager that turns your library into a fully customizable, self-hosted Shop. The goal of this project is to manage your library, identify any missing content (DLCs or updates) and provide a user friendly way to browse your content. Some of the features include:
 
  - multi user authentication
  - web interface for configuration
  - web interface for browsing the library
- - content identification using decryption or filename
- - Tinfoil shop customization
+ - content identification
+ - shop customization
 
 The project is still in development, expect things to break or change without notice.
 
@@ -242,15 +242,11 @@ Planned feature, in no particular order.
     - [x] Automatic nsp/xci -> nsz conversion
  - Shop customization:
     - [x] Encrypt shop
- - Support emulator Roms
-    - [ ] Scrape box arts
-    - [ ] Automatically create NSP forwarders
  - Saves manager:
     - [ ] Automatically discover Switch device based on Tinfoil connection
     - [x] Per-user save backup storage and access control (Backup flag required)
     - [x] Multiple backup versions per title (timestamp + note)
     - [x] Download/delete save backups from both CyberFoil and AeroFoil web UI
-    - [ ] Only backup and serve saves based on the user/Switch pair
  - External services:
     - [x] Prowlarr integration for automatic update downloads (via torrent client)
     - [x] Automated update downloader pipeline (search -> download -> ingest)
