@@ -186,11 +186,19 @@
                     renderUploadList([]);
                     updateUploadActions();
                 } else {
-                    $('#uploadStatus').text(result['message'] || 'Upload failed.');
+                    const errorText = result?.message || (result?.errors || []).join(' ') || 'Upload failed.';
+                    $('#uploadStatus').text(errorText);
                 }
             },
-            error: function () {
-                $('#uploadStatus').text('Upload failed.');
+            error: function (xhr) {
+                const responseJson = xhr?.responseJSON;
+                const responseText = typeof xhr?.responseText === 'string' ? xhr.responseText : '';
+                const firstLine = responseText ? responseText.split('\n')[0].trim() : '';
+                const message = responseJson?.message
+                    || (responseJson?.errors || []).join(' ')
+                    || firstLine
+                    || `Upload failed (HTTP ${xhr?.status || 'unknown'}).`;
+                $('#uploadStatus').text(message);
             },
             complete: function () {
                 updateUploadActions();

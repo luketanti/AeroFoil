@@ -10,6 +10,7 @@ from flask import Flask, render_template, request, redirect, url_for, jsonify, s
 from flask_login import LoginManager, current_user
 from werkzeug.utils import secure_filename
 from werkzeug.security import check_password_hash
+from werkzeug.exceptions import RequestEntityTooLarge
 from sqlalchemy import func, and_, or_, case, literal
 from app.scheduler import init_scheduler
 from functools import wraps
@@ -1695,6 +1696,14 @@ def create_app():
 
 # Create app
 app = create_app()
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def handle_request_entity_too_large(_error):
+    return api_error(
+        f"Upload too large. Maximum allowed is {MAX_LIBRARY_UPLOAD_SIZE // (1024 * 1024 * 1024)}GB per file.",
+        413
+    )
 
 
 @app.before_request
@@ -4429,9 +4438,20 @@ def upload_file():
 @app.post('/api/upload/library')
 @access_required('admin')
 def upload_library_files():
-    files = request.files.getlist('files')
+    try:
+        files = request.files.getlist('files')
+    except Exception as e:
+        logger.error("Failed to parse upload request: %s", e)
+        return jsonify({
+            'success': False,
+            'message': 'Unable to parse upload request.',
+            'uploaded': 0,
+            'skipped': 0,
+            'errors': [str(e)]
+        }), 400
+
     if not files:
-        return jsonify({'success': False, 'message': 'No files uploaded.', 'uploaded': 0, 'skipped': 0, 'errors': []})
+        return jsonify({'success': False, 'message': 'No files uploaded.', 'uploaded': 0, 'skipped': 0, 'errors': []}), 400
 
     library_id = request.form.get('library_id')
     library_path = None
@@ -4442,9 +4462,20 @@ def upload_library_files():
         library_path = library_paths[0] if library_paths else None
 
     if not library_path:
-        return jsonify({'success': False, 'message': 'No library path configured.', 'uploaded': 0, 'skipped': 0, 'errors': []})
+        return jsonify({'success': False, 'message': 'No library path configured.', 'uploaded': 0, 'skipped': 0, 'errors': []}), 400
 
-    os.makedirs(library_path, exist_ok=True)
+    try:
+        os.makedirs(library_path, exist_ok=True)
+    except Exception as e:
+        logger.error("Unable to create/access library path %s: %s", library_path, e)
+        return jsonify({
+            'success': False,
+            'message': f'Cannot access library path: {library_path}',
+            'uploaded': 0,
+            'skipped': len(files),
+            'errors': [str(e)]
+        }), 500
+
     allowed_exts = {'nsp', 'nsz', 'xci', 'xcz'}
     uploaded = 0
     skipped = 0
@@ -4454,6 +4485,7 @@ def upload_library_files():
     for file in files:
         filename = secure_filename(file.filename or '')
         if not filename:
+            errors.append("A file has an invalid or empty filename.")
             skipped += 1
             continue
         
@@ -4469,6 +4501,7 @@ def upload_library_files():
         
         ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
         if ext not in allowed_exts:
+            errors.append(f"{filename}: unsupported extension '{ext or 'none'}'.")
             skipped += 1
             continue
         dest_path = _ensure_unique_path(os.path.join(library_path, filename))
@@ -4477,6 +4510,7 @@ def upload_library_files():
             uploaded += 1
             saved_paths.append(dest_path)
         except Exception as e:
+            logger.error("Failed to save uploaded file %s to %s: %s", filename, library_path, e)
             errors.append(str(e))
 
     if uploaded:
@@ -4484,12 +4518,27 @@ def upload_library_files():
         enqueue_organize_paths(saved_paths)
         post_library_change()
 
+    success = uploaded > 0
+    message = None
+    if success:
+        message = f"Uploaded {uploaded} file(s)."
+        if skipped:
+            message += f" Skipped {skipped}."
+    else:
+        if errors:
+            message = errors[0]
+        elif skipped:
+            message = "All selected files were skipped."
+        else:
+            message = "Upload failed."
+
     return jsonify({
-        'success': uploaded > 0,
+        'success': success,
+        'message': message,
         'uploaded': uploaded,
         'skipped': skipped,
         'errors': errors
-    })
+    }), (200 if success else 400)
 
 
 @app.get('/api/saves/list')
