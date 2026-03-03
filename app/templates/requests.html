@@ -293,17 +293,33 @@
     statusEl.textContent = `Found ${results.length} results.`;
     results.forEach(item => {
       const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${escapeHtml(item.title || '-')}</td>
-        <td>${formatBytes(item.size)}</td>
-        <td>${escapeHtml(String(item.seeders ?? '-'))}</td>
-        <td>${escapeHtml(String(item.leechers ?? '-'))}</td>
-        <td>
-          <button class="btn btn-sm btn-warning queue-torrent-btn" data-download-url="${escapeHtml(item.download_url || '')}" data-title="${escapeHtml(item.title || '')}">
-            Queue
-          </button>
-        </td>
-      `;
+
+      const titleCell = document.createElement('td');
+      titleCell.textContent = item.title || '-';
+      tr.appendChild(titleCell);
+
+      const sizeCell = document.createElement('td');
+      sizeCell.textContent = formatBytes(item.size);
+      tr.appendChild(sizeCell);
+
+      const seedersCell = document.createElement('td');
+      seedersCell.textContent = String(item.seeders ?? '-');
+      tr.appendChild(seedersCell);
+
+      const leechersCell = document.createElement('td');
+      leechersCell.textContent = String(item.leechers ?? '-');
+      tr.appendChild(leechersCell);
+
+      const actionCell = document.createElement('td');
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'btn btn-sm btn-warning queue-torrent-btn';
+      button.textContent = 'Queue';
+      button.dataset.downloadUrl = String(item.download_url || '');
+      button.dataset.title = String(item.title || '');
+      actionCell.appendChild(button);
+      tr.appendChild(actionCell);
+
       bodyEl.appendChild(tr);
     });
   }

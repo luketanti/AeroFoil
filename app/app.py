@@ -18,6 +18,7 @@ from app.file_watcher import Watcher
 import threading
 import logging
 import copy
+import hashlib
 import flask.cli
 from datetime import timedelta, datetime
 flask.cli.show_server_banner = lambda *args: None
@@ -4003,13 +4004,22 @@ def downloads_search():
 @access_required('admin')
 def downloads_queue():
     data = request.json or {}
-    download_url = data.get('download_url')
+    download_url = str(data.get('download_url') or '')
     expected_name = data.get('title')
     title_id = data.get('title_id')
     update_only = bool(data.get('update_only', False))
     expected_version = data.get('expected_version')
     if not download_url:
         return jsonify({'success': False, 'message': 'Missing download URL.'})
+    url_digest = hashlib.sha256(download_url.encode('utf-8', errors='ignore')).hexdigest()[:12]
+    logger.debug(
+        'Queue download request: url_len=%s url_sha12=%s is_magnet=%s title_id=%s update_only=%s',
+        len(download_url),
+        url_digest,
+        download_url.lower().startswith('magnet:?'),
+        title_id,
+        update_only,
+    )
     ok, message = queue_download_url(
         download_url,
         expected_name=expected_name,
