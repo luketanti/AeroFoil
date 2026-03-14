@@ -811,6 +811,9 @@ def _check_completed(downloads, scan_cb=None, post_cb=None):
                 item_id = item.get("id") or item.get("hash")
                 if item_id and item_id in bucket["matched_ids"]:
                     continue
+                if protocol == "torrent":
+                    unmatched_count += 1
+                    continue
                 moved_item_paths = _coerce_moved_paths(_adopt_untracked_completed_item(item))
                 if moved_item_paths:
                     matched_id = item.get("id") or item.get("hash")

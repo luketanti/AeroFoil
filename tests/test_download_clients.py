@@ -636,6 +636,45 @@ class CompletedAdoptionTests(unittest.TestCase):
         enqueue_paths_mock.assert_called_once_with(["X:\\fixture-root\\Example Release NSW-GRP"])
         enqueue_cleanup_roots_mock.assert_called_once_with(["X:\\fixture-root\\Example Release NSW-GRP"])
 
+    @patch("app.downloads.manager.enqueue_organize_paths")
+    @patch("app.downloads.manager.enqueue_cleanup_roots")
+    @patch("app.downloads.manager.remove_completed_download", return_value=(True, "ok"))
+    @patch("app.downloads.manager._move_completed")
+    @patch("app.downloads.manager.list_completed_downloads")
+    @patch("app.downloads.manager._get_completed_poll_targets")
+    @patch("app.downloads.manager._state_lock")
+    @patch("app.downloads.manager._state", {
+        "running": False,
+        "last_run": 0.0,
+        "pending": {},
+        "completed": set(),
+    })
+    def test_check_completed_does_not_adopt_untracked_torrent_items(
+        self,
+        _state_lock_mock,
+        poll_targets_mock,
+        list_completed_mock,
+        move_completed_mock,
+        remove_completed_mock,
+        enqueue_cleanup_roots_mock,
+        enqueue_paths_mock,
+    ):
+        poll_targets_mock.return_value = [("torrent", {"type": "qbittorrent"})]
+        list_completed_mock.return_value = [{
+            "hash": "torrent-123",
+            "name": "Unrelated Existing Torrent",
+            "path": "X:\\fixture-root\\incoming\\Unrelated Existing Torrent",
+            "protocol": "torrent",
+            "client_type": "qbittorrent",
+        }]
+
+        _check_completed({})
+
+        move_completed_mock.assert_not_called()
+        remove_completed_mock.assert_not_called()
+        enqueue_paths_mock.assert_not_called()
+        enqueue_cleanup_roots_mock.assert_not_called()
+
     @patch("app.downloads.manager.titles_lib.release_titledb")
     @patch("app.downloads.manager.titles_lib.get_game_info", return_value={"name": "Sample Game"})
     @patch("app.downloads.manager.titles_lib.get_all_existing_versions", return_value=[{"version": 1245184}])
