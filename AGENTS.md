@@ -43,7 +43,7 @@ Use 4-space indentation and keep Python code straightforward rather than overly 
 Tests use the standard library `unittest` framework with `unittest.mock.patch`. Add or update targeted tests for every behavioral fix, especially around downloads, library organization, and request handling. Name new files `tests/test_<area>.py` and keep tests deterministic and filesystem-light where possible. Use synthetic fixture data only: no real game names, personal directories, or production-like local paths in tests. Prefer placeholders such as `Example Title`, `Example Release NSW-GRP`, and `X:\fixture-root\...`.
 
 ## Commit & Pull Request Guidelines
-Match the existing history: short imperative subjects, often Conventional Commit style such as `fix: improve downloads queue display and layout` or `feat: add SABnzbd support`. Keep commits scoped to one change. PRs should describe the user-visible impact, note any config or migration implications, link related issues, and include screenshots for UI/template changes.
+Match the existing history: short imperative Conventional Commit style subjects. Keep commits scoped to one change. If an issue number is given, include it in the commit msg. PRs should describe the user-visible impact, note any config or migration implications, link related issues, and include screenshots for UI/template changes.
 
 ## Security & Configuration Tips
 Do not commit secrets, `keys.txt`, or real API credentials. Prefer `AEROFOIL_*` environment variables over legacy `OWNFOIL_*` names. For production, set a strong `AEROFOIL_SECRET_KEY` and validate proxy settings before enabling trusted forwarded headers.
