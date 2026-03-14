@@ -110,6 +110,14 @@ def _get_configured_protocols(downloads):
     ]
 
 
+def get_download_ui_visibility(downloads):
+    return {
+        "show_protocol_column": True,
+        "show_torrent_columns": _is_protocol_client_configured(downloads, "torrent"),
+        "show_usenet_columns": _is_protocol_client_configured(downloads, "usenet"),
+    }
+
+
 def _get_completed_poll_targets(downloads):
     targets = []
     for protocol in ("torrent", "usenet"):

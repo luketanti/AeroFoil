@@ -32,22 +32,26 @@
                                         <thead>
                                             <tr>
                                                 <th>Name</th>
+                                                {% if download_ui_visibility.show_protocol_column %}
                                                 <th>Protocol</th>
+                                                {% endif %}
                                                 <th>Client</th>
                                                 <th>Status</th>
                                                 <th>Progress</th>
                                                 <th>Down</th>
                                                 <th>Up</th>
+                                                {% if download_ui_visibility.show_torrent_columns %}
                                                 <th>Peers</th>
                                                 <th>Seeders</th>
                                                 <th>Leechers</th>
+                                                {% endif %}
                                                 <th>ETA</th>
                                                 <th>Size</th>
                                                 <th>Done</th>
                                             </tr>
                                         </thead>
                                         <tbody id="activeDownloadsBody">
-                                            <tr><td colspan="13" class="text-muted">Loading...</td></tr>
+                                            <tr><td colspan="{{ 9 + (1 if download_ui_visibility.show_protocol_column else 0) + (3 if download_ui_visibility.show_torrent_columns else 0) }}" class="text-muted">Loading...</td></tr>
                                         </tbody>
                                     </table>
                                 </div>
@@ -75,6 +79,10 @@
 
 <script>
     let downloadsPollTimer = null;
+    const downloadUiVisibility = {{ download_ui_visibility|tojson }};
+    const activeDownloadsColumnCount = 9
+        + (downloadUiVisibility.show_protocol_column ? 1 : 0)
+        + (downloadUiVisibility.show_torrent_columns ? 3 : 0);
 
     function showDownloadsAlert(message, type = 'info') {
         const alertBox = $('#downloadsAlert');
@@ -148,41 +156,50 @@
     function loadActiveDownloads() {
         const body = $('#activeDownloadsBody');
         $('#activeDownloadsSummary').text('Current download speed: -');
-        body.html('<tr><td colspan="13" class="text-muted">Loading...</td></tr>');
+        body.html(`<tr><td colspan="${activeDownloadsColumnCount}" class="text-muted">Loading...</td></tr>`);
         $.getJSON('/api/downloads/active', function (result) {
             if (!result['success']) {
                 const msg = result['message'] || 'Failed to load active downloads.';
                 $('#activeDownloadsSummary').text('Current download speed: -');
-                body.html(`<tr><td colspan="13" class="text-danger">${msg}</td></tr>`);
+                body.html(`<tr><td colspan="${activeDownloadsColumnCount}" class="text-danger">${msg}</td></tr>`);
                 return;
             }
             const items = result['items'] || [];
             const summary = result['summary'] || {};
             $('#activeDownloadsSummary').text(`Current download speed: ${formatSpeed(summary['down_speed'])}`);
             if (!items.length) {
-                body.html('<tr><td colspan="13" class="text-muted">No active downloads.</td></tr>');
+                body.html(`<tr><td colspan="${activeDownloadsColumnCount}" class="text-muted">No active downloads.</td></tr>`);
                 return;
             }
             body.empty();
             items.forEach(item => {
                 const progress = Number(item['progress'] || 0);
-                const row = $(`
-                    <tr>
-                        <td class="small">${(item['name'] || '').toString()}</td>
-                        <td class="small text-muted">${(item['protocol'] || '').toString() || '-'}</td>
-                        <td class="small text-muted">${(item['client_type'] || '').toString() || '-'}</td>
-                        <td class="small text-muted">${(item['status'] || '').toString()}</td>
-                        <td class="small">${progress.toFixed(1)}%</td>
-                        <td class="small">${formatSpeed(item['down_speed'])}</td>
-                        <td class="small">${formatSpeed(item['up_speed'])}</td>
-                        <td class="small">${item['peers'] ?? '-'}</td>
-                        <td class="small">${item['seeders'] ?? '-'}</td>
-                        <td class="small">${item['leechers'] ?? '-'}</td>
-                        <td class="small">${formatEta(item['eta'])}</td>
-                        <td class="small">${formatBytes(item['size'])}</td>
-                        <td class="small">${formatBytes(item['downloaded'])}</td>
-                    </tr>
-                `);
+                const cells = [
+                    `<td class="small">${(item['name'] || '').toString()}</td>`,
+                ];
+                if (downloadUiVisibility.show_protocol_column) {
+                    cells.push(`<td class="small text-muted">${(item['protocol'] || '').toString() || '-'}</td>`);
+                }
+                cells.push(
+                    `<td class="small text-muted">${(item['client_type'] || '').toString() || '-'}</td>`,
+                    `<td class="small text-muted">${(item['status'] || '').toString()}</td>`,
+                    `<td class="small">${progress.toFixed(1)}%</td>`,
+                    `<td class="small">${formatSpeed(item['down_speed'])}</td>`,
+                    `<td class="small">${formatSpeed(item['up_speed'])}</td>`
+                );
+                if (downloadUiVisibility.show_torrent_columns) {
+                    cells.push(
+                        `<td class="small">${item['peers'] ?? '-'}</td>`,
+                        `<td class="small">${item['seeders'] ?? '-'}</td>`,
+                        `<td class="small">${item['leechers'] ?? '-'}</td>`
+                    );
+                }
+                cells.push(
+                    `<td class="small">${formatEta(item['eta'])}</td>`,
+                    `<td class="small">${formatBytes(item['size'])}</td>`,
+                    `<td class="small">${formatBytes(item['downloaded'])}</td>`
+                );
+                const row = $(`<tr>${cells.join('')}</tr>`);
                 body.append(row);
             });
         });

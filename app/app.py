@@ -22,7 +22,7 @@ from datetime import timedelta, datetime
 flask.cli.show_server_banner = lambda *args: None
 from app.constants import *
 from app.settings import *
-from app.downloads import ProwlarrClient, filter_results, test_download_client, run_downloads_job, manual_search_update, queue_download_url, search_update_options, check_completed_downloads, get_downloads_state, get_active_downloads
+from app.downloads import ProwlarrClient, filter_results, test_download_client, run_downloads_job, manual_search_update, queue_download_url, search_update_options, check_completed_downloads, get_downloads_state, get_active_downloads, get_download_ui_visibility
 from app.library import organize_library, delete_older_updates, delete_duplicates, delete_library_content, delete_orphaned_addons
 from app.db import *
 from app.shop import *
@@ -93,6 +93,13 @@ def _release_process_memory():
             _malloc_trim(0)
         except Exception:
             pass
+
+
+def _safe_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 def _media_variant_dirname(media_kind, size_override=None):
     if media_kind == 'icon':
@@ -680,6 +687,23 @@ def _get_cached_titles_metadata():
 def _get_cached_library_genres():
     metadata = _get_cached_titles_metadata()
     return list(metadata.get('genres') or [])
+
+
+def _sort_library_rows_by_title_name(rows, title_name_map, descending=False):
+    title_name_map = title_name_map or {}
+
+    def _sort_key(row):
+        title_id = str(getattr(row, 'title_id', '') or '').strip().upper()
+        app_id = str(getattr(row, 'app_id', '') or '').strip().upper()
+        normalized_name = str(title_name_map.get(title_id) or '').strip()
+        fallback_name = _normalize_library_search_text(title_id or app_id)
+        return (
+            normalized_name or fallback_name,
+            title_id,
+            app_id,
+        )
+
+    return sorted(rows, key=_sort_key, reverse=bool(descending))
 
 def _get_discovery_sections(limit=12):
     try:
@@ -2582,6 +2606,7 @@ def access_shop():
         admin_account_created=admin_account_created(),
         valid_keys=app_settings['titles']['valid_keys'],
         identification_disabled=not app_settings['titles']['valid_keys'],
+        download_ui_visibility=_get_download_template_visibility(),
     )
 
 @access_required('shop')
@@ -2681,7 +2706,8 @@ def downloads_page():
     return render_template(
         'downloads.html',
         title='Downloads',
-        admin_account_created=admin_account_created())
+        admin_account_created=admin_account_created(),
+        download_ui_visibility=_get_download_template_visibility())
 
 @app.route('/upload')
 @access_required('admin')
@@ -2716,7 +2742,8 @@ def requests_page():
     return render_template(
         'requests.html',
         title='Requests',
-        admin_account_created=admin_account_created())
+        admin_account_created=admin_account_created(),
+        download_ui_visibility=_get_download_template_visibility())
 
 
 @app.route('/saves')
@@ -3017,6 +3044,12 @@ def _trim_download_search_results(results, limit=50):
         }
         for r in (results or [])[:limit]
     ]
+
+
+def _get_download_template_visibility():
+    settings = load_settings()
+    downloads = settings.get('downloads', {})
+    return get_download_ui_visibility(downloads)
 
 
 @app.get('/api/requests/search')
@@ -4788,16 +4821,19 @@ def get_all_titles_api():
         else:
             query = query.filter(Titles.id == -1)
 
-    if sort_key == 'newest':
-        query = query.order_by(Titles.id.desc(), Apps.id.desc())
-    elif sort_key == 'title_desc':
-        query = query.order_by(Titles.title_id.desc(), Apps.app_id.desc())
-    else:
-        query = query.order_by(Titles.title_id.asc(), Apps.app_id.asc())
-
     total = query.count()
     start = (page - 1) * per_page
-    rows = query.offset(start).limit(per_page).all()
+    if sort_key == 'newest':
+        query = query.order_by(Titles.id.desc(), Apps.id.desc())
+        rows = query.offset(start).limit(per_page).all()
+    else:
+        if titles_metadata is None:
+            titles_metadata = _get_cached_titles_metadata()
+        rows = _sort_library_rows_by_title_name(
+            query.all(),
+            titles_metadata.get('title_name_map') or {},
+            descending=(sort_key == 'title_desc'),
+        )[start:start + per_page]
 
     title_fk_ids = {row.title_fk for row in rows if row.title_fk is not None}
     title_id_by_fk = {row.title_fk: row.title_id for row in rows if row.title_fk is not None and row.title_id}

@@ -9,6 +9,7 @@ from app.downloads.manager import (
     _infer_update_info_from_completed_item,
     _iter_importable_download_files,
     _normalize_imported_wrapped_files,
+    get_download_ui_visibility,
     get_active_downloads,
     get_downloads_state,
     queue_download_url,
@@ -36,6 +37,46 @@ class ProwlarrProtocolTests(unittest.TestCase):
 
 
 class QueueRoutingTests(unittest.TestCase):
+    def test_get_download_ui_visibility_handles_all_protocol_configurations(self):
+        cases = [
+            (
+                "both",
+                {
+                    "torrent_client": {"type": "qbittorrent", "url": "http://torrent.local"},
+                    "usenet_client": {"type": "sabnzbd", "url": "http://sab.local", "api_key": "secret"},
+                },
+                {"show_protocol_column": True, "show_torrent_columns": True, "show_usenet_columns": True},
+            ),
+            (
+                "torrent_only",
+                {
+                    "torrent_client": {"type": "qbittorrent", "url": "http://torrent.local"},
+                    "usenet_client": {"type": "sabnzbd", "url": "http://sab.local"},
+                },
+                {"show_protocol_column": True, "show_torrent_columns": True, "show_usenet_columns": False},
+            ),
+            (
+                "usenet_only",
+                {
+                    "torrent_client": {"type": "qbittorrent"},
+                    "usenet_client": {"type": "sabnzbd", "url": "http://sab.local", "api_key": "secret"},
+                },
+                {"show_protocol_column": True, "show_torrent_columns": False, "show_usenet_columns": True},
+            ),
+            (
+                "neither",
+                {
+                    "torrent_client": {"type": "qbittorrent"},
+                    "usenet_client": {"type": "sabnzbd", "url": "http://sab.local"},
+                },
+                {"show_protocol_column": True, "show_torrent_columns": False, "show_usenet_columns": False},
+            ),
+        ]
+
+        for label, downloads, expected in cases:
+            with self.subTest(label=label):
+                self.assertEqual(get_download_ui_visibility(downloads), expected)
+
     @patch("app.downloads.manager.list_active_downloads")
     @patch("app.downloads.manager._get_completed_poll_targets")
     @patch("app.downloads.manager.load_settings")

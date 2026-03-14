@@ -1,7 +1,9 @@
 import unittest
+from collections import namedtuple
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from app.app import _sort_library_rows_by_title_name
 from app.library import (
     _cleanup_import_staging_roots,
     _delete_target_apps,
@@ -38,6 +40,31 @@ class LibraryHelperTests(unittest.TestCase):
             id=file_id,
             filepath=filepath,
             apps=list(linked_apps),
+        )
+
+    def test_sort_library_rows_by_title_name_uses_visible_title_names(self):
+        row_type = namedtuple("LibraryRow", ["title_id", "app_id"])
+        rows = [
+            row_type(title_id="0100BBBB00000000", app_id="0100BBBB00000000"),
+            row_type(title_id="0100AAAA00000000", app_id="0100AAAA00000000"),
+            row_type(title_id="0100CCCC00000000", app_id="0100CCCC00000000"),
+        ]
+        title_name_map = {
+            "0100AAAA00000000": "example title z",
+            "0100BBBB00000000": "example title m",
+            "0100CCCC00000000": "example title a",
+        }
+
+        asc_rows = _sort_library_rows_by_title_name(rows, title_name_map, descending=False)
+        desc_rows = _sort_library_rows_by_title_name(rows, title_name_map, descending=True)
+
+        self.assertEqual(
+            [row.title_id for row in asc_rows],
+            ["0100CCCC00000000", "0100BBBB00000000", "0100AAAA00000000"],
+        )
+        self.assertEqual(
+            [row.title_id for row in desc_rows],
+            ["0100AAAA00000000", "0100BBBB00000000", "0100CCCC00000000"],
         )
 
     def test_sanitize_component(self):

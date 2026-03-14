@@ -88,11 +88,17 @@
                 <tr>
                   <th scope="col">Title</th>
                   <th scope="col">Indexer</th>
+                  {% if download_ui_visibility.show_protocol_column %}
                   <th scope="col">Protocol</th>
+                  {% endif %}
+                  {% if download_ui_visibility.show_usenet_columns %}
                   <th scope="col">Age</th>
+                  {% endif %}
                   <th scope="col">Size</th>
+                  {% if download_ui_visibility.show_torrent_columns %}
                   <th scope="col">Seeders</th>
                   <th scope="col">Leechers</th>
+                  {% endif %}
                   <th scope="col">Action</th>
                 </tr>
               </thead>
@@ -108,6 +114,7 @@
 
 <script>
   const isAdmin = {{ 'true' if current_user.is_admin or admin_account_created == false else 'false' }};
+  const downloadUiVisibility = {{ download_ui_visibility|tojson }};
 
   function escapeHtml(text) {
     const div = document.createElement('div');
@@ -132,6 +139,34 @@
     if (value === 'usenet') return 'NZB';
     if (value === 'torrent') return 'Torrent';
     return value || '-';
+  }
+
+  function buildRequestDownloadSearchRow(item) {
+    const cells = [
+      `<td>${escapeHtml(item.title || '-')}</td>`,
+      `<td>${escapeHtml(item.indexer || '-')}</td>`,
+    ];
+    if (downloadUiVisibility.show_protocol_column) {
+      cells.push(`<td>${escapeHtml(getProtocolLabel(item.protocol))}</td>`);
+    }
+    if (downloadUiVisibility.show_usenet_columns) {
+      cells.push(`<td>${escapeHtml(item.age_label || '-')}</td>`);
+    }
+    cells.push(`<td>${formatBytes(item.size)}</td>`);
+    if (downloadUiVisibility.show_torrent_columns) {
+      cells.push(
+        `<td>${escapeHtml(String(item.seeders ?? '-'))}</td>`,
+        `<td>${escapeHtml(String(item.leechers ?? '-'))}</td>`
+      );
+    }
+    cells.push(`
+      <td>
+        <button class="btn btn-sm btn-warning queue-download-btn" data-download-url="${escapeHtml(item.download_url || '')}" data-title="${escapeHtml(item.title || '')}" data-protocol="${escapeHtml(item.protocol || '')}">
+          Queue
+        </button>
+      </td>
+    `);
+    return cells.join('');
   }
 
   let selectedTitle = null;
@@ -303,20 +338,7 @@
     statusEl.textContent = `Found ${results.length} results.`;
     results.forEach(item => {
       const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${escapeHtml(item.title || '-')}</td>
-        <td>${escapeHtml(item.indexer || '-')}</td>
-        <td>${escapeHtml(getProtocolLabel(item.protocol))}</td>
-        <td>${escapeHtml(item.age_label || '-')}</td>
-        <td>${formatBytes(item.size)}</td>
-        <td>${escapeHtml(String(item.seeders ?? '-'))}</td>
-        <td>${escapeHtml(String(item.leechers ?? '-'))}</td>
-        <td>
-          <button class="btn btn-sm btn-warning queue-download-btn" data-download-url="${escapeHtml(item.download_url || '')}" data-title="${escapeHtml(item.title || '')}" data-protocol="${escapeHtml(item.protocol || '')}">
-            Queue
-          </button>
-        </td>
-      `;
+      tr.innerHTML = buildRequestDownloadSearchRow(item);
       bodyEl.appendChild(tr);
     });
   }

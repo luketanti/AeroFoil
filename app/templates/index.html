@@ -339,11 +339,17 @@
                             <tr>
                                 <th scope="col">Title</th>
                                 <th scope="col">Indexer</th>
+                                {% if download_ui_visibility.show_protocol_column %}
                                 <th scope="col">Protocol</th>
+                                {% endif %}
+                                {% if download_ui_visibility.show_usenet_columns %}
                                 <th scope="col">Age</th>
+                                {% endif %}
                                 <th scope="col">Size</th>
+                                {% if download_ui_visibility.show_torrent_columns %}
                                 <th scope="col">Seeders</th>
                                 <th scope="col">Leechers</th>
+                                {% endif %}
                                 <th scope="col">Action</th>
                             </tr>
                         </thead>
@@ -370,6 +376,7 @@
     let selectedGenre = '';
     const canManageDownloads = {{ 'true' if current_user.is_admin or admin_account_created == false else 'false' }};
     const canManageManualTitleInfo = {{ 'true' if current_user.is_admin or admin_account_created == false else 'false' }};
+    const downloadUiVisibility = {{ download_ui_visibility|tojson }};
     let gameInfoCurrentTitleId = '';
     let gameInfoCurrentGame = null;
     let currentDetailsContext = null;
@@ -1053,6 +1060,41 @@
         return value || '-';
     }
 
+    function buildDownloadSearchRow(item, actionLabel, extraData = {}) {
+        const dataAttrs = Object.entries(extraData)
+            .map(([key, value]) => `data-${key}="${String(value ?? '')}"`)
+            .join(' ');
+        const cells = [
+            `<td>${item.title || '-'}</td>`,
+            `<td>${item.indexer || '-'}</td>`,
+        ];
+        if (downloadUiVisibility.show_protocol_column) {
+            cells.push(`<td>${getProtocolLabel(item.protocol)}</td>`);
+        }
+        if (downloadUiVisibility.show_usenet_columns) {
+            cells.push(`<td>${item.age_label || '-'}</td>`);
+        }
+        cells.push(`<td>${formatBytes(item.size)}</td>`);
+        if (downloadUiVisibility.show_torrent_columns) {
+            cells.push(
+                `<td>${item.seeders ?? '-'}</td>`,
+                `<td>${item.leechers ?? '-'}</td>`
+            );
+        }
+        cells.push(`
+            <td>
+                <button class="btn btn-sm btn-warning queue-download-btn"
+                    data-download-url="${item.download_url || ''}"
+                    data-title="${item.title || ''}"
+                    data-protocol="${item.protocol || ''}"
+                    ${dataAttrs}>
+                    ${actionLabel}
+                </button>
+            </td>
+        `);
+        return `<tr>${cells.join('')}</tr>`;
+    }
+
     function getCardSizeRangeForView(view) {
         // Card view extremes are too small/big; icon view keeps full range.
         if (view === 'card') {
@@ -1406,25 +1448,7 @@
                     }
                     $('#torrentSearchStatus').text(`Found ${results.length} results.`);
                     results.forEach(item => {
-                        const row = $(`
-                            <tr>
-                                <td>${item.title || '-'}</td>
-                                <td>${item.indexer || '-'}</td>
-                                <td>${getProtocolLabel(item.protocol)}</td>
-                                <td>${item.age_label || '-'}</td>
-                                <td>${formatBytes(item.size)}</td>
-                                <td>${item.seeders ?? '-'}</td>
-                                <td>${item.leechers ?? '-'}</td>
-                                <td>
-                                    <button class="btn btn-sm btn-warning queue-download-btn"
-                                        data-download-url="${item.download_url}"
-                                        data-title="${item.title || ''}"
-                                        data-protocol="${item.protocol || ''}">
-                                        Queue
-                                    </button>
-                                </td>
-                            </tr>
-                        `);
+                        const row = $(buildDownloadSearchRow(item, 'Queue'));
                         $('#torrentSearchResults').append(row);
                     });
                 });
@@ -1702,7 +1726,7 @@
             ? `
                     <button type="button" class="btn btn-warning btn-sm manual-download-btn"
                         data-title-id="${game.title_id}" data-version="${latestMissing.version}">
-                        <i class="bi bi-cloud-arrow-down"></i> Search & download v${latestMissing.version}
+                        <i class="bi bi-cloud-arrow-down"></i> Search updates
                     </button>
             `
             : '';
@@ -2052,28 +2076,11 @@
                 }
                 $('#torrentSearchStatus').text(`Found ${results.length} results.`);
                 results.forEach(item => {
-                    const row = $(`
-                        <tr>
-                            <td>${item.title || '-'}</td>
-                            <td>${item.indexer || '-'}</td>
-                            <td>${getProtocolLabel(item.protocol)}</td>
-                            <td>${item.age_label || '-'}</td>
-                            <td>${formatBytes(item.size)}</td>
-                            <td>${item.seeders ?? '-'}</td>
-                            <td>${item.leechers ?? '-'}</td>
-                            <td>
-                                <button class="btn btn-sm btn-warning queue-download-btn"
-                                    data-download-url="${item.download_url}"
-                                    data-title="${item.title || ''}"
-                                    data-title-id="${titleId || ''}"
-                                    data-protocol="${item.protocol || ''}"
-                                    data-update-only="true"
-                                    data-expected-version="${version}">
-                                    Queue update
-                                </button>
-                            </td>
-                        </tr>
-                    `);
+                    const row = $(buildDownloadSearchRow(item, 'Queue update', {
+                        'title-id': titleId || '',
+                        'update-only': 'true',
+                        'expected-version': version,
+                    }));
                     $('#torrentSearchResults').append(row);
                 });
                 $('#detailsDownloadStatus').text('');
@@ -2109,27 +2116,10 @@
             }
             $('#torrentSearchStatus').text(`Found ${results.length} results.`);
             results.forEach(item => {
-                const row = $(`
-                    <tr>
-                        <td>${item.title || '-'}</td>
-                        <td>${item.indexer || '-'}</td>
-                        <td>${getProtocolLabel(item.protocol)}</td>
-                        <td>${item.age_label || '-'}</td>
-                        <td>${formatBytes(item.size)}</td>
-                        <td>${item.seeders ?? '-'}</td>
-                        <td>${item.leechers ?? '-'}</td>
-                        <td>
-                            <button class="btn btn-sm btn-warning queue-download-btn"
-                                data-download-url="${item.download_url}"
-                                data-title="${item.title || ''}"
-                                data-title-id="${titleId || ''}"
-                                data-protocol="${item.protocol || ''}"
-                                data-update-only="false">
-                                Queue download
-                            </button>
-                        </td>
-                    </tr>
-                `);
+                const row = $(buildDownloadSearchRow(item, 'Queue download', {
+                    'title-id': titleId || '',
+                    'update-only': 'false',
+                }));
                 $('#torrentSearchResults').append(row);
             });
             $('#detailsDownloadStatus').text('');
@@ -2169,28 +2159,11 @@
             }
             $('#torrentSearchStatus').text(`Found ${results.length} results.`);
             results.forEach(item => {
-                const row = $(`
-                    <tr>
-                        <td>${item.title || '-'}</td>
-                        <td>${item.indexer || '-'}</td>
-                        <td>${getProtocolLabel(item.protocol)}</td>
-                        <td>${item.age_label || '-'}</td>
-                        <td>${formatBytes(item.size)}</td>
-                        <td>${item.seeders ?? '-'}</td>
-                        <td>${item.leechers ?? '-'}</td>
-                        <td>
-                            <button class="btn btn-sm btn-warning queue-download-btn"
-                                data-download-url="${item.download_url}"
-                                data-title="${item.title || ''}"
-                                data-title-id="${titleId || ''}"
-                                data-protocol="${item.protocol || ''}"
-                                data-update-only="true"
-                                data-expected-version="${version}">
-                                Queue update
-                            </button>
-                        </td>
-                    </tr>
-                `);
+                const row = $(buildDownloadSearchRow(item, 'Queue update', {
+                    'title-id': titleId || '',
+                    'update-only': 'true',
+                    'expected-version': version,
+                }));
                 $('#torrentSearchResults').append(row);
             });
             $('#detailsDownloadStatus').text('');
