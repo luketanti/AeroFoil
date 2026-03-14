@@ -203,15 +203,28 @@ def get_active_downloads():
     downloads = settings.get("downloads", {})
     targets = _get_completed_poll_targets(downloads)
     if not targets:
-        return False, "No download client is configured.", []
+        return False, "No download client is configured.", [], {"down_speed": 0}
     try:
         items = []
         for protocol, client_cfg in targets:
             items.extend(list_active_downloads(protocol, client_cfg))
         items.sort(key=lambda item: ((item.get("protocol") or ""), (item.get("name") or "").lower()))
-        return True, None, items
+        down_speed = 0
+        seen_queue_speed_keys = set()
+        for item in items:
+            down_speed += int(item.get("down_speed") or 0)
+            queue_down_speed = int(item.get("queue_down_speed") or 0)
+            if queue_down_speed > 0:
+                queue_key = (
+                    item.get("protocol") or "",
+                    item.get("client_type") or "",
+                )
+                if queue_key not in seen_queue_speed_keys:
+                    down_speed += queue_down_speed
+                    seen_queue_speed_keys.add(queue_key)
+        return True, None, items, {"down_speed": down_speed}
     except Exception as e:
-        return False, str(e), []
+        return False, str(e), [], {"down_speed": 0}
 
 
 def _process_downloads(downloads, scan_cb=None, post_cb=None):

@@ -9,6 +9,7 @@ from app.downloads.manager import (
     _infer_update_info_from_completed_item,
     _iter_importable_download_files,
     _normalize_imported_wrapped_files,
+    get_active_downloads,
     get_downloads_state,
     queue_download_url,
     search_update_options,
@@ -35,6 +36,43 @@ class ProwlarrProtocolTests(unittest.TestCase):
 
 
 class QueueRoutingTests(unittest.TestCase):
+    @patch("app.downloads.manager.list_active_downloads")
+    @patch("app.downloads.manager._get_completed_poll_targets")
+    @patch("app.downloads.manager.load_settings")
+    def test_get_active_downloads_reports_combined_summary_speed(
+        self,
+        load_settings_mock,
+        poll_targets_mock,
+        list_active_downloads_mock,
+    ):
+        load_settings_mock.return_value = {"downloads": {}}
+        poll_targets_mock.return_value = [
+            ("torrent", {"type": "qbittorrent"}),
+            ("usenet", {"type": "sabnzbd"}),
+        ]
+        list_active_downloads_mock.side_effect = [
+            [{
+                "protocol": "torrent",
+                "client_type": "qbittorrent",
+                "name": "Example Torrent",
+                "down_speed": 1000,
+            }],
+            [{
+                "protocol": "usenet",
+                "client_type": "sabnzbd",
+                "name": "Example NZB",
+                "down_speed": None,
+                "queue_down_speed": 2000,
+            }],
+        ]
+
+        ok, message, items, summary = get_active_downloads()
+
+        self.assertTrue(ok)
+        self.assertIsNone(message)
+        self.assertEqual(len(items), 2)
+        self.assertEqual(summary["down_speed"], 3000)
+
     @patch("app.downloads.manager.queue_download")
     @patch("app.downloads.manager.load_settings")
     def test_queue_download_url_routes_to_torrent_client(self, load_settings_mock, queue_download_mock):
@@ -290,7 +328,7 @@ class SabSelectionTests(unittest.TestCase):
         delete_job_mock.assert_called_once_with("http://sab.local", "secret", "nzo123", timeout_seconds=15)
 
     @patch("app.downloads.usenet_client._sab_request")
-    def test_list_active_uses_queue_speed(self, sab_request_mock):
+    def test_list_active_exposes_queue_speed_only_in_summary_metadata(self, sab_request_mock):
         sab_request_mock.return_value = {
             "queue": {
                 "kbpersec": "512.5",
@@ -312,7 +350,44 @@ class SabSelectionTests(unittest.TestCase):
         items = list_active("http://sab.local", "secret", category="aerofoil")
 
         self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["down_speed"], int(512.5 * 1024))
+        self.assertIsNone(items[0]["down_speed"])
+        self.assertEqual(items[0]["queue_down_speed"], int(512.5 * 1024))
+
+    @patch("app.downloads.usenet_client._sab_request")
+    def test_list_active_does_not_duplicate_queue_speed_across_multiple_items(self, sab_request_mock):
+        sab_request_mock.return_value = {
+            "queue": {
+                "kbpersec": "512.5",
+                "slots": [
+                    {
+                        "nzo_id": "nzo123",
+                        "filename": "Example Base",
+                        "status": "Downloading",
+                        "mb": "100",
+                        "mbleft": "50",
+                        "timeleft": "00:10:00",
+                        "cat": "aerofoil",
+                    },
+                    {
+                        "nzo_id": "nzo456",
+                        "filename": "Example Update",
+                        "status": "Downloading",
+                        "mb": "20",
+                        "mbleft": "10",
+                        "timeleft": "00:02:00",
+                        "cat": "aerofoil",
+                    },
+                ],
+            }
+        }
+
+        items = list_active("http://sab.local", "secret", category="aerofoil")
+
+        self.assertEqual(len(items), 2)
+        self.assertIsNone(items[0]["down_speed"])
+        self.assertIsNone(items[1]["down_speed"])
+        self.assertEqual(items[0]["queue_down_speed"], int(512.5 * 1024))
+        self.assertEqual(items[1]["queue_down_speed"], int(512.5 * 1024))
 
 
 class CompletedAdoptionTests(unittest.TestCase):

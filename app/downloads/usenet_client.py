@@ -99,15 +99,18 @@ def list_active(url, api_key, category=None, timeout_seconds=15):
     except Exception:
         return []
     queue = payload.get("queue") if isinstance(payload, dict) else {}
-    slots = queue.get("slots") or []
+    raw_slots = queue.get("slots") or []
     queue_speed = _bytes_per_second(queue.get("kbpersec"))
-    active = []
-    for item in slots:
+    slots = []
+    for item in raw_slots:
         if not isinstance(item, dict):
             continue
         item_category = str(item.get("cat") or item.get("category") or "").strip()
         if category and item_category != category:
             continue
+        slots.append(item)
+    active = []
+    for item in slots:
         nzo_id = str(item.get("nzo_id") or "").strip() or None
         percentage = _to_float(item.get("percentage"), None)
         if percentage is None:
@@ -128,7 +131,7 @@ def list_active(url, api_key, category=None, timeout_seconds=15):
             "name": item.get("filename") or item.get("nzb_name") or item.get("name") or "",
             "status": item.get("status") or queue.get("status") or "",
             "progress": max(0.0, min(_to_float(percentage, 0.0), 100.0)),
-            "down_speed": queue_speed,
+            "down_speed": None,
             "up_speed": 0,
             "peers": 0,
             "seeders": 0,
@@ -137,6 +140,7 @@ def list_active(url, api_key, category=None, timeout_seconds=15):
             "size": size_bytes,
             "downloaded": max(size_bytes - left_bytes, 0),
             "path": item.get("storage") or item.get("path") or "",
+            "queue_down_speed": queue_speed,
         })
     return active
 
@@ -347,6 +351,8 @@ def _bytes_per_second(value):
         return int(float(value) * 1024)
     except Exception:
         return 0
+
+
 
 
 def _parse_eta_seconds(value):

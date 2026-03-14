@@ -26,6 +26,7 @@
                                     </div>
                                     <button type="button" id="refreshActiveDownloadsBtn" class="btn btn-outline-primary btn-sm" onclick="loadActiveDownloads()">Refresh</button>
                                 </div>
+                                <div class="small text-muted mb-2" id="activeDownloadsSummary">Current download speed: -</div>
                                 <div class="table-responsive">
                                     <table class="table table-dark table-sm align-middle">
                                         <thead>
@@ -146,14 +147,18 @@
 
     function loadActiveDownloads() {
         const body = $('#activeDownloadsBody');
+        $('#activeDownloadsSummary').text('Current download speed: -');
         body.html('<tr><td colspan="13" class="text-muted">Loading...</td></tr>');
         $.getJSON('/api/downloads/active', function (result) {
             if (!result['success']) {
                 const msg = result['message'] || 'Failed to load active downloads.';
+                $('#activeDownloadsSummary').text('Current download speed: -');
                 body.html(`<tr><td colspan="13" class="text-danger">${msg}</td></tr>`);
                 return;
             }
             const items = result['items'] || [];
+            const summary = result['summary'] || {};
+            $('#activeDownloadsSummary').text(`Current download speed: ${formatSpeed(summary['down_speed'])}`);
             if (!items.length) {
                 body.html('<tr><td colspan="13" class="text-muted">No active downloads.</td></tr>');
                 return;
