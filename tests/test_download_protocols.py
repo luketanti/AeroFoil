@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from app.downloads.manager import _extract_update_version_from_name, _infer_protocol
+from app.downloads.manager import _extract_update_version_from_name, _get_import_extension, _infer_protocol
 from app.downloads.prowlarr import ProwlarrClient, _normalize_result, filter_results, pick_best_result
 from app.settings import _normalize_download_settings
 
@@ -32,6 +32,22 @@ class DownloadProtocolTests(unittest.TestCase):
         best = pick_best_result(results, allowed_protocols=["usenet"])
         self.assertEqual(best["protocol"], "usenet")
 
+    def test_pick_best_result_requires_exact_version_for_usenet_when_enabled(self):
+        results = [
+            {"title": "Sample Package Update v1.25.0 TEST-GRP", "seeders": 0, "size": 2, "protocol": "usenet"},
+            {"title": "Sample Package Update [v1245184]", "seeders": 0, "size": 1, "protocol": "usenet"},
+        ]
+        best = pick_best_result(results, allowed_protocols=["usenet"], version=1245184, require_exact_version=True)
+        self.assertEqual(best["title"], "Sample Package Update [v1245184]")
+
+    def test_pick_best_result_requires_exact_version_for_torrent_when_enabled(self):
+        results = [
+            {"title": "Game Update v1.25.0 Torrent", "seeders": 50, "size": 2, "protocol": "torrent"},
+            {"title": "Game Update [v1245184] Torrent", "seeders": 10, "size": 1, "protocol": "torrent"},
+        ]
+        best = pick_best_result(results, allowed_protocols=["torrent"], version=1245184, require_exact_version=True)
+        self.assertEqual(best["title"], "Game Update [v1245184] Torrent")
+
     def test_resolve_protocol_infers_nzb(self):
         self.assertEqual(_infer_protocol("https://example.test/update.nzb"), "usenet")
 
@@ -55,11 +71,11 @@ class DownloadProtocolTests(unittest.TestCase):
         get_mock.return_value = []
         client = ProwlarrClient("http://prowlarr.local", "secret")
 
-        client.search("UNO update", indexer_ids=[2], categories=[1000], limit=None)
+        client.search("Sample update", indexer_ids=[2], categories=[1000], limit=None)
 
         self.assertEqual(get_mock.call_args.args[0], "/api/v1/search")
         params = get_mock.call_args.kwargs["params"]
-        self.assertEqual(params["query"], "UNO update")
+        self.assertEqual(params["query"], "Sample update")
         self.assertEqual(params["type"], "search")
         self.assertEqual(params["limit"], 100)
         self.assertEqual(params["indexerIds"], [2])
@@ -88,10 +104,13 @@ class DownloadProtocolTests(unittest.TestCase):
         self.assertEqual(_extract_update_version_from_name("Game [v1245184] v999.nsp"), 1245184)
 
     def test_extract_update_version_falls_back_to_plain_token(self):
-        self.assertEqual(_extract_update_version_from_name("sxs-uno_v1245184.nsp.hdf"), 1245184)
+        self.assertEqual(_extract_update_version_from_name("sample_v1245184.nsp.hdf"), 1245184)
 
     def test_extract_update_version_ignores_semantic_version(self):
-        self.assertIsNone(_extract_update_version_from_name("UNO Update v1.1.10 NSW-SUXXORS"))
+        self.assertIsNone(_extract_update_version_from_name("Sample Update v1.1.10 TEST-GRP"))
+
+    def test_get_import_extension_strips_hdf_wrapper(self):
+        self.assertEqual(_get_import_extension("C:\\tests\\completed\\sample_v1245184.nsp.hdf"), "nsp")
 
 
 if __name__ == "__main__":

@@ -175,6 +175,19 @@ def _has_version(text, version):
     return version_str in text or f"v{version_str}" in text
 
 
+def _extract_internal_version_token(text):
+    raw = str(text or "")
+    match = re.search(r"\[v(\d+)\]", raw, re.IGNORECASE)
+    if not match:
+        match = re.search(r"(?<![a-z0-9])v(\d+)(?!\.\d)", raw, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except Exception:
+        return None
+
+
 def filter_results(results, min_seeders=0, min_age_minutes=0, required_terms=None, blacklist_terms=None):
     required_terms = [_normalize_text(t) for t in (required_terms or []) if t]
     blacklist_terms = [_normalize_text(t) for t in (blacklist_terms or []) if t]
@@ -223,7 +236,7 @@ def _score_result(result, title_id=None, version=None):
     return score
 
 
-def pick_best_result(results, title_id=None, version=None, min_seeders=0, min_age_minutes=0, required_terms=None, blacklist_terms=None, allowed_protocols=None):
+def pick_best_result(results, title_id=None, version=None, min_seeders=0, min_age_minutes=0, required_terms=None, blacklist_terms=None, allowed_protocols=None, require_exact_version=False):
     filtered = filter_results(
         results,
         min_seeders=min_seeders,
@@ -234,6 +247,12 @@ def pick_best_result(results, title_id=None, version=None, min_seeders=0, min_ag
     allowed = {str(item or "").strip().lower() for item in (allowed_protocols or []) if str(item or "").strip()}
     if allowed:
         filtered = [item for item in filtered if str(item.get("protocol") or "").strip().lower() in allowed]
+    if require_exact_version and version is not None:
+        expected_version = int(version)
+        filtered = [
+            item for item in filtered
+            if _extract_internal_version_token(item.get("title")) == expected_version
+        ]
     if not filtered:
         return None
     scored = [

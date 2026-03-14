@@ -422,6 +422,7 @@ def _search_and_queue(
             required_terms=required_terms,
             blacklist_terms=blacklist_terms,
             allowed_protocols=allowed_protocols,
+            require_exact_version=True,
         )
         if result:
             break
@@ -581,6 +582,128 @@ def _match_completed_item(info, completed_items):
     return None
 
 
+def _normalize_match_text(text):
+    return re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
+
+
+def _iter_completed_files(src_path):
+    if not src_path:
+        return
+    if os.path.isfile(src_path):
+        yield src_path
+        return
+    if not os.path.isdir(src_path):
+        return
+    for root, _, files in os.walk(src_path):
+        for filename in files:
+            yield os.path.join(root, filename)
+
+
+def _select_completed_update_candidate(src_path):
+    candidates = []
+    for path in _iter_completed_files(src_path) or []:
+        filename = os.path.basename(path)
+        version = _extract_update_version_from_name(filename)
+        if version is None:
+            continue
+        lowered = filename.lower()
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = 0
+        rank = 0 if lowered.endswith(".nfo") else 1
+        candidates.append((rank, size, path, version))
+    if not candidates:
+        return None, None
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    _, _, path, version = candidates[0]
+    return path, version
+
+
+def _build_completed_match_text(item):
+    src_path = str((item or {}).get("path") or "").strip()
+    parts = [str((item or {}).get("name") or "").strip(), os.path.basename(src_path)]
+    for path in _iter_completed_files(src_path) or []:
+        parts.append(os.path.basename(path))
+    return _normalize_match_text(" ".join(part for part in parts if part))
+
+
+def _infer_update_info_from_completed_item(item):
+    src_path = str((item or {}).get("path") or "").strip()
+    _, version = _select_completed_update_candidate(src_path)
+    if not version:
+        return None
+
+    normalized_match_text = _build_completed_match_text(item)
+    if not normalized_match_text:
+        return None
+
+    titles = get_all_titles() or []
+    if not titles:
+        return None
+
+    titles_lib.load_titledb()
+    try:
+        candidates = []
+        for title in titles:
+            title_id = str(getattr(title, "title_id", "") or "").strip().upper()
+            if not title_id:
+                continue
+            versions = titles_lib.get_all_existing_versions(title_id) or []
+            if not any(int(v.get("version") or 0) == int(version) for v in versions):
+                continue
+            info = titles_lib.get_game_info(title_id) or {}
+            title_name = str(info.get("name") or title_id).strip()
+            normalized_title = _normalize_match_text(title_name)
+            if not normalized_title or normalized_title not in normalized_match_text:
+                continue
+            candidates.append((len(normalized_title), title_id, title_name))
+        if not candidates:
+            return None
+        candidates.sort(reverse=True)
+        _, title_id, title_name = candidates[0]
+        return {
+            "title_id": title_id,
+            "title_name": title_name,
+            "version": int(version),
+        }
+    finally:
+        titles_lib.release_titledb()
+
+
+def _adopt_untracked_completed_item(item):
+    inferred = _infer_update_info_from_completed_item(item)
+    if inferred:
+        moved_path = _move_completed(item, inferred)
+    elif _looks_like_update_download(item):
+        return None
+    else:
+        moved_path = _move_completed(item)
+    if moved_path:
+        if inferred:
+            logger.info(
+                "Adopted untracked completed download by category as %s v%s: %s",
+                inferred.get("title_id"),
+                inferred.get("version"),
+                item.get("name") or item.get("path") or "",
+            )
+        else:
+            logger.info(
+                "Adopted untracked completed download by category without title mapping: %s",
+                item.get("name") or item.get("path") or "",
+            )
+    return moved_path
+
+
+def _looks_like_update_download(item):
+    name = str((item or {}).get("name") or "").lower()
+    if "update" in name:
+        return True
+    src_path = str((item or {}).get("path") or "").strip()
+    update_path, version = _select_completed_update_candidate(src_path)
+    return bool(update_path and version)
+
+
 def _check_completed(downloads, scan_cb=None, post_cb=None):
     poll_targets = _get_completed_poll_targets(downloads)
     if not poll_targets:
@@ -633,6 +756,16 @@ def _check_completed(downloads, scan_cb=None, post_cb=None):
             for item in bucket["items"]:
                 item_id = item.get("id") or item.get("hash")
                 if item_id and item_id in bucket["matched_ids"]:
+                    continue
+                moved_path = _adopt_untracked_completed_item(item)
+                if moved_path:
+                    matched_id = item.get("id") or item.get("hash")
+                    if matched_id:
+                        ok, message = remove_completed_download(protocol, bucket["client_cfg"], matched_id)
+                        if not ok:
+                            logger.warning("Failed to remove adopted %s item %s: %s", protocol, matched_id, message)
+                    moved_paths.append(moved_path)
+                    newly_completed = True
                     continue
                 unmatched_count += 1
             if unmatched_count:
@@ -697,11 +830,22 @@ def _select_update_file_path(src_path, expected_version):
 def _build_update_destination(dest_root, title_id, title_name, version, src_path):
     safe_title = _sanitize_component(title_name or title_id)
     safe_title_id = _sanitize_component(title_id)
-    extension = os.path.splitext(src_path)[1].lstrip('.')
+    extension = _get_import_extension(src_path)
     folder = os.path.join(dest_root, f"{safe_title} [{safe_title_id}]", "Updates", f"v{version}")
     filename = f"{safe_title} [{safe_title_id}] [UPDATE][v{version}].{extension}"
     filename = _sanitize_component(filename)
     return folder, filename
+
+
+def _get_import_extension(src_path):
+    name = os.path.basename(str(src_path or ""))
+    lowered = name.lower()
+    if lowered.endswith(".nsp.hdf"):
+        # Some wrapped usenet releases keep the real content extension before .hdf.
+        return "nsp"
+    if lowered.endswith(".nsz.hdf"):
+        return "nsz"
+    return os.path.splitext(name)[1].lstrip(".")
 
 
 def _cleanup_download_path(src_path, dest_root):

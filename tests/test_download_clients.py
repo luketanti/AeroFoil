@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from app.downloads.client import queue_download
-from app.downloads.manager import queue_download_url
+from app.downloads.manager import _adopt_untracked_completed_item, _infer_update_info_from_completed_item, queue_download_url
 from app.downloads.prowlarr import _normalize_result
 from app.downloads.usenet_client import add_nzb, list_active
 from app.downloads.usenet_client import _restrict_job_to_matching_update_files
@@ -224,6 +224,96 @@ class SabSelectionTests(unittest.TestCase):
 
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["down_speed"], int(512.5 * 1024))
+
+
+class CompletedAdoptionTests(unittest.TestCase):
+    @patch("app.downloads.manager.titles_lib.release_titledb")
+    @patch("app.downloads.manager.titles_lib.get_game_info", return_value={"name": "Sample Game"})
+    @patch("app.downloads.manager.titles_lib.get_all_existing_versions", return_value=[{"version": 1245184}])
+    @patch("app.downloads.manager.titles_lib.load_titledb")
+    @patch("app.downloads.manager.get_all_titles")
+    @patch("app.downloads.manager._iter_completed_files")
+    def test_infer_update_info_uses_completed_file_names_for_matching(
+        self,
+        iter_files_mock,
+        get_all_titles_mock,
+        load_titledb_mock,
+        get_versions_mock,
+        get_game_info_mock,
+        release_titledb_mock,
+    ):
+        class _Title:
+            title_id = "0100B6E012EBE000"
+
+        get_all_titles_mock.return_value = [_Title()]
+        iter_files_mock.side_effect = lambda _path: iter([
+            "C:\\tests\\completed\\Random Folder\\sample-game_v1245184.nsp.hdf",
+        ])
+
+        inferred = _infer_update_info_from_completed_item({
+            "name": "Random Folder",
+            "path": "C:\\tests\\completed\\Random Folder",
+        })
+
+        self.assertEqual(inferred, {
+            "title_id": "0100B6E012EBE000",
+            "title_name": "Sample Game",
+            "version": 1245184,
+        })
+        load_titledb_mock.assert_called_once()
+        get_versions_mock.assert_called_once_with("0100B6E012EBE000")
+        get_game_info_mock.assert_called_once_with("0100B6E012EBE000")
+        release_titledb_mock.assert_called_once()
+
+    @patch("app.downloads.manager._move_completed", return_value="C:\\tests\\library\\Sample Game [0100]\\Updates\\v1245184\\Sample Game.nsp")
+    @patch("app.downloads.manager._infer_update_info_from_completed_item")
+    def test_adopt_untracked_completed_item_uses_inferred_update_info(self, infer_mock, move_mock):
+        infer_mock.return_value = {
+            "title_id": "0100B6E012EBE000",
+            "title_name": "Sample Game",
+            "version": 1245184,
+        }
+
+        moved = _adopt_untracked_completed_item({
+            "name": "Sample Update v1.1.10 TEST-GRP",
+            "path": "C:\\tests\\completed\\Sample Update v1.1.10 TEST-GRP",
+        })
+
+        self.assertEqual(moved, "C:\\tests\\library\\Sample Game [0100]\\Updates\\v1245184\\Sample Game.nsp")
+        move_mock.assert_called_once_with(
+            {
+                "name": "Sample Update v1.1.10 TEST-GRP",
+                "path": "C:\\tests\\completed\\Sample Update v1.1.10 TEST-GRP",
+            },
+            infer_mock.return_value,
+        )
+
+    @patch("app.downloads.manager._move_completed", return_value="C:\\tests\\library\\Random NZB Upload")
+    @patch("app.downloads.manager._infer_update_info_from_completed_item", return_value=None)
+    def test_adopt_untracked_completed_item_falls_back_to_generic_move(self, infer_mock, move_mock):
+        moved = _adopt_untracked_completed_item({
+            "name": "Random NZB Upload",
+            "path": "C:\\tests\\completed\\Random NZB Upload",
+        })
+
+        self.assertEqual(moved, "C:\\tests\\library\\Random NZB Upload")
+        infer_mock.assert_called_once()
+        move_mock.assert_called_once_with({
+            "name": "Random NZB Upload",
+            "path": "C:\\tests\\completed\\Random NZB Upload",
+        })
+
+    @patch("app.downloads.manager._move_completed")
+    @patch("app.downloads.manager._infer_update_info_from_completed_item", return_value=None)
+    def test_adopt_untracked_completed_item_does_not_generic_move_update_like_download(self, infer_mock, move_mock):
+        moved = _adopt_untracked_completed_item({
+            "name": "Sample Package Update v1.25.0 TEST-GRP",
+            "path": "C:\\tests\\completed\\Sample Package Update v1.25.0 TEST-GRP",
+        })
+
+        self.assertIsNone(moved)
+        infer_mock.assert_called_once()
+        move_mock.assert_not_called()
 
 
 if __name__ == "__main__":
