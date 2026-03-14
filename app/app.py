@@ -23,7 +23,7 @@ flask.cli.show_server_banner = lambda *args: None
 from app.constants import *
 from app.settings import *
 from app.downloads import ProwlarrClient, filter_results, test_download_client, run_downloads_job, manual_search_update, queue_download_url, search_update_options, check_completed_downloads, get_downloads_state, get_active_downloads
-from app.library import organize_library, delete_older_updates, delete_duplicates
+from app.library import organize_library, delete_older_updates, delete_duplicates, delete_library_content, delete_orphaned_addons
 from app.db import *
 from app.shop import *
 from app.auth import *
@@ -3766,6 +3766,43 @@ def manage_delete_duplicates():
         post_library_change()
     return jsonify(results)
 
+@app.post('/api/manage/delete-library-content')
+@access_required('admin')
+def manage_delete_library_content():
+    data = request.json or {}
+    dry_run = bool(data.get('dry_run', False))
+    verbose = bool(data.get('verbose', False))
+    scope = str(data.get('scope') or '').strip()
+    title_id = data.get('title_id')
+    app_id = data.get('app_id')
+    app_type = data.get('app_type')
+    version = data.get('version')
+
+    results = delete_library_content(
+        scope=scope,
+        dry_run=dry_run,
+        verbose=verbose,
+        title_id=title_id,
+        app_id=app_id,
+        app_type=app_type,
+        version=version,
+    )
+    if not dry_run and results.get('mutated'):
+        post_library_change()
+    status_code = 200 if results.get('success') else 400
+    return jsonify(results), status_code
+
+@app.post('/api/manage/delete-orphaned-addons')
+@access_required('admin')
+def manage_delete_orphaned_addons():
+    data = request.json or {}
+    dry_run = bool(data.get('dry_run', False))
+    verbose = bool(data.get('verbose', False))
+    results = delete_orphaned_addons(dry_run=dry_run, verbose=verbose)
+    if not dry_run and results.get('mutated'):
+        post_library_change()
+    return jsonify(results)
+
 @app.post('/api/manage/check-downloads')
 @access_required('admin')
 def manage_check_downloads():
@@ -3790,8 +3827,8 @@ def downloads_queue_state():
 @app.get('/api/downloads/active')
 @access_required('admin')
 def downloads_active():
-    ok, message, items = get_active_downloads()
-    return jsonify({'success': ok, 'message': message, 'items': items})
+    ok, message, items, summary = get_active_downloads()
+    return jsonify({'success': ok, 'message': message, 'items': items, 'summary': summary})
 
 
 @app.get('/api/manage/downloads-queue')
@@ -4532,6 +4569,38 @@ def get_all_titles_api():
         .group_by(app_files.c.app_id)
         .subquery()
     )
+    base_status_subquery = (
+        db.session.query(
+            Apps.title_id.label('title_fk'),
+            func.max(
+                case(
+                    (and_(Apps.app_type == APP_TYPE_BASE, Apps.owned.is_(True)), 1),
+                    else_=0
+                )
+            ).label('has_owned_base')
+        )
+        .group_by(Apps.title_id)
+        .subquery()
+    )
+    update_status_subquery = (
+        db.session.query(
+            Apps.title_id.label('title_fk'),
+            func.max(
+                case(
+                    (Apps.app_type == APP_TYPE_UPD, app_version_num_expr),
+                    else_=0
+                )
+            ).label('max_update_version'),
+            func.max(
+                case(
+                    (and_(Apps.app_type == APP_TYPE_UPD, Apps.owned.is_(True)), app_version_num_expr),
+                    else_=0
+                )
+            ).label('max_owned_update_version')
+        )
+        .group_by(Apps.title_id)
+        .subquery()
+    )
     dlc_agg_subquery = (
         db.session.query(
             Apps.app_id.label('dlc_app_id'),
@@ -4547,6 +4616,36 @@ def get_all_titles_api():
         .group_by(Apps.app_id)
         .subquery()
     )
+    dlc_title_status_subquery = (
+        db.session.query(
+            Apps.title_id.label('title_fk'),
+            Apps.app_id.label('dlc_app_id'),
+            func.max(app_version_num_expr).label('max_version'),
+            func.max(
+                case(
+                    (Apps.owned.is_(True), app_version_num_expr),
+                    else_=0
+                )
+            ).label('max_owned_version')
+        )
+        .filter(Apps.app_type == APP_TYPE_DLC)
+        .group_by(Apps.title_id, Apps.app_id)
+        .subquery()
+    )
+    dlc_completion_subquery = (
+        db.session.query(
+            dlc_title_status_subquery.c.title_fk.label('title_fk'),
+            func.count().label('dlc_count'),
+            func.sum(
+                case(
+                    (dlc_title_status_subquery.c.max_owned_version >= dlc_title_status_subquery.c.max_version, 1),
+                    else_=0
+                )
+            ).label('complete_dlc_count')
+        )
+        .group_by(dlc_title_status_subquery.c.title_fk)
+        .subquery()
+    )
 
     query = (
         db.session.query(
@@ -4554,20 +4653,25 @@ def get_all_titles_api():
             Apps.title_id.label('title_fk'),
             Titles.id.label('title_db_id'),
             Titles.title_id.label('title_id'),
-            Titles.have_base.label('have_base'),
-            Titles.up_to_date.label('up_to_date'),
-            Titles.complete.label('complete'),
             Apps.app_id.label('app_id'),
             Apps.app_version.label('app_version'),
             Apps.app_type.label('app_type'),
             Apps.owned.label('owned'),
             func.coalesce(size_subquery.c.size, 0).label('size'),
+            func.coalesce(base_status_subquery.c.has_owned_base, 0).label('has_owned_base'),
+            func.coalesce(update_status_subquery.c.max_update_version, 0).label('max_update_version'),
+            func.coalesce(update_status_subquery.c.max_owned_update_version, 0).label('max_owned_update_version'),
             func.coalesce(dlc_agg_subquery.c.max_version, 0).label('dlc_max_version'),
             func.coalesce(dlc_agg_subquery.c.max_owned_version, 0).label('dlc_max_owned_version'),
+            func.coalesce(dlc_completion_subquery.c.dlc_count, 0).label('dlc_count'),
+            func.coalesce(dlc_completion_subquery.c.complete_dlc_count, 0).label('complete_dlc_count'),
         )
         .join(Titles, Apps.title_id == Titles.id)
         .outerjoin(size_subquery, size_subquery.c.app_pk == Apps.id)
+        .outerjoin(base_status_subquery, base_status_subquery.c.title_fk == Titles.id)
+        .outerjoin(update_status_subquery, update_status_subquery.c.title_fk == Titles.id)
         .outerjoin(dlc_agg_subquery, dlc_agg_subquery.c.dlc_app_id == Apps.app_id)
+        .outerjoin(dlc_completion_subquery, dlc_completion_subquery.c.title_fk == Titles.id)
         .filter(
             or_(
                 Apps.app_type == APP_TYPE_BASE,
@@ -4590,21 +4694,53 @@ def get_all_titles_api():
     if updates == 'up_to_date':
         query = query.filter(
             or_(
-                and_(Apps.app_type == APP_TYPE_BASE, Titles.have_base.is_(True), Titles.up_to_date.is_(True)),
+                and_(
+                    Apps.app_type == APP_TYPE_BASE,
+                    base_status_subquery.c.has_owned_base == 1,
+                    or_(
+                        update_status_subquery.c.max_update_version.is_(None),
+                        update_status_subquery.c.max_update_version == 0,
+                        update_status_subquery.c.max_owned_update_version >= update_status_subquery.c.max_update_version,
+                    ),
+                ),
                 and_(Apps.app_type == APP_TYPE_DLC, dlc_agg_subquery.c.max_owned_version >= dlc_agg_subquery.c.max_version),
             )
         )
     elif updates == 'outdated':
         query = query.filter(
             or_(
-                and_(Apps.app_type == APP_TYPE_BASE, or_(Titles.have_base.is_(False), Titles.up_to_date.is_(False))),
+                and_(
+                    Apps.app_type == APP_TYPE_BASE,
+                    or_(
+                        func.coalesce(base_status_subquery.c.has_owned_base, 0) == 0,
+                        and_(
+                            func.coalesce(update_status_subquery.c.max_update_version, 0) > 0,
+                            func.coalesce(update_status_subquery.c.max_owned_update_version, 0) < func.coalesce(update_status_subquery.c.max_update_version, 0),
+                        ),
+                    ),
+                ),
                 and_(Apps.app_type == APP_TYPE_DLC, dlc_agg_subquery.c.max_owned_version < dlc_agg_subquery.c.max_version),
             )
         )
     if completion == 'complete':
-        query = query.filter(and_(Apps.app_type == APP_TYPE_BASE, Titles.complete.is_(True)))
+        query = query.filter(
+            and_(
+                Apps.app_type == APP_TYPE_BASE,
+                or_(
+                    dlc_completion_subquery.c.dlc_count.is_(None),
+                    dlc_completion_subquery.c.dlc_count == 0,
+                    dlc_completion_subquery.c.complete_dlc_count >= dlc_completion_subquery.c.dlc_count,
+                ),
+            )
+        )
     elif completion == 'missing_dlc':
-        query = query.filter(and_(Apps.app_type == APP_TYPE_BASE, Titles.complete.is_(False)))
+        query = query.filter(
+            and_(
+                Apps.app_type == APP_TYPE_BASE,
+                func.coalesce(dlc_completion_subquery.c.dlc_count, 0) > 0,
+                func.coalesce(dlc_completion_subquery.c.complete_dlc_count, 0) < func.coalesce(dlc_completion_subquery.c.dlc_count, 0),
+            )
+        )
 
     if search:
         search_normalized = _normalize_library_search_text(search)
@@ -4756,9 +4892,14 @@ def get_all_titles_api():
             'size': int(row.size or 0),
         }
         if row.app_type == APP_TYPE_BASE:
-            game['has_base'] = bool(row.have_base)
-            game['has_latest_version'] = bool(row.have_base) and bool(row.up_to_date)
-            game['has_all_dlcs'] = bool(row.complete)
+            has_base = bool(row.has_owned_base)
+            max_update_version = int(row.max_update_version or 0)
+            max_owned_update_version = int(row.max_owned_update_version or 0)
+            dlc_count = int(row.dlc_count or 0)
+            complete_dlc_count = int(row.complete_dlc_count or 0)
+            game['has_base'] = has_base
+            game['has_latest_version'] = has_base and (max_update_version <= 0 or max_owned_update_version >= max_update_version)
+            game['has_all_dlcs'] = (dlc_count <= 0) or (complete_dlc_count >= dlc_count)
             game['version'] = list(update_versions_by_title_fk.get(row.title_fk, []))
         elif row.app_type == APP_TYPE_DLC:
             game['has_latest_version'] = int(row.dlc_max_owned_version or 0) >= int(row.dlc_max_version or 0)
@@ -4848,6 +4989,32 @@ def get_title_details_api():
         with titles.titledb_session():
             title_info = titles.get_game_info(row.title_id) or {}
             app_info = title_info if row.app_type == APP_TYPE_BASE else (titles.get_game_info(row.app_id) or title_info)
+            title_apps = (
+                Apps.query
+                .filter(Apps.title_id == row.title_fk)
+                .all()
+            )
+            owned_base_count = sum(1 for app in title_apps if app.app_type == APP_TYPE_BASE and bool(app.owned))
+            owned_update_count = sum(1 for app in title_apps if app.app_type == APP_TYPE_UPD and bool(app.owned))
+            owned_dlc_count = sum(1 for app in title_apps if app.app_type == APP_TYPE_DLC and bool(app.owned))
+            has_base = owned_base_count > 0
+            available_update_versions = [_safe_int(app.app_version) for app in title_apps if app.app_type == APP_TYPE_UPD]
+            owned_update_versions = [_safe_int(app.app_version) for app in title_apps if app.app_type == APP_TYPE_UPD and bool(app.owned)]
+            highest_available_update_version = max(available_update_versions, default=0)
+            highest_owned_update_version = max(owned_update_versions, default=0)
+            has_latest_version = highest_available_update_version <= 0 or highest_owned_update_version >= highest_available_update_version
+            dlc_latest_by_app_id = {}
+            for app in title_apps:
+                if app.app_type != APP_TYPE_DLC:
+                    continue
+                version_num = _safe_int(app.app_version)
+                current = dlc_latest_by_app_id.get(app.app_id)
+                if current is None or version_num > current['version']:
+                    dlc_latest_by_app_id[app.app_id] = {
+                        'version': version_num,
+                        'owned': bool(app.owned),
+                    }
+            has_all_dlcs = all(entry['owned'] for entry in dlc_latest_by_app_id.values()) if dlc_latest_by_app_id else True
             game = {
                 'id': app_info.get('id') or row.app_id,
                 'name': app_info.get('name') or row.app_id,
@@ -4864,11 +5031,16 @@ def get_title_details_api():
                 'app_version': row.app_version,
                 'app_type': row.app_type,
                 'owned': bool(row.owned),
+                'owned_base_count': int(owned_base_count or 0),
+                'owned_update_count': int(owned_update_count or 0),
+                'owned_dlc_count': int(owned_dlc_count or 0),
+                'has_owned_content': bool(owned_base_count or owned_update_count or owned_dlc_count),
             }
             if row.app_type == APP_TYPE_BASE:
                 versions = []
                 for upd in (
                     db.session.query(
+                        Apps.app_id,
                         Apps.app_version,
                         Apps.owned,
                         func.coalesce(app_size_subquery.c.size, 0).label('size'),
@@ -4878,8 +5050,11 @@ def get_title_details_api():
                     .all()
                 ):
                     versions.append({
+                        'app_id': upd.app_id,
+                        'app_type': APP_TYPE_UPD,
                         'version': int(upd.app_version or 0),
                         'owned': bool(upd.owned),
+                        'deletable': bool(upd.owned),
                         'size': int(upd.size or 0),
                         'release_date': 'Unknown',
                     })
@@ -4891,13 +5066,14 @@ def get_title_details_api():
                     version['release_date'] = release_dates.get(version['version'], 'Unknown')
                 versions.sort(key=lambda item: item['version'])
                 game['version'] = versions
-                game['has_base'] = bool(row.have_base)
-                game['has_latest_version'] = bool(row.have_base) and bool(row.up_to_date)
-                game['has_all_dlcs'] = bool(row.complete)
+                game['has_base'] = has_base
+                game['has_latest_version'] = has_base and has_latest_version
+                game['has_all_dlcs'] = has_all_dlcs
             elif row.app_type == APP_TYPE_DLC:
                 dlc_versions = []
                 for dlc in (
                     db.session.query(
+                        Apps.app_id,
                         Apps.app_version,
                         Apps.owned,
                         func.coalesce(app_size_subquery.c.size, 0).label('size'),
@@ -4907,8 +5083,11 @@ def get_title_details_api():
                     .all()
                 ):
                     dlc_versions.append({
+                        'app_id': dlc.app_id,
+                        'app_type': APP_TYPE_DLC,
                         'version': int(dlc.app_version or 0),
                         'owned': bool(dlc.owned),
+                        'deletable': bool(dlc.owned),
                         'size': int(dlc.size or 0),
                         'release_date': 'Unknown',
                     })

@@ -4,6 +4,7 @@
 {% block content %}
 {% include 'nav.html' %}
 <div id="content" class="container-fluid mt-3">
+    <div id="libraryAlert" class="alert d-none mb-3" role="alert"></div>
     <div class="grid-container mt-2 mb-3 discover-collapsed" id="discoverSection">
         <div class="d-flex gap-3 align-items-stretch mt-2 py-3 discover-columns">
             <div class="flex-fill">
@@ -240,6 +241,22 @@
     </div>
 </div>
 
+<div class="modal fade" id="detailsDeleteConfirmModal" tabindex="-1" aria-labelledby="detailsDeleteConfirmModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h1 class="modal-title fs-5" id="detailsDeleteConfirmModalLabel">Confirm delete</h1>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body" id="detailsDeleteConfirmModalBody">...</div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-danger" id="detailsDeleteConfirmBtn">Delete</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Game Info Modal -->
 <div class="modal fade" id="gameInfoModal" tabindex="-1" aria-labelledby="gameInfoModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
@@ -355,6 +372,14 @@
     const canManageManualTitleInfo = {{ 'true' if current_user.is_admin or admin_account_created == false else 'false' }};
     let gameInfoCurrentTitleId = '';
     let gameInfoCurrentGame = null;
+    let currentDetailsContext = null;
+
+    function showLibraryAlert(message, type = 'info') {
+        const alertBox = $('#libraryAlert');
+        alertBox.removeClass('d-none alert-info alert-success alert-warning alert-danger');
+        alertBox.addClass(`alert-${type}`);
+        alertBox.text(message || '');
+    }
 
     function buildTitlesQuery() {
         const params = new URLSearchParams();
@@ -1496,13 +1521,122 @@
         });
     }
 
+    function setDetailsStatus(message, tone = 'muted') {
+        const status = $('#detailsDownloadStatus');
+        status.text(message || '');
+        status.removeClass('text-muted text-danger text-success').addClass(`text-${tone || 'muted'}`);
+    }
+
+    const detailsDeleteConfirmModalEl = document.getElementById('detailsDeleteConfirmModal');
+    const detailsDeleteConfirmModal = detailsDeleteConfirmModalEl ? new bootstrap.Modal(detailsDeleteConfirmModalEl) : null;
+    let detailsDeleteAction = null;
+
+    function showDetailsDeleteConfirm(title, message, onConfirm) {
+        if (!detailsDeleteConfirmModal) {
+            return;
+        }
+        detailsDeleteAction = onConfirm;
+        $('#detailsDeleteConfirmModalLabel').text(title);
+        $('#detailsDeleteConfirmModalBody').text(message);
+        $('#detailsDeleteConfirmBtn').prop('disabled', false);
+        detailsDeleteConfirmModal.show();
+    }
+
+    if (detailsDeleteConfirmModalEl) {
+        detailsDeleteConfirmModalEl.addEventListener('hidden.bs.modal', function () {
+            detailsDeleteAction = null;
+            $('#detailsDeleteConfirmBtn').prop('disabled', false);
+        });
+    }
+
+    $('#detailsDeleteConfirmBtn').on('click', function () {
+        if (!detailsDeleteAction) {
+            return;
+        }
+        $(this).prop('disabled', true);
+        detailsDeleteAction();
+    });
+
+    const detailsModalEl = document.getElementById('detailsModal');
+    const detailsModalInstance = detailsModalEl ? bootstrap.Modal.getOrCreateInstance(detailsModalEl) : null;
+
+    function refreshLibraryAfterDelete(successMessage) {
+        gameDetailsCache.clear();
+        return refreshGames(false)
+            .then(() => {
+                if (successMessage) {
+                    showLibraryAlert(successMessage, 'success');
+                }
+            })
+            .catch(() => {
+                if (successMessage) {
+                    showLibraryAlert(successMessage, 'success');
+                }
+            });
+    }
+
+    function handleSuccessfulDeleteCompletion(message, alertType = 'success') {
+        if (detailsModalInstance) {
+            detailsModalInstance.hide();
+        }
+        gameDetailsCache.clear();
+        return refreshGames(false)
+            .then(() => {
+                if (message) {
+                    showLibraryAlert(message, alertType);
+                }
+            })
+            .catch(() => {
+                if (message) {
+                    showLibraryAlert(message, alertType);
+                }
+            });
+    }
+
+    function executeDetailsDelete(payload, successMessage) {
+        setDetailsStatus('Deleting...', 'muted');
+        $.ajax({
+            url: "/api/manage/delete-library-content",
+            type: 'POST',
+            data: JSON.stringify(payload),
+            contentType: "application/json",
+            success: function (result) {
+                if (result && result['success']) {
+                    handleSuccessfulDeleteCompletion(successMessage, 'success');
+                    return;
+                }
+                const errors = (result && result['errors']) ? result['errors'].join('; ') : 'Delete failed.';
+                setDetailsStatus(errors, 'danger');
+            },
+            error: function (xhr) {
+                const response = xhr && xhr.responseJSON ? xhr.responseJSON : null;
+                if (response && response['mutated']) {
+                    const warnings = (response['errors'] || []).join('; ');
+                    const warningMessage = warnings
+                        ? `${successMessage} Some files failed: ${warnings}`
+                        : successMessage;
+                    handleSuccessfulDeleteCompletion(warningMessage, 'warning');
+                    return;
+                }
+                const errors = (response && response['errors']) ? response['errors'].join('; ') : 'Delete failed.';
+                setDetailsStatus(errors, 'danger');
+            },
+            complete: function () {
+                $('#detailsDeleteConfirmBtn').prop('disabled', false);
+                if (detailsDeleteConfirmModal) {
+                    detailsDeleteConfirmModal.hide();
+                }
+            }
+        });
+    }
+
     function renderDetails(game) {
         if (!game) {
             $('#detailsTitle').text('Content not found');
             $('#detailsSubtitle').text('');
             $('#detailsMeta').empty();
             $('#detailsVersions').empty();
-            $('#detailsDownloadStatus').text('');
+            setDetailsStatus('', 'muted');
             return;
         }
 
@@ -1533,20 +1667,33 @@
         $('#detailsMeta').html(metaItems.join(' '));
 
         const versions = Array.isArray(game.version) ? game.version : [];
-        if (!versions.length) {
-            $('#detailsVersions').html('<div class="text-muted">No version data available.</div>');
-            $('#detailsDownloadStatus').text('');
-            return;
-        }
-
-        const rows = versions.map(version => `
-            <tr>
-                <td>v${version.version}</td>
-                <td>${version.owned ? 'Owned' : 'Missing'}</td>
-                <td>${(version.size !== undefined && version.size !== null) ? formatBytes(version.size) : '-'}</td>
-                <td>${version.release_date || 'Unknown'}</td>
-            </tr>
-        `).join('');
+        const canDeleteRows = canManageDownloads && versions.some(version => version && version.deletable);
+        const rows = versions.map(version => {
+            const actionCell = canDeleteRows
+                ? `
+                    <td class="text-end">
+                        ${version.deletable
+                            ? `<button type="button" class="btn btn-outline-danger btn-sm details-delete-version-btn"
+                                    data-app-id="${escapeHtml(String(version.app_id || game.app_id || ''))}"
+                                    data-app-type="${escapeHtml(String(version.app_type || game.app_type || ''))}"
+                                    data-version="${escapeHtml(String(version.version ?? ''))}"
+                                    data-item-name="${escapeHtml(String(game.app_type === 'DLC' ? (game.name || title) : title))}">
+                                    <i class="bi bi-trash"></i>
+                               </button>`
+                            : ''}
+                    </td>
+                `
+                : '';
+            return `
+                <tr>
+                    <td>v${version.version}</td>
+                    <td>${version.owned ? 'Owned' : 'Missing'}</td>
+                    <td>${(version.size !== undefined && version.size !== null) ? formatBytes(version.size) : '-'}</td>
+                    <td>${version.release_date || 'Unknown'}</td>
+                    ${actionCell}
+                </tr>
+            `;
+        }).join('');
 
         const missingVersions = versions.filter(version => !version.owned);
         const latestMissing = missingVersions.length ? missingVersions[missingVersions.length - 1] : null;
@@ -1567,6 +1714,15 @@
                     </button>
             `
             : '';
+        const cascadeDeleteButton = (canManageDownloads && game.app_type === 'BASE' && game.has_owned_content)
+            ? `
+                    <button type="button" class="btn btn-danger btn-sm details-delete-cascade-btn"
+                        data-title-id="${escapeHtml(String(game.title_id || ''))}"
+                        data-title-name="${escapeHtml(String(title || 'this title'))}">
+                        <i class="bi bi-trash"></i> Delete game, updates, and DLC
+                    </button>
+            `
+            : '';
         const customSearchRow = latestMissing
             ? `
                     <div class="input-group input-group-sm mt-2 manual-search-group">
@@ -1578,35 +1734,40 @@
                     </div>
             `
             : '';
-        const actionRow = (canManageDownloads && (updateButton || baseButton))
+        const actionRow = (canManageDownloads && (updateButton || baseButton || cascadeDeleteButton))
             ? `
                 <div class="mt-3">
                     <div class="d-flex flex-wrap gap-2">
                         ${baseButton}
                         ${updateButton}
+                        ${cascadeDeleteButton}
                     </div>
                     ${customSearchRow}
                 </div>
             `
             : '';
 
-        $('#detailsVersions').html(`
-            <table class="table table-sm table-striped">
-                 <thead>
-                     <tr>
-                         <th scope="col">Version</th>
-                         <th scope="col">Status</th>
-                         <th scope="col">Size</th>
-                         <th scope="col">Release date</th>
-                     </tr>
-                 </thead>
-                <tbody>
-                    ${rows}
-                </tbody>
-            </table>
-            ${actionRow}
-        `);
-        $('#detailsDownloadStatus').text('');
+        const tableHtml = versions.length
+            ? `
+                <table class="table table-sm table-striped">
+                    <thead>
+                        <tr>
+                            <th scope="col">Version</th>
+                            <th scope="col">Status</th>
+                            <th scope="col">Size</th>
+                            <th scope="col">Release date</th>
+                            ${canDeleteRows ? '<th scope="col" class="text-end">Actions</th>' : ''}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rows}
+                    </tbody>
+                </table>
+            `
+            : '<div class="text-muted">No version data available.</div>';
+
+        $('#detailsVersions').html(`${tableHtml}${actionRow}`);
+        setDetailsStatus('', 'muted');
     }
 
     function showDetailsLoading() {
@@ -1614,15 +1775,15 @@
         $('#detailsSubtitle').text('');
         $('#detailsMeta').empty();
         $('#detailsVersions').html('<div class="text-muted">Loading details...</div>');
-        $('#detailsDownloadStatus').text('');
+        setDetailsStatus('', 'muted');
     }
 
-    const detailsModal = document.getElementById('detailsModal');
-    if (detailsModal) {
-        detailsModal.addEventListener('show.bs.modal', event => {
+    if (detailsModalEl) {
+        detailsModalEl.addEventListener('show.bs.modal', event => {
             const button = event.relatedTarget;
             const appId = button.getAttribute('data-bs-app-id');
             const appType = button.getAttribute('data-bs-app-type');
+            currentDetailsContext = { appId: appId, appType: appType };
             const initial = findGameByKey(appId, appType);
             if (initial) {
                 renderDetails(initial);
@@ -1633,7 +1794,50 @@
                 .then(game => renderDetails(game))
                 .catch(() => renderDetails(null));
         });
+        detailsModalEl.addEventListener('hidden.bs.modal', () => {
+            currentDetailsContext = null;
+            setDetailsStatus('', 'muted');
+        });
     }
+
+    $(document).on('click', '.details-delete-cascade-btn', function () {
+        const titleId = String($(this).data('title-id') || '').trim();
+        const titleName = String($(this).data('title-name') || 'this title').trim();
+        if (!titleId) {
+            return;
+        }
+        showDetailsDeleteConfirm(
+            'Delete game, updates, and DLC',
+            `Delete the base game and all owned updates and DLC for ${titleName}?`,
+            function () {
+                executeDetailsDelete(
+                    { scope: 'title_cascade', title_id: titleId },
+                    'Deleted base game content.'
+                );
+            }
+        );
+    });
+
+    $(document).on('click', '.details-delete-version-btn', function () {
+        const appId = String($(this).data('app-id') || '').trim();
+        const appType = String($(this).data('app-type') || '').trim();
+        const version = $(this).data('version');
+        const itemName = String($(this).data('item-name') || 'this entry').trim();
+        if (!appId || !appType || version === undefined) {
+            return;
+        }
+        const label = (String(appType).toUpperCase() === 'DLC') ? 'DLC' : 'update';
+        showDetailsDeleteConfirm(
+            `Delete ${label}`,
+            `Delete ${label} v${version} for ${itemName}?`,
+            function () {
+                executeDetailsDelete(
+                    { scope: 'app_version', app_id: appId, app_type: appType, version: version },
+                    `Deleted ${label} v${version}.`
+                );
+            }
+        );
+    });
 
     function findGameByTitleId(titleId) {
         const tid = (titleId || '').trim().toUpperCase();

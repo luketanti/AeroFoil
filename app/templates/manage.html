@@ -95,6 +95,22 @@
                                         </div>
                                     </div>
                                     <div class="border rounded p-3">
+                                        <div class="fw-semibold">Delete orphaned updates and DLC</div>
+                                        <div class="text-muted small mb-2">Remove owned updates and DLC files whose parent title has no owned base game.</div>
+                                        <div class="d-flex flex-wrap gap-3 align-items-center">
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="deleteOrphanedDryRun" checked>
+                                                <label class="form-check-label" for="deleteOrphanedDryRun">Dry run</label>
+                                            </div>
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="deleteOrphanedVerbose">
+                                                <label class="form-check-label" for="deleteOrphanedVerbose">Verbose</label>
+                                            </div>
+                                            <button type="button" id="deleteOrphanedAddonsBtn" class="btn btn-danger ms-auto"
+                                                onClick='promptDeleteOrphanedAddons()'>Delete orphaned updates and DLC</button>
+                                        </div>
+                                    </div>
+                                    <div class="border rounded p-3">
                                         <div class="fw-semibold">Delete duplicates</div>
                                         <div class="text-muted small mb-2">Keep one owned file per app ID/version and remove duplicate file entries, even across different extensions.</div>
                                         <div class="d-flex flex-wrap gap-3 align-items-center">
@@ -251,6 +267,22 @@
     </div>
 </div>
 
+<div class="modal fade" id="manageConfirmModal" tabindex="-1" aria-labelledby="manageConfirmModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h1 class="modal-title fs-5" id="manageConfirmModalLabel">Confirm delete</h1>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body" id="manageConfirmModalBody">...</div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-danger" id="manageConfirmModalBtn">Delete</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
     function showManageAlert(message, type = 'info') {
         const alertBox = $('#manageAlert');
@@ -258,6 +290,36 @@
         alertBox.addClass(`alert-${type}`);
         alertBox.text(message);
     }
+
+    const manageConfirmModalEl = document.getElementById('manageConfirmModal');
+    const manageConfirmModal = manageConfirmModalEl ? new bootstrap.Modal(manageConfirmModalEl) : null;
+    let manageConfirmAction = null;
+
+    function showManageConfirmDialog(title, message, onConfirm) {
+        if (!manageConfirmModal) {
+            return;
+        }
+        manageConfirmAction = onConfirm;
+        $('#manageConfirmModalLabel').text(title);
+        $('#manageConfirmModalBody').text(message);
+        $('#manageConfirmModalBtn').prop('disabled', false);
+        manageConfirmModal.show();
+    }
+
+    if (manageConfirmModalEl) {
+        manageConfirmModalEl.addEventListener('hidden.bs.modal', function () {
+            manageConfirmAction = null;
+            $('#manageConfirmModalBtn').prop('disabled', false);
+        });
+    }
+
+    $('#manageConfirmModalBtn').on('click', function () {
+        if (!manageConfirmAction) {
+            return;
+        }
+        $(this).prop('disabled', true);
+        manageConfirmAction();
+    });
 
     function organizeLibrary() {
         $('#organizeLibraryBtn').prop('disabled', true);
@@ -358,6 +420,48 @@
             },
             complete: function () {
                 $('#deleteDuplicatesBtn').prop('disabled', false);
+            }
+        });
+    }
+
+    function promptDeleteOrphanedAddons() {
+        if ($('#deleteOrphanedDryRun').is(':checked')) {
+            deleteOrphanedAddons();
+            return;
+        }
+        showManageConfirmDialog(
+            'Delete orphaned updates and DLC',
+            'Delete all owned updates and DLC entries whose parent title has no owned base game?',
+            deleteOrphanedAddons
+        );
+    }
+
+    function deleteOrphanedAddons() {
+        $('#deleteOrphanedAddonsBtn').prop('disabled', true);
+        data = {
+            dry_run: $('#deleteOrphanedDryRun').is(':checked'),
+            verbose: $('#deleteOrphanedVerbose').is(':checked')
+        }
+        $.ajax({
+            url: "/api/manage/delete-orphaned-addons",
+            type: 'POST',
+            data: JSON.stringify(data),
+            contentType: "application/json",
+            success: function (result) {
+                if (result['success']) {
+                    showManageAlert(`Delete orphaned add-ons complete. Deleted ${result['deleted']} files. Skipped ${result['skipped']}.`, 'success');
+                    showManageOutput(result['details']);
+                } else {
+                    showManageAlert(`Delete orphaned add-ons failed: ${result['errors'].join('; ')}`, 'danger');
+                    showManageOutput(result['details']);
+                }
+            },
+            complete: function () {
+                $('#deleteOrphanedAddonsBtn').prop('disabled', false);
+                $('#manageConfirmModalBtn').prop('disabled', false);
+                if (manageConfirmModal) {
+                    manageConfirmModal.hide();
+                }
             }
         });
     }

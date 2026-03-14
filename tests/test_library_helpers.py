@@ -1,18 +1,45 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.library import (
     _cleanup_import_staging_roots,
+    _delete_target_apps,
     _format_nsz_command,
     _pending_cleanup_roots,
     _pending_organize_paths,
     _sanitize_component,
     enqueue_cleanup_roots,
     enqueue_organize_paths,
+    delete_library_content,
+    delete_orphaned_addons,
 )
+from app.app import app as flask_app
 
 
 class LibraryHelperTests(unittest.TestCase):
+    class _InvertibleExpr:
+        def __invert__(self):
+            return self
+
+    @staticmethod
+    def _make_app(app_pk, app_id, app_type, version):
+        return SimpleNamespace(
+            id=app_pk,
+            app_id=app_id,
+            app_type=app_type,
+            app_version=str(version),
+            files=[],
+        )
+
+    @staticmethod
+    def _make_file(file_id, filepath, linked_apps):
+        return SimpleNamespace(
+            id=file_id,
+            filepath=filepath,
+            apps=list(linked_apps),
+        )
+
     def test_sanitize_component(self):
         self.assertEqual(_sanitize_component('Game: Name?'), 'Game Name')
         self.assertEqual(_sanitize_component(''), 'Unknown')
@@ -82,6 +109,109 @@ class LibraryHelperTests(unittest.TestCase):
                 "X:\\fixture-root\\Example Release NSW-GRP\\notes.txt",
             ],
         )
+
+    @patch("app.library.delete_file_by_filepath")
+    @patch("app.library.os.remove")
+    @patch("app.library.os.path.exists", return_value=True)
+    def test_delete_target_apps_skips_shared_files_linked_to_non_target_apps(
+        self,
+        exists_mock,
+        remove_mock,
+        delete_file_mock,
+    ):
+        target_app = self._make_app(1, "0100AAAA", "UPDATE", 1)
+        foreign_app = self._make_app(2, "0100BBBB", "DLC", 0)
+        file_entry = self._make_file(101, "X:\\library\\shared.nsp", [target_app, foreign_app])
+        target_app.files = [file_entry]
+
+        result = _delete_target_apps([target_app], dry_run=False, verbose=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["deleted"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertTrue(any("Skip shared file" in line for line in result["details"]))
+        remove_mock.assert_not_called()
+        delete_file_mock.assert_not_called()
+
+    @patch("app.library.delete_file_by_filepath")
+    @patch("app.library.os.remove")
+    @patch("app.library.os.path.exists", return_value=False)
+    def test_delete_target_apps_cleans_db_when_disk_file_missing(
+        self,
+        exists_mock,
+        remove_mock,
+        delete_file_mock,
+    ):
+        target_app = self._make_app(1, "0100AAAA", "UPDATE", 3)
+        file_entry = self._make_file(102, "X:\\library\\missing.nsp", [target_app])
+        target_app.files = [file_entry]
+
+        result = _delete_target_apps([target_app], dry_run=False, verbose=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["deleted"], 1)
+        self.assertEqual(result["skipped"], 0)
+        remove_mock.assert_not_called()
+        delete_file_mock.assert_called_once_with("X:\\library\\missing.nsp")
+
+    def test_delete_library_content_rejects_unknown_scope(self):
+        result = delete_library_content("unknown-scope", dry_run=True)
+
+        self.assertFalse(result["success"])
+        self.assertTrue(any("Unsupported delete scope" in err for err in result["errors"]))
+
+    @patch("app.library._delete_target_apps", return_value={"success": True, "deleted": 2, "skipped": 0, "mutated": False, "errors": [], "details": []})
+    def test_delete_orphaned_addons_uses_targeted_delete_helper(self, delete_targets_mock):
+        with flask_app.app_context():
+            with patch("app.library.Apps.query") as apps_query_mock, patch("app.library.db.session.query") as session_query_mock:
+                session_query_mock.return_value.filter.return_value.exists.return_value = self._InvertibleExpr()
+                apps_query_mock.join.return_value.filter.return_value.all.return_value = ["orphan-app"]
+
+                result = delete_orphaned_addons(dry_run=True, verbose=True)
+
+        self.assertTrue(result["success"])
+        delete_targets_mock.assert_called_once_with(
+            ["orphan-app"],
+            dry_run=True,
+            verbose=True,
+            detail_limit=200,
+        )
+
+    @patch("app.library.delete_file_by_filepath")
+    @patch("app.library.os.remove")
+    @patch("app.library.os.path.exists", return_value=True)
+    def test_delete_target_apps_marks_mutated_on_success(
+        self,
+        exists_mock,
+        remove_mock,
+        delete_file_mock,
+    ):
+        target_app = self._make_app(1, "0100CCCC", "UPDATE", 5)
+        file_entry = self._make_file(103, "X:\\library\\owned.nsp", [target_app])
+        target_app.files = [file_entry]
+
+        result = _delete_target_apps([target_app], dry_run=False, verbose=False)
+
+        self.assertTrue(result["mutated"])
+
+    @patch("app.library.delete_file_by_filepath")
+    @patch("app.library.os.remove")
+    @patch("app.library.os.path.exists", return_value=True)
+    def test_delete_target_apps_dry_run_does_not_mark_mutated(
+        self,
+        exists_mock,
+        remove_mock,
+        delete_file_mock,
+    ):
+        target_app = self._make_app(1, "0100DDDD", "UPDATE", 7)
+        file_entry = self._make_file(104, "X:\\library\\dryrun.nsp", [target_app])
+        target_app.files = [file_entry]
+
+        result = _delete_target_apps([target_app], dry_run=True, verbose=False)
+
+        self.assertFalse(result["mutated"])
+        remove_mock.assert_not_called()
+        delete_file_mock.assert_not_called()
 
 
 if __name__ == '__main__':

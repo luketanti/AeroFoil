@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import importlib.util
+from sqlalchemy.orm import aliased
 from app.constants import *
 from app.db import *
 from app import titles as titles_lib
@@ -1773,14 +1774,185 @@ def organize_pending_downloads():
     if cleanup_roots:
         _cleanup_import_staging_roots(cleanup_roots)
 
-def delete_older_updates(dry_run=False, verbose=False, detail_limit=200):
-    results = {
+def _new_delete_results():
+    return {
         'success': True,
         'deleted': 0,
         'skipped': 0,
+        'mutated': False,
         'errors': [],
         'details': []
     }
+
+def _resolve_delete_targets(scope, title_id=None, app_id=None, app_type=None, version=None):
+    scope_name = str(scope or '').strip().lower()
+    normalized_title_id = str(title_id or '').strip().upper()
+    normalized_app_id = str(app_id or '').strip().upper()
+    normalized_app_type = str(app_type or '').strip().upper()
+    normalized_version = None if version is None else str(version).strip()
+
+    if scope_name == 'title_cascade':
+        if not normalized_title_id:
+            raise ValueError('Missing title_id for title cascade delete.')
+        title = Titles.query.filter(func.upper(Titles.title_id) == normalized_title_id).first()
+        if not title:
+            raise ValueError(f'Title {normalized_title_id} was not found.')
+        return (
+            Apps.query
+            .filter(
+                Apps.title_id == title.id,
+                Apps.owned.is_(True),
+                Apps.app_type.in_([APP_TYPE_BASE, APP_TYPE_UPD, APP_TYPE_DLC])
+            )
+            .all()
+        )
+
+    if scope_name == 'app_version':
+        if not normalized_app_id:
+            raise ValueError('Missing app_id for app version delete.')
+        if normalized_app_type not in (APP_TYPE_UPD, APP_TYPE_DLC):
+            raise ValueError('app_type must be UPDATE or DLC for app version delete.')
+        if normalized_version in (None, ''):
+            raise ValueError('Missing version for app version delete.')
+        return (
+            Apps.query
+            .filter(
+                func.upper(Apps.app_id) == normalized_app_id,
+                Apps.app_type == normalized_app_type,
+                Apps.app_version == normalized_version,
+                Apps.owned.is_(True)
+            )
+            .all()
+        )
+
+    raise ValueError(f'Unsupported delete scope: {scope}')
+
+def _delete_target_apps(target_apps, dry_run=False, verbose=False, detail_limit=200):
+    results = _new_delete_results()
+    detail_count = 0
+
+    def add_detail(message):
+        nonlocal detail_count
+        if (verbose or dry_run) and detail_count < detail_limit:
+            results['details'].append(message)
+            detail_count += 1
+
+    target_apps = [app for app in (target_apps or []) if app is not None]
+    if not target_apps:
+        add_detail('No owned content matched the requested delete target.')
+        return results
+
+    target_app_ids = {int(app.id) for app in target_apps if getattr(app, 'id', None) is not None}
+    processed_file_ids = set()
+    candidate_filepaths = []
+
+    for app in target_apps:
+        app_label = f"{app.app_type} {app.app_id} v{app.app_version}"
+        app_files_list = [file_entry for file_entry in list(app.files or []) if file_entry]
+        if not app_files_list:
+            results['skipped'] += 1
+            add_detail(f"Skip {app_label}: no linked files.")
+            continue
+
+        for file_entry in app_files_list:
+            file_id = getattr(file_entry, 'id', None)
+            if file_id is None or file_id in processed_file_ids:
+                continue
+            processed_file_ids.add(file_id)
+
+            filepath = str(getattr(file_entry, 'filepath', '') or '')
+            linked_apps = [linked for linked in list(getattr(file_entry, 'apps', []) or []) if linked is not None]
+            foreign_apps = [linked for linked in linked_apps if getattr(linked, 'id', None) not in target_app_ids]
+            if foreign_apps:
+                foreign_labels = ', '.join(
+                    f"{linked.app_type} {linked.app_id} v{linked.app_version}"
+                    for linked in foreign_apps
+                )
+                results['skipped'] += 1
+                add_detail(f"Skip shared file {filepath}: linked to non-target apps {foreign_labels}.")
+                continue
+
+            candidate_filepaths.append(filepath)
+
+    unique_filepaths = list(dict.fromkeys([path for path in candidate_filepaths if path]))
+    if not unique_filepaths:
+        add_detail('No deletable files matched the requested delete target.')
+        return results
+
+    for filepath in unique_filepaths:
+        if dry_run:
+            results['deleted'] += 1
+            add_detail(f"Plan delete: {filepath}.")
+            continue
+        try:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+            delete_file_by_filepath(filepath)
+            results['deleted'] += 1
+            results['mutated'] = True
+            add_detail(f"Deleted: {filepath}.")
+        except Exception as e:
+            logger.error(f"Failed to delete file {filepath}: {e}")
+            db.session.rollback()
+            results['errors'].append(str(e))
+            add_detail(f"Error deleting {filepath}: {e}.")
+
+    if results['errors']:
+        results['success'] = False
+    return results
+
+def delete_library_content(scope, dry_run=False, verbose=False, detail_limit=200, title_id=None, app_id=None, app_type=None, version=None):
+    try:
+        target_apps = _resolve_delete_targets(
+            scope=scope,
+            title_id=title_id,
+            app_id=app_id,
+            app_type=app_type,
+            version=version
+        )
+    except ValueError as e:
+        results = _new_delete_results()
+        results['success'] = False
+        results['errors'].append(str(e))
+        return results
+
+    return _delete_target_apps(
+        target_apps,
+        dry_run=dry_run,
+        verbose=verbose,
+        detail_limit=detail_limit
+    )
+
+def delete_orphaned_addons(dry_run=False, verbose=False, detail_limit=200):
+    base_apps = aliased(Apps)
+    owned_base_title_ids = (
+        db.session.query(base_apps.title_id.label('title_fk'))
+        .filter(
+            base_apps.app_type == APP_TYPE_BASE,
+            base_apps.owned.is_(True)
+        )
+        .distinct()
+        .subquery()
+    )
+    target_apps = (
+        Apps.query
+        .join(Titles, Apps.title_id == Titles.id)
+        .filter(
+            Apps.owned.is_(True),
+            Apps.app_type.in_([APP_TYPE_UPD, APP_TYPE_DLC]),
+            ~Apps.title_id.in_(db.session.query(owned_base_title_ids.c.title_fk))
+        )
+        .all()
+    )
+    return _delete_target_apps(
+        target_apps,
+        dry_run=dry_run,
+        verbose=verbose,
+        detail_limit=detail_limit
+    )
+
+def delete_older_updates(dry_run=False, verbose=False, detail_limit=200):
+    results = _new_delete_results()
     detail_count = 0
 
     def add_detail(message):
@@ -1831,13 +2003,7 @@ def delete_older_updates(dry_run=False, verbose=False, detail_limit=200):
     return results
 
 def delete_duplicates(dry_run=False, verbose=False, detail_limit=200):
-    results = {
-        'success': True,
-        'deleted': 0,
-        'skipped': 0,
-        'errors': [],
-        'details': []
-    }
+    results = _new_delete_results()
     detail_count = 0
 
     def add_detail(message):
