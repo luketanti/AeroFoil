@@ -2,7 +2,13 @@ import unittest
 from unittest.mock import patch
 
 from app.downloads.client import queue_download
-from app.downloads.manager import _adopt_untracked_completed_item, _infer_update_info_from_completed_item, queue_download_url
+from app.downloads.manager import (
+    _adopt_untracked_completed_item,
+    _format_pending_label,
+    _infer_update_info_from_completed_item,
+    get_downloads_state,
+    queue_download_url,
+)
 from app.downloads.prowlarr import _normalize_result
 from app.downloads.usenet_client import add_nzb, list_active
 from app.downloads.usenet_client import _restrict_job_to_matching_update_files
@@ -117,6 +123,42 @@ class QueueRoutingTests(unittest.TestCase):
         self.assertEqual(queue_download_mock.call_args.args[0], "usenet")
         self.assertFalse(queue_download_mock.call_args.kwargs["update_only"])
         self.assertEqual(queue_download_mock.call_args.kwargs["expected_version"], 123)
+
+    def test_format_pending_label_falls_back_to_expected_name_for_manual_items(self):
+        self.assertEqual(
+            _format_pending_label({
+                "title_id": None,
+                "version": None,
+                "expected_name": "Super Mario 3D World plus Bowsers Fury NSW-VENOM",
+            }),
+            "Super Mario 3D World plus Bowsers Fury NSW-VENOM",
+        )
+
+    @patch("app.downloads.manager._state_lock")
+    @patch("app.downloads.manager._state", {
+        "running": False,
+        "last_run": 123.0,
+        "pending": {
+            "manual:1": {
+                "title_id": None,
+                "version": None,
+                "hash": "SABnzbd_nzo_2goo76g2",
+                "id": "SABnzbd_nzo_2goo76g2",
+                "expected_name": "Super Mario 3D World plus Bowsers Fury NSW-VENOM",
+                "title_name": "Super Mario 3D World plus Bowsers Fury NSW-VENOM",
+                "protocol": "usenet",
+                "client_type": "sabnzbd",
+            }
+        },
+        "completed": set(),
+    })
+    def test_get_downloads_state_exposes_label_for_manual_pending_items(self, _state_lock_mock):
+        state = get_downloads_state()
+
+        self.assertEqual(state["pending"][0]["label"], "Super Mario 3D World plus Bowsers Fury NSW-VENOM")
+        self.assertEqual(state["pending"][0]["expected_name"], "Super Mario 3D World plus Bowsers Fury NSW-VENOM")
+        self.assertIsNone(state["pending"][0]["title_id"])
+        self.assertIsNone(state["pending"][0]["version"])
 
     @patch("app.downloads.client.add_nzb")
     def test_queue_download_forwards_update_selection_to_usenet_client(self, add_nzb_mock):

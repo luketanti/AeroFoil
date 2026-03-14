@@ -5,7 +5,7 @@
 <div class="container-fluid setting-body">
     <div class="row">
         <div class="col">
-            <div class="settings-container container mt-3">
+            <div class="settings-container container-fluid mt-3 px-3 px-xl-4">
                 <div class="d-flex flex-column flex-lg-row justify-content-between gap-2 align-items-lg-center mb-2">
                     <div>
                         <h2 class="pb-2">Downloads</h2>
@@ -16,7 +16,7 @@
                 <div id="downloadsAlert" class="alert alert-info d-none mb-3" role="alert"></div>
 
                 <div class="row g-3">
-                    <div class="col-xl-8 col-lg-12">
+                    <div class="col-12">
                         <div class="card mb-3">
                             <div class="card-body">
                                 <div class="d-flex align-items-center justify-content-between mb-3">
@@ -54,7 +54,7 @@
                         </div>
                     </div>
 
-                    <div class="col-xl-4 col-lg-12">
+                    <div class="col-12">
                         <div class="card mb-3">
                             <div class="card-body">
                                 <div class="d-flex align-items-center justify-content-between mb-2">
@@ -126,7 +126,20 @@
                 $('#downloadsQueueList').text('No pending downloads.');
                 return;
             }
-            const lines = pending.map(item => `${item['title_id']} v${item['version']} | ${item['protocol'] || '-'} | ${item['client_type'] || '-'} | ${item['expected_name'] || ''} | ${item['hash'] || ''}`);
+            const lines = pending.map(item => {
+                const parts = [
+                    item['label'] || 'Manual download',
+                    item['protocol'] || '-',
+                    item['client_type'] || '-',
+                ];
+                if (item['expected_name'] && item['expected_name'] !== item['label']) {
+                    parts.push(item['expected_name']);
+                }
+                if (item['hash']) {
+                    parts.push(item['hash']);
+                }
+                return parts.join(' | ');
+            });
             $('#downloadsQueueList').text(lines.join('\n'));
         });
     }

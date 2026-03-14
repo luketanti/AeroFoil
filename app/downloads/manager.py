@@ -122,15 +122,17 @@ def get_downloads_state():
     with _state_lock:
         pending_items = []
         for key, info in _state["pending"].items():
+            expected_name = str(info.get("expected_name") or "").strip()
             pending_items.append({
                 "key": key,
                 "title_id": info.get("title_id"),
                 "version": info.get("version"),
-                "expected_name": info.get("expected_name"),
+                "expected_name": expected_name or None,
                 "hash": info.get("hash"),
                 "id": info.get("id"),
                 "protocol": info.get("protocol"),
                 "client_type": info.get("client_type"),
+                "label": _format_pending_label(info),
             })
         return {
             "running": _state["running"],
@@ -138,6 +140,24 @@ def get_downloads_state():
             "pending": pending_items,
             "completed": sorted(_state["completed"]),
         }
+
+
+def _format_pending_label(info):
+    title_id = str((info or {}).get("title_id") or "").strip().upper()
+    version = (info or {}).get("version")
+    if title_id and version is not None:
+        return f"{title_id} v{version}"
+    if title_id:
+        return title_id
+    if version is not None:
+        return f"v{version}"
+    expected_name = str((info or {}).get("expected_name") or "").strip()
+    if expected_name:
+        return expected_name
+    title_name = str((info or {}).get("title_name") or "").strip()
+    if title_name:
+        return title_name
+    return "Manual download"
 
 
 def run_downloads_job(scan_cb=None, post_cb=None):
