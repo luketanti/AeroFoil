@@ -304,8 +304,11 @@ def search_update_options(title_id, version, limit=20):
     settings = load_settings()
     downloads = settings.get("downloads", {})
     prowlarr_cfg = downloads.get("prowlarr", {})
+    allowed_protocols = _get_configured_protocols(downloads)
     if not prowlarr_cfg.get("url") or not prowlarr_cfg.get("api_key"):
         return False, "Prowlarr is not configured.", []
+    if not allowed_protocols:
+        return False, "No download client is configured.", []
 
     title_name = title_id
     titles_lib.load_titledb()
@@ -345,6 +348,7 @@ def search_update_options(title_id, version, limit=20):
                 min_age_minutes=min_age_minutes,
                 required_terms=downloads.get("required_terms") or [],
                 blacklist_terms=downloads.get("blacklist_terms") or [],
+                allowed_protocols=allowed_protocols,
             ) is not None
         ]
         if results:
@@ -871,11 +875,10 @@ def _build_update_destination(dest_root, title_id, title_name, version, src_path
 def _get_import_extension(src_path):
     name = os.path.basename(str(src_path or ""))
     lowered = name.lower()
-    if lowered.endswith(".nsp.hdf"):
-        # Some wrapped usenet releases keep the real content extension before .hdf.
-        return "nsp"
-    if lowered.endswith(".nsz.hdf"):
-        return "nsz"
+    for extension in ALLOWED_EXTENSIONS:
+        if lowered.endswith(f".{extension}.hdf"):
+            # Some wrapped usenet releases keep the real content extension before .hdf.
+            return extension
     return os.path.splitext(name)[1].lstrip(".")
 
 

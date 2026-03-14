@@ -11,6 +11,7 @@ from app.downloads.manager import (
     _normalize_imported_wrapped_files,
     get_downloads_state,
     queue_download_url,
+    search_update_options,
 )
 from app.downloads.prowlarr import _normalize_result
 from app.downloads.usenet_client import add_nzb, list_active
@@ -126,6 +127,49 @@ class QueueRoutingTests(unittest.TestCase):
         self.assertEqual(queue_download_mock.call_args.args[0], "usenet")
         self.assertFalse(queue_download_mock.call_args.kwargs["update_only"])
         self.assertEqual(queue_download_mock.call_args.kwargs["expected_version"], 123)
+
+    @patch("app.downloads.manager.pick_best_result")
+    @patch("app.downloads.manager.ProwlarrClient")
+    @patch("app.downloads.manager.titles_lib.get_game_info", return_value={"name": "Example Title"})
+    @patch("app.downloads.manager.titles_lib.release_titledb")
+    @patch("app.downloads.manager.titles_lib.load_titledb")
+    @patch("app.downloads.manager.load_settings")
+    def test_search_update_options_filters_results_to_configured_protocols(
+        self,
+        load_settings_mock,
+        load_titledb_mock,
+        release_titledb_mock,
+        get_game_info_mock,
+        prowlarr_client_mock,
+        pick_best_result_mock,
+    ):
+        load_settings_mock.return_value = {
+            "downloads": {
+                "prowlarr": {
+                    "url": "http://prowlarr.local",
+                    "api_key": "secret",
+                },
+                "usenet_client": {
+                    "type": "sabnzbd",
+                    "url": "http://sab.local",
+                    "api_key": "secret",
+                    "category": "aerofoil",
+                },
+            }
+        }
+        prowlarr_client_mock.return_value.search.return_value = [
+            {"title": "Example Release Torrent", "protocol": "torrent", "download_url": "magnet:?xt=urn:btih:abcdef"},
+            {"title": "Example Release NZB", "protocol": "usenet", "download_url": "https://indexer.example/file.nzb"},
+        ]
+        pick_best_result_mock.side_effect = lambda items, **kwargs: (
+            items[0] if items[0].get("protocol") in (kwargs.get("allowed_protocols") or []) else None
+        )
+
+        ok, message, results = search_update_options("0100000000010000", 123, limit=20)
+
+        self.assertTrue(ok)
+        self.assertIsNone(message)
+        self.assertEqual([item["protocol"] for item in results], ["usenet"])
 
     def test_format_pending_label_falls_back_to_expected_name_for_manual_items(self):
         self.assertEqual(
@@ -354,6 +398,27 @@ class CompletedAdoptionTests(unittest.TestCase):
         move_mock.assert_called_once_with(
             "X:\\fixture-root\\incoming\\example-base.nsp.hdf",
             "X:\\fixture-root\\incoming\\example-base.nsp",
+        )
+
+    @patch("app.downloads.manager.shutil.move")
+    @patch("app.downloads.manager._ensure_unique_path", side_effect=lambda path: path)
+    @patch("app.downloads.manager.os.path.isdir", return_value=False)
+    @patch("app.downloads.manager.os.path.isfile", return_value=True)
+    @patch("app.downloads.manager.os.path.exists", return_value=True)
+    def test_normalize_imported_wrapped_xci_file_strips_hdf(
+        self,
+        exists_mock,
+        isfile_mock,
+        isdir_mock,
+        ensure_unique_path_mock,
+        move_mock,
+    ):
+        result = _normalize_imported_wrapped_files("X:\\fixture-root\\incoming\\example-base.xci.hdf")
+
+        self.assertEqual(result, "X:\\fixture-root\\incoming\\example-base.xci")
+        move_mock.assert_called_once_with(
+            "X:\\fixture-root\\incoming\\example-base.xci.hdf",
+            "X:\\fixture-root\\incoming\\example-base.xci",
         )
 
     @patch("app.downloads.manager.enqueue_organize_paths")
