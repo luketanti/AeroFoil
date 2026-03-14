@@ -11,6 +11,7 @@ from app.library import (
     _pending_cleanup_roots,
     _pending_organize_paths,
     _sanitize_component,
+    delete_older_updates,
     enqueue_cleanup_roots,
     enqueue_organize_paths,
     delete_library_content,
@@ -199,6 +200,47 @@ class LibraryHelperTests(unittest.TestCase):
         self.assertTrue(result["success"])
         delete_targets_mock.assert_called_once_with(
             ["orphan-app"],
+            dry_run=True,
+            verbose=True,
+            detail_limit=200,
+        )
+
+    @patch("app.library._delete_target_apps")
+    def test_delete_older_updates_skips_shared_base_xci(self, delete_targets_mock):
+        title = SimpleNamespace(id=1, title_id="01005270232F2000")
+        older_update = self._make_app(10, "01005270232F2800", "UPDATE", 1)
+        latest_update = self._make_app(11, "01005270232F2800", "UPDATE", 2)
+        base_app = self._make_app(12, "01005270232F2000", "BASE", 0)
+        shared_file = self._make_file(
+            201,
+            "X:\\library\\Example Title [01005270232F2000] [BASE][v0].xci",
+            [older_update, base_app],
+        )
+        older_update.files = [shared_file]
+        delete_targets_mock.return_value = {
+            "success": True,
+            "deleted": 0,
+            "skipped": 1,
+            "mutated": False,
+            "errors": [],
+            "details": [
+                "Skip shared file X:\\library\\Example Title [01005270232F2000] [BASE][v0].xci: linked to non-target apps BASE 01005270232F2000 v0."
+            ],
+        }
+
+        with flask_app.app_context():
+            with patch("app.library.Titles.query") as titles_query_mock, patch("app.library.Apps.query") as apps_query_mock:
+                titles_query_mock.all.return_value = [title]
+                apps_query_mock.filter_by.return_value.all.return_value = [older_update, latest_update]
+
+                result = delete_older_updates(dry_run=True, verbose=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["deleted"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertTrue(any("Skip shared file" in line for line in result["details"]))
+        delete_targets_mock.assert_called_once_with(
+            [older_update],
             dry_run=True,
             verbose=True,
             detail_limit=200,

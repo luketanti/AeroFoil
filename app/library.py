@@ -1784,6 +1784,18 @@ def _new_delete_results():
         'details': []
     }
 
+def _merge_delete_results(results, partial_results, add_detail=None):
+    if not partial_results:
+        return
+    results['deleted'] += int(partial_results.get('deleted') or 0)
+    results['skipped'] += int(partial_results.get('skipped') or 0)
+    if partial_results.get('mutated'):
+        results['mutated'] = True
+    results['errors'].extend(partial_results.get('errors') or [])
+    if add_detail:
+        for detail in partial_results.get('details') or []:
+            add_detail(detail)
+
 def _resolve_delete_targets(scope, title_id=None, app_id=None, app_type=None, version=None):
     scope_name = str(scope or '').strip().lower()
     normalized_title_id = str(title_id or '').strip().upper()
@@ -1977,26 +1989,14 @@ def delete_older_updates(dry_run=False, verbose=False, detail_limit=200):
         for app in update_apps:
             if app.id == latest_app.id:
                 continue
-            filepaths = [file.filepath for file in list(app.files)]
-            if not filepaths:
-                results['skipped'] += 1
-                add_detail(f"Skip no files for update {app.app_id} v{app.app_version}.")
-                continue
-            for filepath in filepaths:
-                if dry_run:
-                    results['deleted'] += 1
-                    add_detail(f"Plan delete: {filepath}.")
-                    continue
-                try:
-                    if filepath and os.path.exists(filepath):
-                        os.remove(filepath)
-                    delete_file_by_filepath(filepath)
-                    results['deleted'] += 1
-                    add_detail(f"Deleted: {filepath}.")
-                except Exception as e:
-                    logger.error(f"Failed to delete update {filepath}: {e}")
-                    results['errors'].append(str(e))
-                    add_detail(f"Error deleting {filepath}: {e}.")
+            remaining_detail_limit = max(0, detail_limit - detail_count)
+            partial_results = _delete_target_apps(
+                [app],
+                dry_run=dry_run,
+                verbose=verbose,
+                detail_limit=remaining_detail_limit,
+            )
+            _merge_delete_results(results, partial_results, add_detail=add_detail)
 
     if results['errors']:
         results['success'] = False
