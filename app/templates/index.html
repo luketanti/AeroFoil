@@ -321,6 +321,7 @@
                         <thead>
                             <tr>
                                 <th scope="col">Title</th>
+                                <th scope="col">Indexer</th>
                                 <th scope="col">Protocol</th>
                                 <th scope="col">Age</th>
                                 <th scope="col">Size</th>
@@ -786,8 +787,11 @@
 
                     if (game.version !== undefined && !game.version.length && Array.isArray(game.version)){
                         versionBadge.attr("data-bs-title", "Version v0")
-                    } else if (game.version !== undefined && game.version.length) {
-                        versionBadge.attr("data-bs-title", "Version v" + game.version)
+                    } else {
+                        const displayVersion = getDisplayVersion(game);
+                        if (displayVersion !== '-') {
+                            versionBadge.attr("data-bs-title", "Version " + displayVersion)
+                        }
                     }
                 }
                 statusIcons.append(versionBadge);
@@ -943,16 +947,7 @@
         paginatedGames.forEach(game => {
             const title = game.title_id_name || game.name || game.title_id || game.app_id;
             const subtitle = `${game.title_id || ''}`.trim();
-            const versionText = (() => {
-                if (Array.isArray(game.version) && game.version.length) {
-                    const latest = game.version[game.version.length - 1];
-                    return `v${latest.version}`;
-                }
-                if (game.version !== undefined && !Array.isArray(game.version)) {
-                    return `v${game.version}`;
-                }
-                return '-';
-            })();
+            const versionText = getDisplayVersion(game);
             const statusBadges = [];
             if (game.owned !== undefined) {
                 statusBadges.push(`<span class="badge text-bg-${game.owned ? 'success' : 'warning'}">Owned</span>`);
@@ -1008,6 +1003,29 @@
             case 5: return 6; // 8 columns
             default: return 4; // default to 3 columns
         }
+    }
+
+    function getDisplayVersion(game) {
+        if (Array.isArray(game?.version) && game.version.length) {
+            const latest = game.version[game.version.length - 1];
+            if (latest && latest.version !== undefined && latest.version !== null) {
+                return `v${latest.version}`;
+            }
+        }
+        if (game?.version !== undefined && game?.version !== null && !Array.isArray(game.version)) {
+            return `v${game.version}`;
+        }
+        if (game?.app_version !== undefined && game?.app_version !== null && String(game.app_version).length) {
+            return `v${game.app_version}`;
+        }
+        return '-';
+    }
+
+    function getProtocolLabel(protocol) {
+        const value = String(protocol || '').trim().toLowerCase();
+        if (value === 'usenet') return 'NZB';
+        if (value === 'torrent') return 'Torrent';
+        return value || '-';
     }
 
     function getCardSizeRangeForView(view) {
@@ -1366,7 +1384,8 @@
                         const row = $(`
                             <tr>
                                 <td>${item.title || '-'}</td>
-                                <td>${item.protocol || '-'}</td>
+                                <td>${item.indexer || '-'}</td>
+                                <td>${getProtocolLabel(item.protocol)}</td>
                                 <td>${item.age_label || '-'}</td>
                                 <td>${formatBytes(item.size)}</td>
                                 <td>${item.seeders ?? '-'}</td>
@@ -1531,13 +1550,25 @@
 
         const missingVersions = versions.filter(version => !version.owned);
         const latestMissing = missingVersions.length ? missingVersions[missingVersions.length - 1] : null;
-        const actionRow = (canManageDownloads && latestMissing)
+        const titleQuery = game.title_id_name || game.name || game.title_id || '';
+        const updateButton = latestMissing
             ? `
-                <div class="mt-3">
                     <button type="button" class="btn btn-warning btn-sm manual-download-btn"
                         data-title-id="${game.title_id}" data-version="${latestMissing.version}">
                         <i class="bi bi-cloud-arrow-down"></i> Search & download v${latestMissing.version}
                     </button>
+            `
+            : '';
+        const baseButton = game.has_base === false
+            ? `
+                    <button type="button" class="btn btn-warning btn-sm manual-base-download-btn"
+                        data-title-id="${game.title_id}" data-title-query="${titleQuery}">
+                        <i class="bi bi-box-seam"></i> Search base game
+                    </button>
+            `
+            : '';
+        const customSearchRow = latestMissing
+            ? `
                     <div class="input-group input-group-sm mt-2 manual-search-group">
                         <input type="text" class="form-control manual-search-input" placeholder="Custom search terms">
                         <button type="button" class="btn btn-outline-secondary manual-search-btn"
@@ -1545,6 +1576,16 @@
                             Search files
                         </button>
                     </div>
+            `
+            : '';
+        const actionRow = (canManageDownloads && (updateButton || baseButton))
+            ? `
+                <div class="mt-3">
+                    <div class="d-flex flex-wrap gap-2">
+                        ${baseButton}
+                        ${updateButton}
+                    </div>
+                    ${customSearchRow}
                 </div>
             `
             : '';
@@ -1810,7 +1851,8 @@
                     const row = $(`
                         <tr>
                             <td>${item.title || '-'}</td>
-                            <td>${item.protocol || '-'}</td>
+                            <td>${item.indexer || '-'}</td>
+                            <td>${getProtocolLabel(item.protocol)}</td>
                             <td>${item.age_label || '-'}</td>
                             <td>${formatBytes(item.size)}</td>
                             <td>${item.seeders ?? '-'}</td>
@@ -1835,6 +1877,62 @@
             complete: function () {
                 button.prop('disabled', false);
             }
+        });
+    });
+
+    $(document).on('click', '.manual-base-download-btn', function () {
+        const button = $(this);
+        const titleId = button.data('title-id');
+        const query = String(button.data('title-query') || '').trim();
+        if (!query) {
+            return;
+        }
+        button.prop('disabled', true);
+        $('#detailsDownloadStatus').text('Searching Prowlarr...').removeClass('text-danger text-success').addClass('text-muted');
+        $('#torrentSearchStatus').text('Searching Prowlarr...');
+        $('#torrentSearchResults').empty();
+        const modal = new bootstrap.Modal(document.getElementById('torrentSearchModal'));
+        modal.show();
+        $.getJSON(`/api/downloads/search?query=${encodeURIComponent(query)}&apply_settings=1&extra_blacklist=update`, function (result) {
+            if (!result['success']) {
+                $('#torrentSearchStatus').text(result['message'] || 'Search failed.');
+                return;
+            }
+            const results = result['results'] || [];
+            if (!results.length) {
+                $('#torrentSearchStatus').text('No results found.');
+                return;
+            }
+            $('#torrentSearchStatus').text(`Found ${results.length} results.`);
+            results.forEach(item => {
+                const row = $(`
+                    <tr>
+                        <td>${item.title || '-'}</td>
+                        <td>${item.indexer || '-'}</td>
+                        <td>${getProtocolLabel(item.protocol)}</td>
+                        <td>${item.age_label || '-'}</td>
+                        <td>${formatBytes(item.size)}</td>
+                        <td>${item.seeders ?? '-'}</td>
+                        <td>${item.leechers ?? '-'}</td>
+                        <td>
+                            <button class="btn btn-sm btn-warning queue-download-btn"
+                                data-download-url="${item.download_url}"
+                                data-title="${item.title || ''}"
+                                data-title-id="${titleId || ''}"
+                                data-protocol="${item.protocol || ''}"
+                                data-update-only="false">
+                                Queue download
+                            </button>
+                        </td>
+                    </tr>
+                `);
+                $('#torrentSearchResults').append(row);
+            });
+            $('#detailsDownloadStatus').text('');
+        }).fail(function () {
+            $('#torrentSearchStatus').text('Search failed.');
+        }).always(function () {
+            button.prop('disabled', false);
         });
     });
 
@@ -1870,7 +1968,8 @@
                 const row = $(`
                     <tr>
                         <td>${item.title || '-'}</td>
-                        <td>${item.protocol || '-'}</td>
+                        <td>${item.indexer || '-'}</td>
+                        <td>${getProtocolLabel(item.protocol)}</td>
                         <td>${item.age_label || '-'}</td>
                         <td>${formatBytes(item.size)}</td>
                         <td>${item.seeders ?? '-'}</td>

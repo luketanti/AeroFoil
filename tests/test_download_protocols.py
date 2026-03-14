@@ -24,6 +24,15 @@ class DownloadProtocolTests(unittest.TestCase):
         normalized = _normalize_result(item)
         self.assertEqual(normalized["protocol"], "torrent")
 
+    def test_normalize_result_preserves_indexer_name(self):
+        item = {
+            "title": "Game Update NZB",
+            "downloadUrl": "https://example.test/file.nzb",
+            "indexer": "Indexer One",
+        }
+        normalized = _normalize_result(item)
+        self.assertEqual(normalized["indexer"], "Indexer One")
+
     def test_pick_best_result_filters_to_configured_protocols(self):
         results = [
             {"title": "Game Update", "seeders": 50, "size": 1, "protocol": "torrent"},
@@ -99,6 +108,14 @@ class DownloadProtocolTests(unittest.TestCase):
         ]
         filtered = filter_results(results, min_seeders=0, min_age_minutes=60)
         self.assertEqual([item["title"] for item in filtered], ["Older NZB", "Torrent"])
+
+    def test_filter_results_applies_blacklist_terms(self):
+        results = [
+            {"title": "Sample Base Game", "protocol": "torrent", "seeders": 10},
+            {"title": "Sample Base Game Update", "protocol": "torrent", "seeders": 10},
+        ]
+        filtered = filter_results(results, blacklist_terms=["update"])
+        self.assertEqual([item["title"] for item in filtered], ["Sample Base Game"])
 
     def test_extract_update_version_prefers_bracketed_token(self):
         self.assertEqual(_extract_update_version_from_name("Game [v1245184] v999.nsp"), 1245184)

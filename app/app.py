@@ -3006,6 +3006,7 @@ def _trim_download_search_results(results, limit=50):
     return [
         {
             'title': r.get('title'),
+            'indexer': r.get('indexer'),
             'size': r.get('size'),
             'seeders': r.get('seeders'),
             'leechers': r.get('leechers'),
@@ -3661,6 +3662,12 @@ def manual_search_update_options():
 def downloads_search():
     query = request.args.get('query', '').strip()
     apply_settings = request.args.get('apply_settings', '').strip() in ('1', 'true', 'yes')
+    extra_blacklist_terms = []
+    for raw_value in request.args.getlist('extra_blacklist'):
+        for term in str(raw_value or '').split(','):
+            normalized = term.strip()
+            if normalized:
+                extra_blacklist_terms.append(normalized)
     if not query:
         return jsonify({'success': False, 'message': 'Missing query.'})
     settings = load_settings()
@@ -3697,7 +3704,7 @@ def downloads_search():
                 min_seeders=min_seeders,
                 min_age_minutes=min_age_minutes,
                 required_terms=downloads.get('required_terms') or [],
-                blacklist_terms=downloads.get('blacklist_terms') or [],
+                blacklist_terms=(downloads.get('blacklist_terms') or []) + extra_blacklist_terms,
             )
         trimmed = _trim_download_search_results(results, limit=50)
         return jsonify({'success': True, 'results': trimmed})
@@ -4826,6 +4833,16 @@ def get_title_details_api():
         query = query.filter(Titles.title_id == title_id.upper())
     row = query.order_by(Apps.id.desc()).first()
 
+    app_size_subquery = (
+        db.session.query(
+            app_files.c.app_id.label('app_pk'),
+            func.coalesce(func.sum(Files.size), 0).label('size'),
+        )
+        .outerjoin(Files, Files.id == app_files.c.file_id)
+        .group_by(app_files.c.app_id)
+        .subquery()
+    )
+
     game = None
     if row:
         with titles.titledb_session():
@@ -4851,14 +4868,19 @@ def get_title_details_api():
             if row.app_type == APP_TYPE_BASE:
                 versions = []
                 for upd in (
-                    db.session.query(Apps.app_version, Apps.owned)
+                    db.session.query(
+                        Apps.app_version,
+                        Apps.owned,
+                        func.coalesce(app_size_subquery.c.size, 0).label('size'),
+                    )
+                    .outerjoin(app_size_subquery, app_size_subquery.c.app_pk == Apps.id)
                     .filter(Apps.title_id == row.title_fk, Apps.app_type == APP_TYPE_UPD)
                     .all()
                 ):
                     versions.append({
                         'version': int(upd.app_version or 0),
                         'owned': bool(upd.owned),
-                        'size': 0,
+                        'size': int(upd.size or 0),
                         'release_date': 'Unknown',
                     })
                 release_dates = {
@@ -4875,13 +4897,19 @@ def get_title_details_api():
             elif row.app_type == APP_TYPE_DLC:
                 dlc_versions = []
                 for dlc in (
-                    db.session.query(Apps.app_version, Apps.owned)
+                    db.session.query(
+                        Apps.app_version,
+                        Apps.owned,
+                        func.coalesce(app_size_subquery.c.size, 0).label('size'),
+                    )
+                    .outerjoin(app_size_subquery, app_size_subquery.c.app_pk == Apps.id)
                     .filter(Apps.app_type == APP_TYPE_DLC, Apps.app_id == row.app_id)
                     .all()
                 ):
                     dlc_versions.append({
                         'version': int(dlc.app_version or 0),
                         'owned': bool(dlc.owned),
+                        'size': int(dlc.size or 0),
                         'release_date': 'Unknown',
                     })
                 dlc_versions.sort(key=lambda item: item['version'])

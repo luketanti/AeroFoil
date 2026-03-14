@@ -87,6 +87,7 @@
               <thead>
                 <tr>
                   <th scope="col">Title</th>
+                  <th scope="col">Indexer</th>
                   <th scope="col">Protocol</th>
                   <th scope="col">Age</th>
                   <th scope="col">Size</th>
@@ -124,6 +125,13 @@
       unitIndex += 1;
     }
     return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[unitIndex]}`;
+  }
+
+  function getProtocolLabel(protocol) {
+    const value = String(protocol || '').trim().toLowerCase();
+    if (value === 'usenet') return 'NZB';
+    if (value === 'torrent') return 'Torrent';
+    return value || '-';
   }
 
   let selectedTitle = null;
@@ -297,7 +305,8 @@
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td>${escapeHtml(item.title || '-')}</td>
-        <td>${escapeHtml(item.protocol || '-')}</td>
+        <td>${escapeHtml(item.indexer || '-')}</td>
+        <td>${escapeHtml(getProtocolLabel(item.protocol))}</td>
         <td>${escapeHtml(item.age_label || '-')}</td>
         <td>${formatBytes(item.size)}</td>
         <td>${escapeHtml(String(item.seeders ?? '-'))}</td>

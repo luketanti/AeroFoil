@@ -332,6 +332,7 @@ def search_update_options(title_id, version, limit=20):
     trimmed = [
         {
             "title": r.get("title"),
+            "indexer": r.get("indexer"),
             "size": r.get("size"),
             "seeders": r.get("seeders"),
             "leechers": r.get("leechers"),

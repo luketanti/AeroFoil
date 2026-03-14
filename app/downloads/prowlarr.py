@@ -82,6 +82,7 @@ def _normalize_result(item):
         "download_url": item.get("downloadUrl") or "",
         "info_url": item.get("infoUrl") or "",
         "indexer_id": item.get("indexerId"),
+        "indexer": item.get("indexer") or item.get("indexerName") or "",
         "protocol": protocol,
         "age_minutes": age_minutes,
         "age_label": _format_age_label(age_minutes),
