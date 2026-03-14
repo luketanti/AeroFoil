@@ -14,6 +14,11 @@ data
 /app/roms
 /ProdKeys
 
+.idea
+.tmp
+run.bat
+AeroFoil start.lnk
+
 # pyenv
 .python-version
 

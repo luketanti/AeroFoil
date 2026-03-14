@@ -141,7 +141,7 @@
         {% if current_user.is_admin or admin_account_created == false %}
         <div class="col-auto">
             <div class="input-group">
-                <input type="text" id="torrentSearchInput" class="form-control" placeholder="Search torrents...">
+                <input type="text" id="torrentSearchInput" class="form-control" placeholder="Search downloads...">
                 <button class="btn btn-warning" type="button" id="torrentSearchBtn">Search</button>
             </div>
         </div>
@@ -308,10 +308,10 @@
 
 {% if current_user.is_admin or admin_account_created == false %}
 <div class="modal fade" id="torrentSearchModal" tabindex="-1" aria-labelledby="torrentSearchModalLabel" aria-hidden="true">
-    <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-dialog modal-xl modal-dialog-centered">
         <div class="modal-content">
             <div class="modal-header">
-                <h1 class="modal-title fs-5" id="torrentSearchModalLabel">Torrent search results</h1>
+                <h1 class="modal-title fs-5" id="torrentSearchModalLabel">Download search results</h1>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <div class="modal-body">
@@ -321,6 +321,8 @@
                         <thead>
                             <tr>
                                 <th scope="col">Title</th>
+                                <th scope="col">Protocol</th>
+                                <th scope="col">Age</th>
                                 <th scope="col">Size</th>
                                 <th scope="col">Seeders</th>
                                 <th scope="col">Leechers</th>
@@ -1364,13 +1366,16 @@
                         const row = $(`
                             <tr>
                                 <td>${item.title || '-'}</td>
+                                <td>${item.protocol || '-'}</td>
+                                <td>${item.age_label || '-'}</td>
                                 <td>${formatBytes(item.size)}</td>
                                 <td>${item.seeders ?? '-'}</td>
                                 <td>${item.leechers ?? '-'}</td>
                                 <td>
-                                    <button class="btn btn-sm btn-warning queue-torrent-btn"
+                                    <button class="btn btn-sm btn-warning queue-download-btn"
                                         data-download-url="${item.download_url}"
-                                        data-title="${item.title || ''}">
+                                        data-title="${item.title || ''}"
+                                        data-protocol="${item.protocol || ''}">
                                         Queue
                                     </button>
                                 </td>
@@ -1381,11 +1386,12 @@
                 });
             });
 
-        $(document).on('click', '.queue-torrent-btn', function () {
+        $(document).on('click', '.queue-download-btn', function () {
             const button = $(this);
             const downloadUrl = button.data('download-url');
             const title = button.data('title');
             const titleId = button.data('title-id');
+            const protocol = button.data('protocol');
             const updateOnly = button.data('update-only') === true || button.data('update-only') === 'true';
             const expectedVersion = button.data('expected-version');
             if (!downloadUrl) {
@@ -1400,6 +1406,7 @@
                     download_url: downloadUrl,
                     title: title,
                     title_id: titleId,
+                    protocol: protocol,
                     update_only: updateOnly,
                     expected_version: expectedVersion
                 }),
@@ -1803,14 +1810,17 @@
                     const row = $(`
                         <tr>
                             <td>${item.title || '-'}</td>
+                            <td>${item.protocol || '-'}</td>
+                            <td>${item.age_label || '-'}</td>
                             <td>${formatBytes(item.size)}</td>
                             <td>${item.seeders ?? '-'}</td>
                             <td>${item.leechers ?? '-'}</td>
                             <td>
-                                <button class="btn btn-sm btn-warning queue-torrent-btn"
+                                <button class="btn btn-sm btn-warning queue-download-btn"
                                     data-download-url="${item.download_url}"
                                     data-title="${item.title || ''}"
                                     data-title-id="${titleId || ''}"
+                                    data-protocol="${item.protocol || ''}"
                                     data-update-only="true"
                                     data-expected-version="${version}">
                                     Queue update
@@ -1860,14 +1870,17 @@
                 const row = $(`
                     <tr>
                         <td>${item.title || '-'}</td>
+                        <td>${item.protocol || '-'}</td>
+                        <td>${item.age_label || '-'}</td>
                         <td>${formatBytes(item.size)}</td>
                         <td>${item.seeders ?? '-'}</td>
                         <td>${item.leechers ?? '-'}</td>
                         <td>
-                            <button class="btn btn-sm btn-warning queue-torrent-btn"
+                            <button class="btn btn-sm btn-warning queue-download-btn"
                                 data-download-url="${item.download_url}"
                                 data-title="${item.title || ''}"
                                 data-title-id="${titleId || ''}"
+                                data-protocol="${item.protocol || ''}"
                                 data-update-only="true"
                                 data-expected-version="${version}">
                                 Queue update

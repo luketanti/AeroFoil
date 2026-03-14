@@ -6,13 +6,20 @@ import threading
 import time
 import unicodedata
 
-from app.constants import APP_TYPE_UPD
-from app.db import get_all_titles, get_all_title_apps, get_libraries_path
-from app.library import _ensure_unique_path, enqueue_organize_paths, _sanitize_component
 from app import titles as titles_lib
-from app.settings import load_settings
+from app.constants import APP_TYPE_UPD
+from app.db import get_all_title_apps, get_all_titles, get_libraries_path
+from app.downloads.client import (
+    TORRENT_CLIENT_TYPES,
+    USENET_CLIENT_TYPES,
+    list_active_downloads,
+    list_completed_downloads,
+    queue_download,
+    remove_completed_download,
+)
 from app.downloads.prowlarr import ProwlarrClient, pick_best_result
-from app.downloads.torrent_client import add_torrent, list_active, list_completed, remove_torrent
+from app.library import _ensure_unique_path, _sanitize_component, enqueue_organize_paths
+from app.settings import load_settings
 
 logger = logging.getLogger("downloads.manager")
 
@@ -24,12 +31,91 @@ _state = {
     "completed": set(),
 }
 
+
 def _get_prowlarr_timeout_seconds(prowlarr_cfg):
     try:
         timeout_seconds = int((prowlarr_cfg or {}).get("timeout_seconds") or 15)
     except (TypeError, ValueError):
         timeout_seconds = 15
     return max(5, min(timeout_seconds, 180))
+
+
+def _get_prowlarr_search_limit(prowlarr_cfg):
+    try:
+        search_limit = int((prowlarr_cfg or {}).get("search_limit") or 100)
+    except (TypeError, ValueError):
+        search_limit = 100
+    return max(1, min(search_limit, 500))
+
+
+def _get_torrent_min_seeders(downloads):
+    try:
+        min_seeders = int(((downloads or {}).get("torrent_client") or {}).get("min_seeders") or 0)
+    except (TypeError, ValueError):
+        min_seeders = 0
+    return max(min_seeders, 0)
+
+
+def _get_usenet_min_age_minutes(downloads):
+    try:
+        min_age_minutes = int(((downloads or {}).get("usenet_client") or {}).get("min_age_minutes") or 0)
+    except (TypeError, ValueError):
+        min_age_minutes = 0
+    return max(min_age_minutes, 0)
+
+
+def _infer_protocol(download_url=None, explicit_protocol=None):
+    protocol = str(explicit_protocol or "").strip().lower()
+    if protocol in ("torrent", "usenet"):
+        return protocol
+    lowered = str(download_url or "").strip().lower()
+    if lowered.startswith("magnet:") or ".torrent" in lowered:
+        return "torrent"
+    if ".nzb" in lowered or "newznab" in lowered or "usenet" in lowered:
+        return "usenet"
+    return ""
+
+
+def _get_protocol_client_cfg(downloads, protocol):
+    downloads = downloads or {}
+    protocol = str(protocol or "").strip().lower()
+    shared_category = str(downloads.get("category") or "").strip()
+    if protocol == "torrent":
+        cfg = dict(downloads.get("torrent_client", {}) or {})
+        if shared_category:
+            cfg["category"] = shared_category
+        return cfg
+    if protocol == "usenet":
+        cfg = dict(downloads.get("usenet_client", {}) or {})
+        if shared_category:
+            cfg["category"] = shared_category
+        return cfg
+    return {}
+
+
+def _is_protocol_client_configured(downloads, protocol):
+    client_cfg = _get_protocol_client_cfg(downloads, protocol)
+    client_type = str(client_cfg.get("type") or "").strip().lower()
+    if protocol == "torrent":
+        return bool(client_cfg.get("url") and client_type in TORRENT_CLIENT_TYPES)
+    if protocol == "usenet":
+        return bool(client_cfg.get("url") and client_cfg.get("api_key") and client_type in USENET_CLIENT_TYPES)
+    return False
+
+
+def _get_configured_protocols(downloads):
+    return [
+        protocol for protocol in ("torrent", "usenet")
+        if _is_protocol_client_configured(downloads, protocol)
+    ]
+
+
+def _get_completed_poll_targets(downloads):
+    targets = []
+    for protocol in ("torrent", "usenet"):
+        if _is_protocol_client_configured(downloads, protocol):
+            targets.append((protocol, _get_protocol_client_cfg(downloads, protocol)))
+    return targets
 
 
 def get_downloads_state():
@@ -41,13 +127,16 @@ def get_downloads_state():
                 "title_id": info.get("title_id"),
                 "version": info.get("version"),
                 "expected_name": info.get("expected_name"),
-                "hash": info.get("hash")
+                "hash": info.get("hash"),
+                "id": info.get("id"),
+                "protocol": info.get("protocol"),
+                "client_type": info.get("client_type"),
             })
         return {
             "running": _state["running"],
             "last_run": _state["last_run"],
             "pending": pending_items,
-            "completed": sorted(_state["completed"])
+            "completed": sorted(_state["completed"]),
         }
 
 
@@ -55,12 +144,10 @@ def run_downloads_job(scan_cb=None, post_cb=None):
     settings = load_settings()
     downloads = settings.get("downloads", {})
     if not downloads.get("enabled"):
-        torrent_cfg = downloads.get("torrent_client", {})
-        if torrent_cfg.get("url") and torrent_cfg.get("type"):
-            with _state_lock:
-                has_pending = bool(_state["pending"])
-            if has_pending:
-                _check_completed(torrent_cfg, scan_cb=scan_cb, post_cb=post_cb)
+        with _state_lock:
+            has_pending = bool(_state["pending"])
+        if has_pending:
+            _check_completed(downloads, scan_cb=scan_cb, post_cb=post_cb)
         return
 
     interval_minutes = int(downloads.get("interval_minutes") or 60)
@@ -85,28 +172,23 @@ def run_downloads_job(scan_cb=None, post_cb=None):
 def check_completed_downloads(scan_cb=None, post_cb=None):
     settings = load_settings()
     downloads = settings.get("downloads", {})
-    torrent_cfg = downloads.get("torrent_client", {})
-    if not torrent_cfg.get("url") or not torrent_cfg.get("type"):
-        return False, "Torrent client is not configured."
-    _check_completed(torrent_cfg, scan_cb=scan_cb, post_cb=post_cb)
+    if not _get_completed_poll_targets(downloads):
+        return False, "No download client is configured."
+    _check_completed(downloads, scan_cb=scan_cb, post_cb=post_cb)
     return True, "Checked completed downloads."
 
 
 def get_active_downloads():
     settings = load_settings()
     downloads = settings.get("downloads", {})
-    torrent_cfg = downloads.get("torrent_client", {})
-    if not torrent_cfg.get("url") or not torrent_cfg.get("type"):
-        return False, "Torrent client is not configured.", []
+    targets = _get_completed_poll_targets(downloads)
+    if not targets:
+        return False, "No download client is configured.", []
     try:
-        items = list_active(
-            client_type=torrent_cfg.get("type"),
-            url=torrent_cfg.get("url"),
-            username=torrent_cfg.get("username"),
-            password=torrent_cfg.get("password"),
-            category=torrent_cfg.get("category"),
-            download_path=torrent_cfg.get("download_path"),
-        )
+        items = []
+        for protocol, client_cfg in targets:
+            items.extend(list_active_downloads(protocol, client_cfg))
+        items.sort(key=lambda item: ((item.get("protocol") or ""), (item.get("name") or "").lower()))
         return True, None, items
     except Exception as e:
         return False, str(e), []
@@ -114,26 +196,28 @@ def get_active_downloads():
 
 def _process_downloads(downloads, scan_cb=None, post_cb=None):
     prowlarr_cfg = downloads.get("prowlarr", {})
-    torrent_cfg = downloads.get("torrent_client", {})
     if not prowlarr_cfg.get("url") or not prowlarr_cfg.get("api_key"):
         logger.warning("Downloads enabled, but Prowlarr is not configured.")
         return
-    if not torrent_cfg.get("url") or not torrent_cfg.get("type"):
-        logger.warning("Downloads enabled, but torrent client is not configured.")
+    allowed_protocols = _get_configured_protocols(downloads)
+    if not allowed_protocols:
+        logger.warning("Downloads enabled, but no download client is configured.")
         return
 
     missing_updates = _get_missing_updates()
     if not missing_updates:
-        _check_completed(torrent_cfg, scan_cb=scan_cb, post_cb=post_cb)
+        _check_completed(downloads, scan_cb=scan_cb, post_cb=post_cb)
         return
 
     timeout_seconds = _get_prowlarr_timeout_seconds(prowlarr_cfg)
+    search_limit = _get_prowlarr_search_limit(prowlarr_cfg)
     client = ProwlarrClient(prowlarr_cfg["url"], prowlarr_cfg["api_key"], timeout_seconds=timeout_seconds)
     indexer_ids = prowlarr_cfg.get("indexer_ids") or []
     categories = prowlarr_cfg.get("categories") or []
     required_terms = downloads.get("required_terms") or []
     blacklist_terms = downloads.get("blacklist_terms") or []
-    min_seeders = int(downloads.get("min_seeders") or 0)
+    min_seeders = _get_torrent_min_seeders(downloads)
+    min_age_minutes = _get_usenet_min_age_minutes(downloads)
 
     for update in missing_updates:
         _search_and_queue(
@@ -144,21 +228,24 @@ def _process_downloads(downloads, scan_cb=None, post_cb=None):
             categories=categories,
             required_terms=required_terms,
             blacklist_terms=blacklist_terms,
-            min_seeders=min_seeders
+            min_seeders=min_seeders,
+            min_age_minutes=min_age_minutes,
+            search_limit=search_limit,
+            allowed_protocols=allowed_protocols,
         )
 
-    _check_completed(torrent_cfg, scan_cb=scan_cb, post_cb=post_cb)
+    _check_completed(downloads, scan_cb=scan_cb, post_cb=post_cb)
 
 
 def manual_search_update(title_id, version):
     settings = load_settings()
     downloads = settings.get("downloads", {})
     prowlarr_cfg = downloads.get("prowlarr", {})
-    torrent_cfg = downloads.get("torrent_client", {})
+    allowed_protocols = _get_configured_protocols(downloads)
     if not prowlarr_cfg.get("url") or not prowlarr_cfg.get("api_key"):
         return False, "Prowlarr is not configured."
-    if not torrent_cfg.get("url") or not torrent_cfg.get("type"):
-        return False, "Torrent client is not configured."
+    if not allowed_protocols:
+        return False, "No download client is configured."
 
     title_name = title_id
     titles_lib.load_titledb()
@@ -171,9 +258,10 @@ def manual_search_update(title_id, version):
     update = {
         "title_id": title_id,
         "title_name": title_name,
-        "version": int(version)
+        "version": int(version),
     }
     timeout_seconds = _get_prowlarr_timeout_seconds(prowlarr_cfg)
+    search_limit = _get_prowlarr_search_limit(prowlarr_cfg)
     client = ProwlarrClient(prowlarr_cfg["url"], prowlarr_cfg["api_key"], timeout_seconds=timeout_seconds)
     ok, message = _search_and_queue(
         client=client,
@@ -183,8 +271,11 @@ def manual_search_update(title_id, version):
         categories=prowlarr_cfg.get("categories") or [],
         required_terms=downloads.get("required_terms") or [],
         blacklist_terms=downloads.get("blacklist_terms") or [],
-        min_seeders=int(downloads.get("min_seeders") or 0),
-        allow_duplicates=False
+        min_seeders=_get_torrent_min_seeders(downloads),
+        min_age_minutes=_get_usenet_min_age_minutes(downloads),
+        search_limit=search_limit,
+        allow_duplicates=False,
+        allowed_protocols=allowed_protocols,
     )
     return ok, message
 
@@ -207,19 +298,35 @@ def search_update_options(title_id, version, limit=20):
     update = {
         "title_id": title_id,
         "title_name": title_name,
-        "version": int(version)
+        "version": int(version),
     }
     query_candidates = _build_queries(update)
     timeout_seconds = _get_prowlarr_timeout_seconds(prowlarr_cfg)
+    search_limit = _get_prowlarr_search_limit(prowlarr_cfg)
     client = ProwlarrClient(prowlarr_cfg["url"], prowlarr_cfg["api_key"], timeout_seconds=timeout_seconds)
     results = []
     categories = prowlarr_cfg.get("categories") or []
+    min_seeders = _get_torrent_min_seeders(downloads)
+    min_age_minutes = _get_usenet_min_age_minutes(downloads)
     for query in query_candidates:
         results = client.search(
             query,
             indexer_ids=prowlarr_cfg.get("indexer_ids") or [],
             categories=categories,
+            limit=search_limit,
         )
+        results = [
+            item for item in (results or [])
+            if pick_best_result(
+                [item],
+                title_id=update["title_id"],
+                version=update["version"],
+                min_seeders=min_seeders,
+                min_age_minutes=min_age_minutes,
+                required_terms=downloads.get("required_terms") or [],
+                blacklist_terms=downloads.get("blacklist_terms") or [],
+            ) is not None
+        ]
         if results:
             break
     trimmed = [
@@ -228,33 +335,34 @@ def search_update_options(title_id, version, limit=20):
             "size": r.get("size"),
             "seeders": r.get("seeders"),
             "leechers": r.get("leechers"),
-            "download_url": r.get("download_url")
+            "download_url": r.get("download_url"),
+            "protocol": r.get("protocol"),
+            "age_minutes": r.get("age_minutes"),
+            "age_label": r.get("age_label"),
         }
         for r in (results or [])[:limit]
     ]
     return True, None, trimmed
 
 
-def queue_download_url(download_url, expected_name=None, update_only=False, expected_version=None, title_id=None):
+def queue_download_url(download_url, expected_name=None, update_only=False, expected_version=None, title_id=None, protocol=None):
     settings = load_settings()
     downloads = settings.get("downloads", {})
-    torrent_cfg = downloads.get("torrent_client", {})
-    if not torrent_cfg.get("url") or not torrent_cfg.get("type"):
-        return False, "Torrent client is not configured."
-    expected_update_number = None
-    ok, message, torrent_hash = add_torrent(
-        client_type=torrent_cfg.get("type"),
-        url=torrent_cfg.get("url"),
-        username=torrent_cfg.get("username"),
-        password=torrent_cfg.get("password"),
-        download_url=download_url,
-        category=torrent_cfg.get("category"),
-        download_path=torrent_cfg.get("download_path"),
+    resolved_protocol = _infer_protocol(download_url=download_url, explicit_protocol=protocol)
+    if not resolved_protocol:
+        return False, "Unable to determine download protocol."
+    client_cfg = _get_protocol_client_cfg(downloads, resolved_protocol)
+    if not _is_protocol_client_configured(downloads, resolved_protocol):
+        return False, f"No {resolved_protocol} client is configured."
+    queue_update_only = bool(update_only and resolved_protocol != "usenet")
+    ok, message, item_id = queue_download(
+        resolved_protocol,
+        client_cfg,
+        download_url,
         expected_name=expected_name,
-        update_only=update_only,
+        update_only=queue_update_only,
         exclude_russian=True,
-        expected_update_number=expected_update_number,
-        expected_version=expected_version
+        expected_version=expected_version,
     )
     if ok:
         tracked_title_id = None
@@ -269,14 +377,34 @@ def queue_download_url(download_url, expected_name=None, update_only=False, expe
         update = {
             "title_id": tracked_title_id,
             "title_name": expected_name or tracked_title_id or "Manual download",
-            "version": tracked_version
+            "version": tracked_version,
         }
-        _track_pending(key, update, torrent_hash, expected_name=expected_name)
+        _track_pending(
+            key,
+            update,
+            item_id,
+            expected_name=expected_name,
+            protocol=resolved_protocol,
+            client_type=client_cfg.get("type"),
+        )
         return True, "Queued download."
     return False, message
 
 
-def _search_and_queue(client, update, downloads, indexer_ids, categories, required_terms, blacklist_terms, min_seeders, allow_duplicates=True):
+def _search_and_queue(
+    client,
+    update,
+    downloads,
+    indexer_ids,
+    categories,
+    required_terms,
+    blacklist_terms,
+    min_seeders,
+    min_age_minutes,
+    search_limit,
+    allow_duplicates=True,
+    allowed_protocols=None,
+):
     key = f"{update['title_id']}:{update['version']}"
     if not allow_duplicates and _already_tracked(key):
         return False, "Update is already queued."
@@ -284,45 +412,61 @@ def _search_and_queue(client, update, downloads, indexer_ids, categories, requir
     query_candidates = _build_queries(update)
     result = None
     for query in query_candidates:
-        results = client.search(query, indexer_ids=indexer_ids, categories=categories)
+        results = client.search(query, indexer_ids=indexer_ids, categories=categories, limit=search_limit)
         result = pick_best_result(
             results,
             title_id=update["title_id"],
             version=update["version"],
             min_seeders=min_seeders,
+            min_age_minutes=min_age_minutes,
             required_terms=required_terms,
             blacklist_terms=blacklist_terms,
+            allowed_protocols=allowed_protocols,
         )
         if result:
             break
     if not result:
         return False, "No matching results found."
 
+    protocol = _infer_protocol(
+        download_url=result.get("download_url"),
+        explicit_protocol=result.get("protocol"),
+    )
+    if protocol not in (allowed_protocols or []):
+        return False, f"No {protocol or 'matching'} client is configured."
+
     download_url = result.get("download_url")
     if not download_url:
         return False, "Missing download URL."
 
-    torrent_cfg = downloads.get("torrent_client", {})
-    ok, message, torrent_hash = add_torrent(
-        client_type=torrent_cfg.get("type"),
-        url=torrent_cfg.get("url"),
-        username=torrent_cfg.get("username"),
-        password=torrent_cfg.get("password"),
-        download_url=download_url,
-        category=torrent_cfg.get("category"),
-        download_path=torrent_cfg.get("download_path"),
+    client_cfg = _get_protocol_client_cfg(downloads, protocol)
+    ok, message, item_id = queue_download(
+        protocol,
+        client_cfg,
+        download_url,
         expected_name=update.get("search_terms") or result.get("title"),
         update_only=True,
         exclude_russian=True,
-        expected_version=update.get("version")
+        expected_version=update.get("version"),
     )
     if ok:
-        _track_pending(key, update, torrent_hash, expected_name=result.get("title"))
-        logger.info("Queued update %s v%s: %s", update["title_id"], update["version"], result.get("title"))
+        _track_pending(
+            key,
+            update,
+            item_id,
+            expected_name=result.get("title"),
+            protocol=protocol,
+            client_type=client_cfg.get("type"),
+        )
+        logger.info(
+            "Queued %s update %s v%s: %s",
+            protocol,
+            update["title_id"],
+            update["version"],
+            result.get("title"),
+        )
         return True, "Queued download."
     return False, message
-
-
 
 
 def _build_queries(update):
@@ -346,12 +490,13 @@ def _build_queries(update):
             return ""
         text = _apply_char_replacements(text)
         try:
-            normalized = unicodedata.normalize('NFKD', text)
-            normalized = normalized.encode('ascii', 'ignore').decode('ascii')
+            normalized = unicodedata.normalize("NFKD", text)
+            normalized = normalized.encode("ascii", "ignore").decode("ascii")
         except Exception:
             normalized = text
         normalized = re.sub(r"[^A-Za-z0-9\s]+", " ", normalized)
         return re.sub(r"\s+", " ", normalized).strip()
+
     title_name = _normalize_query(title_name)
     prefix = _normalize_query(downloads.get("search_prefix") or "")
     suffix = _normalize_query(downloads.get("search_suffix") or "")
@@ -410,77 +555,92 @@ def _already_tracked(key):
         return key in _state["pending"] or key in _state["completed"]
 
 
-def _track_pending(key, update, torrent_hash, expected_name=None):
+def _track_pending(key, update, item_id, expected_name=None, protocol=None, client_type=None):
     with _state_lock:
         _state["pending"][key] = {
             "title_id": update["title_id"],
             "version": update["version"],
-            "hash": torrent_hash,
+            "hash": item_id,
+            "id": item_id,
             "expected_name": expected_name or update.get("title_name"),
+            "title_name": update.get("title_name"),
+            "protocol": protocol,
+            "client_type": client_type,
         }
 
 
-def _check_completed(torrent_cfg, scan_cb=None, post_cb=None):
-    completed_items = list_completed(
-        client_type=torrent_cfg.get("type"),
-        url=torrent_cfg.get("url"),
-        username=torrent_cfg.get("username"),
-        password=torrent_cfg.get("password"),
-        category=torrent_cfg.get("category"),
-        download_path=torrent_cfg.get("download_path"),
-    )
-    if not completed_items:
-        logger.info("No completed torrents detected for category/tag.")
+def _match_completed_item(info, completed_items):
+    item_id = info.get("id") or info.get("hash")
+    if item_id:
+        match = next((item for item in completed_items if (item.get("id") or item.get("hash")) == item_id), None)
+        if match:
+            return match
+    expected = (info.get("expected_name") or "").lower()
+    if expected:
+        return next((item for item in completed_items if expected in (item.get("name") or "").lower()), None)
+    return None
+
+
+def _check_completed(downloads, scan_cb=None, post_cb=None):
+    poll_targets = _get_completed_poll_targets(downloads)
+    if not poll_targets:
         return
+
+    completed_by_protocol = {}
+    for protocol, client_cfg in poll_targets:
+        items = list_completed_downloads(protocol, client_cfg)
+        completed_by_protocol[protocol] = {
+            "client_cfg": client_cfg,
+            "items": items,
+            "matched_ids": set(),
+        }
+    if not any(bucket["items"] for bucket in completed_by_protocol.values()):
+        logger.info("No completed downloads detected for configured clients.")
+        return
+
     newly_completed = False
     moved_paths = []
-    matched_hashes = set()
     with _state_lock:
         for key, info in list(_state["pending"].items()):
-            torrent_hash = info.get("hash")
-            match = None
-            if torrent_hash:
-                match = next((item for item in completed_items if item.get("hash") == torrent_hash), None)
-            if not match:
-                expected = (info.get("expected_name") or "").lower()
-                if expected:
-                    match = next((item for item in completed_items if expected in (item.get("name") or "").lower()), None)
-            if match:
-                moved_path = _move_completed(match, info)
-                if not moved_path:
-                    logger.warning(
-                        "Matched completed torrent for pending key %s, but move failed. Keeping pending entry for retry.",
-                        key
-                    )
-                    continue
-                if match.get("hash"):
-                    matched_hashes.add(match.get("hash"))
-                _state["pending"].pop(key, None)
-                _state["completed"].add(key)
-                moved_paths.append(moved_path)
-                torrent_hash = match.get("hash")
-                if torrent_hash:
-                    ok, message = remove_torrent(
-                        client_type=torrent_cfg.get("type"),
-                        url=torrent_cfg.get("url"),
-                        username=torrent_cfg.get("username"),
-                        password=torrent_cfg.get("password"),
-                        torrent_hash=torrent_hash,
-                    )
-                    if not ok:
-                        logger.warning("Failed to remove torrent %s: %s", torrent_hash, message)
-                newly_completed = True
-        unmatched_count = 0
-        for item in completed_items:
-            torrent_hash = item.get("hash")
-            if torrent_hash and torrent_hash in matched_hashes:
+            protocol = str(info.get("protocol") or "").strip().lower()
+            bucket = completed_by_protocol.get(protocol)
+            if not bucket:
                 continue
-            unmatched_count += 1
-        if unmatched_count:
-            logger.info(
-                "Ignored %s completed torrent(s) not tracked by AeroFoil pending state.",
-                unmatched_count
-            )
+            match = _match_completed_item(info, bucket["items"])
+            if not match:
+                continue
+            moved_path = _move_completed(match, info)
+            if not moved_path:
+                logger.warning(
+                    "Matched completed download for pending key %s, but move failed. Keeping pending entry for retry.",
+                    key,
+                )
+                continue
+            matched_id = match.get("id") or match.get("hash")
+            if matched_id:
+                bucket["matched_ids"].add(matched_id)
+            _state["pending"].pop(key, None)
+            _state["completed"].add(key)
+            moved_paths.append(moved_path)
+            if matched_id:
+                ok, message = remove_completed_download(protocol, bucket["client_cfg"], matched_id)
+                if not ok:
+                    logger.warning("Failed to remove completed %s item %s: %s", protocol, matched_id, message)
+            newly_completed = True
+
+        for protocol, bucket in completed_by_protocol.items():
+            unmatched_count = 0
+            for item in bucket["items"]:
+                item_id = item.get("id") or item.get("hash")
+                if item_id and item_id in bucket["matched_ids"]:
+                    continue
+                unmatched_count += 1
+            if unmatched_count:
+                logger.info(
+                    "Ignored %s completed %s download(s) not tracked by AeroFoil pending state.",
+                    unmatched_count,
+                    protocol,
+                )
 
     if newly_completed and scan_cb:
         logger.info("New downloads completed. Scanning library.")

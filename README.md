@@ -162,8 +162,8 @@ Conversion details:
 - Filters out files smaller than 50 MB from the manual conversion dropdown.
 - The `Verbose` checkbox shows detailed task output; otherwise the task output stays clean.
 
-## Automatic update downloads (Prowlarr + Torrent Client)
-AeroFoil can automatically search for missing updates using Prowlarr, send matches to a torrent client (qBittorrent or Transmission), and ingest completed downloads back into the library. The UI is modeled after apps like Sonarr/Radarr with explicit connection tests.
+## Automatic update downloads (Prowlarr + Download Clients)
+AeroFoil can automatically search for missing updates using Prowlarr, route torrent results to a configured torrent client, route usenet results to a configured usenet client, and ingest completed downloads back into the library. The UI is modeled after apps like Sonarr/Radarr with explicit connection tests.
 
 ### Setup
 1. Open the `Settings` page and scroll to the **Downloads** section.
@@ -171,23 +171,28 @@ AeroFoil can automatically search for missing updates using Prowlarr, send match
    - **Search interval (minutes)**: how often AeroFoil will look for missing updates.
    - **Minimum seeders**: skip low‑availability results.
    - **Required terms / Blacklist terms**: fine‑tune search matches (comma separated).
-   - **Torrent category/tag**: used to tag downloads in the client (default `aerofoil`).
+   - **Torrent category/tag**: used to tag managed torrent downloads (default `aerofoil`).
 3. Configure **Prowlarr**:
    - **Prowlarr URL** (e.g. `http://localhost:9696`)
    - **API Key**
    - **Indexer IDs** (optional, comma separated). If set, AeroFoil will limit searches to these indexers.
    - Use **Test Prowlarr** to validate connectivity and indexer IDs (missing IDs show as warnings).
 4. Configure **Torrent Client**:
-   - **Client**: qBittorrent or Transmission.
+   - **Client**: qBittorrent, Transmission, or Deluge.
    - **Client URL** and credentials.
    - **Download path** (optional): if set, AeroFoil will warn if it doesn't exist or isn't writable.
    - Use **Test torrent client** to validate connectivity.
+5. Configure **Usenet Client** if you want Prowlarr usenet results to queue automatically:
+   - **Client**: SABnzbd.
+   - **Client URL** and **API Key**.
+   - **SABnzbd category**: AeroFoil uses this to identify managed usenet downloads.
+   - Use **Test usenet client** to validate connectivity.
 
 ### Notes
-- Prowlarr is used for searching and ranking results; the torrent client handles the actual downloads.
+- Prowlarr is used for searching and ranking results; AeroFoil routes each match to the configured torrent or usenet client based on the result protocol.
 - Warnings do not block tests; they highlight misconfigurations (e.g. missing indexer IDs or invalid download paths).
 - The downloader runs on a schedule and respects the configured interval, skipping runs if the interval has not elapsed.
-- Completed downloads are detected by category/tag and trigger a library scan + refresh.
+- Completed downloads are detected by torrent category/tag or SABnzbd category and trigger a library scan + refresh.
 
 ## Titles configuration
 In the `Settings` page under the `Titles` section is where you specify the language of your Shop (currently the same for all users).
@@ -248,7 +253,7 @@ Planned feature, in no particular order.
     - [x] Multiple backup versions per title (timestamp + note)
     - [x] Download/delete save backups from both CyberFoil and AeroFoil web UI
  - External services:
-    - [x] Prowlarr integration for automatic update downloads (via torrent client)
+    - [x] Prowlarr integration for automatic update downloads (via torrent and usenet clients)
     - [x] Automated update downloader pipeline (search -> download -> ingest)
 
 

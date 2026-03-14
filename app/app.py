@@ -22,7 +22,7 @@ from datetime import timedelta, datetime
 flask.cli.show_server_banner = lambda *args: None
 from app.constants import *
 from app.settings import *
-from app.downloads import ProwlarrClient, test_torrent_client, run_downloads_job, manual_search_update, queue_download_url, search_update_options, check_completed_downloads, get_downloads_state, get_active_downloads
+from app.downloads import ProwlarrClient, filter_results, test_download_client, run_downloads_job, manual_search_update, queue_download_url, search_update_options, check_completed_downloads, get_downloads_state, get_active_downloads
 from app.library import organize_library, delete_older_updates, delete_duplicates
 from app.db import *
 from app.shop import *
@@ -2979,6 +2979,45 @@ def _normalize_download_search_query(text, downloads_settings=None):
     return re.sub(r"\s+", " ", normalized).strip()
 
 
+def _get_download_filter_thresholds(downloads):
+    downloads = downloads or {}
+    torrent_cfg = downloads.get('torrent_client') or {}
+    usenet_cfg = downloads.get('usenet_client') or {}
+    try:
+        min_seeders = int(torrent_cfg.get('min_seeders') or 0)
+    except (TypeError, ValueError):
+        min_seeders = 0
+    try:
+        min_age_minutes = int(usenet_cfg.get('min_age_minutes') or 0)
+    except (TypeError, ValueError):
+        min_age_minutes = 0
+    return max(min_seeders, 0), max(min_age_minutes, 0)
+
+
+def _get_prowlarr_search_limit(prowlarr_cfg):
+    try:
+        search_limit = int((prowlarr_cfg or {}).get('search_limit') or 100)
+    except (TypeError, ValueError):
+        search_limit = 100
+    return max(1, min(search_limit, 500))
+
+
+def _trim_download_search_results(results, limit=50):
+    return [
+        {
+            'title': r.get('title'),
+            'size': r.get('size'),
+            'seeders': r.get('seeders'),
+            'leechers': r.get('leechers'),
+            'download_url': r.get('download_url'),
+            'protocol': r.get('protocol'),
+            'age_minutes': r.get('age_minutes'),
+            'age_label': r.get('age_label'),
+        }
+        for r in (results or [])[:limit]
+    ]
+
+
 @app.get('/api/requests/search')
 @access_required('admin')
 def request_prowlarr_search_api():
@@ -3015,22 +3054,23 @@ def request_prowlarr_search_api():
         except (TypeError, ValueError):
             timeout_seconds = 15
         timeout_seconds = max(5, min(timeout_seconds, 180))
+        search_limit = _get_prowlarr_search_limit(prowlarr_cfg)
         client = ProwlarrClient(prowlarr_cfg['url'], prowlarr_cfg['api_key'], timeout_seconds=timeout_seconds)
         results = client.search(
             full_query,
             indexer_ids=prowlarr_cfg.get('indexer_ids') or [],
             categories=prowlarr_cfg.get('categories') or [],
+            limit=search_limit,
         )
-        trimmed = [
-            {
-                'title': r.get('title'),
-                'size': r.get('size'),
-                'seeders': r.get('seeders'),
-                'leechers': r.get('leechers'),
-                'download_url': r.get('download_url'),
-            }
-            for r in (results or [])[:50]
-        ]
+        min_seeders, min_age_minutes = _get_download_filter_thresholds(downloads)
+        results = filter_results(
+            results,
+            min_seeders=min_seeders,
+            min_age_minutes=min_age_minutes,
+            required_terms=downloads.get('required_terms') or [],
+            blacklist_terms=downloads.get('blacklist_terms') or [],
+        )
+        trimmed = _trim_download_search_results(results, limit=50)
         return jsonify({'success': True, 'results': trimmed})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e), 'results': []})
@@ -3572,11 +3612,12 @@ def test_downloads_prowlarr_api():
 @access_required('admin')
 def test_downloads_client_api():
     data = request.json or {}
-    ok, message = test_torrent_client(
+    ok, message = test_download_client(
         client_type=data.get('type', ''),
         url=data.get('url', ''),
         username=data.get('username', ''),
-        password=data.get('password', '')
+        password=data.get('password', ''),
+        api_key=data.get('api_key', '')
     )
     download_path = (data.get('download_path') or '').strip()
     warning = None
@@ -3633,6 +3674,7 @@ def downloads_search():
         except (TypeError, ValueError):
             timeout_seconds = 15
         timeout_seconds = max(5, min(timeout_seconds, 180))
+        search_limit = _get_prowlarr_search_limit(prowlarr_cfg)
         full_query = _normalize_download_search_query(query, downloads)
         if apply_settings:
             prefix = _normalize_download_search_query(downloads.get('search_prefix') or '', downloads)
@@ -3646,33 +3688,18 @@ def downloads_search():
             full_query,
             indexer_ids=prowlarr_cfg.get('indexer_ids') or [],
             categories=prowlarr_cfg.get('categories') or [],
+            limit=search_limit,
         )
         if apply_settings:
-            required_terms = [t.lower() for t in (downloads.get('required_terms') or []) if t]
-            blacklist_terms = [t.lower() for t in (downloads.get('blacklist_terms') or []) if t]
-            min_seeders = int(downloads.get('min_seeders') or 0)
-            filtered = []
-            for item in results or []:
-                title = (item.get('title') or '').lower()
-                seeders = item.get('seeders') or 0
-                if min_seeders and seeders < min_seeders:
-                    continue
-                if required_terms and not all(term in title for term in required_terms):
-                    continue
-                if blacklist_terms and any(term in title for term in blacklist_terms):
-                    continue
-                filtered.append(item)
-            results = filtered
-        trimmed = [
-            {
-                'title': r.get('title'),
-                'size': r.get('size'),
-                'seeders': r.get('seeders'),
-                'leechers': r.get('leechers'),
-                'download_url': r.get('download_url')
-            }
-            for r in (results or [])[:50]
-        ]
+            min_seeders, min_age_minutes = _get_download_filter_thresholds(downloads)
+            results = filter_results(
+                results,
+                min_seeders=min_seeders,
+                min_age_minutes=min_age_minutes,
+                required_terms=downloads.get('required_terms') or [],
+                blacklist_terms=downloads.get('blacklist_terms') or [],
+            )
+        trimmed = _trim_download_search_results(results, limit=50)
         return jsonify({'success': True, 'results': trimmed})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
@@ -3684,6 +3711,7 @@ def downloads_queue():
     download_url = data.get('download_url')
     expected_name = data.get('title')
     title_id = data.get('title_id')
+    protocol = data.get('protocol')
     update_only = bool(data.get('update_only', False))
     expected_version = data.get('expected_version')
     if not download_url:
@@ -3693,7 +3721,8 @@ def downloads_queue():
         expected_name=expected_name,
         update_only=update_only,
         expected_version=expected_version,
-        title_id=title_id
+        title_id=title_id,
+        protocol=protocol,
     )
     return jsonify({'success': ok, 'message': message})
 

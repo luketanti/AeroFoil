@@ -64,6 +64,21 @@ def _validate_downloaded_titledb_file(path, filename):
     return os.path.isfile(path)
 
 
+def _remove_temp_file(path, retries=3, delay_s=0.1):
+    for attempt in range(max(1, int(retries or 1))):
+        try:
+            if not os.path.isfile(path):
+                return
+            os.remove(path)
+            return
+        except PermissionError:
+            if attempt >= max(1, int(retries or 1)) - 1:
+                return
+            time.sleep(delay_s)
+        except Exception:
+            return
+
+
 def download_titledb_files(rzf, files):
     for file in files:
         store_path = os.path.join(TITLEDB_DIR, file)
@@ -76,11 +91,7 @@ def download_titledb_files(rzf, files):
                 raise ValueError(f'Downloaded TitleDB file is invalid: {file}')
             os.replace(temp_path, store_path)
         finally:
-            try:
-                if os.path.isfile(temp_path):
-                    os.remove(temp_path)
-            except Exception:
-                pass
+            _remove_temp_file(temp_path)
 
 
 def _get_with_retry(url, max_retries=5, backoff_factor=2, headers=None, method="GET", allow_redirects=False):

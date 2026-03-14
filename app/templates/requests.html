@@ -11,7 +11,7 @@
           <div>
             {% if current_user.is_admin or admin_account_created == false %}
             <h2 class="pb-2">Requests</h2>
-            <p class="text-muted">User title requests and torrent search.</p>
+            <p class="text-muted">User title requests and download search.</p>
             {% else %}
             <h2 class="pb-2">Request A Title</h2>
             <p class="text-muted">Search TitleDB and request content not yet in your library.</p>
@@ -71,13 +71,13 @@
     </div>
   </div>
 
-  <!-- Torrent Search Modal (admin) -->
+  <!-- Download Search Modal (admin) -->
   {% if current_user.is_admin or admin_account_created == false %}
   <div class="modal fade" id="requestTorrentSearchModal" tabindex="-1" aria-labelledby="requestTorrentSearchModalLabel" aria-hidden="true">
-    <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-dialog modal-xl modal-dialog-centered">
       <div class="modal-content">
         <div class="modal-header">
-          <h1 class="modal-title fs-5" id="requestTorrentSearchModalLabel">Torrent search results</h1>
+          <h1 class="modal-title fs-5" id="requestTorrentSearchModalLabel">Download search results</h1>
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
@@ -87,6 +87,8 @@
               <thead>
                 <tr>
                   <th scope="col">Title</th>
+                  <th scope="col">Protocol</th>
+                  <th scope="col">Age</th>
                   <th scope="col">Size</th>
                   <th scope="col">Seeders</th>
                   <th scope="col">Leechers</th>
@@ -238,7 +240,7 @@
         <td class="text-end">
           <div class="btn-group btn-group-sm" role="group">
             <button class="btn btn-warning search-request-btn" data-title-id="${escapeHtml(r.title_id || '')}" data-title-name="${escapeHtml(r.title_name || '')}">
-              <i class="bi bi-search"></i> Search torrents
+              <i class="bi bi-search"></i> Search downloads
             </button>
             <button class="btn btn-outline-danger delete-request-btn" data-request-id="${escapeHtml(String(r.id || ''))}" title="Delete request">
               <i class="bi bi-trash"></i>
@@ -270,7 +272,7 @@
     }
   }
 
-  async function searchTorrentsForRequest(titleId, titleName) {
+  async function searchDownloadsForRequest(titleId, titleName) {
     const modalEl = document.getElementById('requestTorrentSearchModal');
     const statusEl = document.getElementById('requestTorrentSearchStatus');
     const bodyEl = document.getElementById('requestTorrentSearchResults');
@@ -295,11 +297,13 @@
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td>${escapeHtml(item.title || '-')}</td>
+        <td>${escapeHtml(item.protocol || '-')}</td>
+        <td>${escapeHtml(item.age_label || '-')}</td>
         <td>${formatBytes(item.size)}</td>
         <td>${escapeHtml(String(item.seeders ?? '-'))}</td>
         <td>${escapeHtml(String(item.leechers ?? '-'))}</td>
         <td>
-          <button class="btn btn-sm btn-warning queue-torrent-btn" data-download-url="${escapeHtml(item.download_url || '')}" data-title="${escapeHtml(item.title || '')}">
+          <button class="btn btn-sm btn-warning queue-download-btn" data-download-url="${escapeHtml(item.download_url || '')}" data-title="${escapeHtml(item.title || '')}" data-protocol="${escapeHtml(item.protocol || '')}">
             Queue
           </button>
         </td>
@@ -315,7 +319,7 @@
     const titleId = btn.getAttribute('data-title-id');
     const titleName = btn.getAttribute('data-title-name');
     if (!titleId) return;
-    await searchTorrentsForRequest(titleId, titleName);
+    await searchDownloadsForRequest(titleId, titleName);
   });
 
   document.addEventListener('click', async (e) => {
@@ -342,16 +346,18 @@
 
   document.addEventListener('click', async (e) => {
     if (!isAdmin) return;
-    const btn = e.target.closest('.queue-torrent-btn');
+    const btn = e.target.closest('.queue-download-btn');
     if (!btn) return;
     const downloadUrl = btn.getAttribute('data-download-url');
     const title = btn.getAttribute('data-title');
+    const protocol = btn.getAttribute('data-protocol');
     if (!downloadUrl) return;
     btn.setAttribute('disabled', 'true');
     try {
       const data = await apiPost('/api/downloads/queue', {
         download_url: downloadUrl,
         title: title,
+        protocol: protocol,
         update_only: false,
       });
       // best-effort feedback in modal header

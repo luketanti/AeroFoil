@@ -444,6 +444,9 @@
                     <li class="nav-item" role="presentation">
                         <button class="nav-link" id="torrent-tab" data-bs-toggle="tab" data-bs-target="#torrent" type="button" role="tab" aria-controls="torrent" aria-selected="false">Torrent Client</button>
                     </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="usenet-tab" data-bs-toggle="tab" data-bs-target="#usenet" type="button" role="tab" aria-controls="usenet" aria-selected="false">Usenet Client</button>
+                    </li>
                 </ul>
 
                 <!-- Tab content -->
@@ -456,12 +459,9 @@
                                 <input type="number" min="5" class="form-control" id="downloadsIntervalInput">
                             </div>
                             <div class="col-md-4">
-                                <label for="downloadsMinSeedersInput" class="form-label">Minimum seeders</label>
-                                <input type="number" min="0" class="form-control" id="downloadsMinSeedersInput">
-                            </div>
-                            <div class="col-md-4">
-                                <label for="downloadsCategoryInput" class="form-label">Torrent category/tag</label>
+                                <label for="downloadsCategoryInput" class="form-label">Category/tag</label>
                                 <input type="text" class="form-control" id="downloadsCategoryInput" placeholder="aerofoil">
+                                <div class="form-text">Used for torrent categories/tags and the SABnzbd category.</div>
                             </div>
                         </div>
                         <div class="row g-3 mb-3">
@@ -511,6 +511,11 @@
                             <div class="form-text">Increase this if searches sometimes time out. Range: 5-180 seconds.</div>
                         </div>
                         <div class="mb-3">
+                            <label for="prowlarrSearchLimitInput" class="form-label">Search limit</label>
+                            <input type="number" min="1" max="500" class="form-control" id="prowlarrSearchLimitInput" value="100">
+                            <div class="form-text">Maximum number of results AeroFoil requests from Prowlarr. Range: 1-500.</div>
+                        </div>
+                        <div class="mb-3">
                             <label for="prowlarrIndexerIdsInput" class="form-label">Indexer IDs (comma separated)</label>
                             <input type="text" class="form-control" id="prowlarrIndexerIdsInput" placeholder="1,2,3">
                         </div>
@@ -556,10 +561,44 @@
                             <label for="torrentClientPathInput" class="form-label">Download path (optional)</label>
                             <input type="text" class="form-control" id="torrentClientPathInput" placeholder="D:\\Downloads\\Switch">
                         </div>
+                        <div class="mb-3">
+                            <label for="torrentClientMinSeedersInput" class="form-label">Minimum seeders</label>
+                            <input type="number" min="0" class="form-control" id="torrentClientMinSeedersInput">
+                        </div>
                         <div class="d-flex align-items-center gap-3">
                             <button type="button" id="testTorrentClientBtn" class="btn btn-outline-secondary"
                                 onClick='testTorrentClientSettings()'>Test torrent client</button>
                             <span id="torrentClientTestResult" class="text-muted small"></span>
+                        </div>
+                    </div>
+
+                    <div class="tab-pane fade" id="usenet" role="tabpanel" aria-labelledby="usenet-tab">
+                        <div class="row g-3 mb-3">
+                            <div class="col-md-4">
+                                <label for="usenetClientTypeSelect" class="form-label">Client</label>
+                                <select class="form-select" id="usenetClientTypeSelect">
+                                    <option value="sabnzbd">SABnzbd</option>
+                                </select>
+                            </div>
+                            <div class="col-md-8">
+                                <label for="usenetClientUrlInput" class="form-label">Client URL</label>
+                                <input type="text" class="form-control" id="usenetClientUrlInput" placeholder="http://localhost:8085">
+                            </div>
+                        </div>
+                        <div class="row g-3 mb-3">
+                            <div class="col-md-6">
+                                <label for="usenetClientApiKeyInput" class="form-label">API Key</label>
+                                <input type="password" class="form-control" id="usenetClientApiKeyInput">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="usenetClientMinAgeInput" class="form-label">Minimum age (minutes)</label>
+                                <input type="number" min="0" class="form-control" id="usenetClientMinAgeInput">
+                            </div>
+                        </div>
+                        <div class="d-flex align-items-center gap-3">
+                            <button type="button" id="testUsenetClientBtn" class="btn btn-outline-secondary"
+                                onClick='testUsenetClientSettings()'>Test usenet client</button>
+                            <span id="usenetClientTestResult" class="text-muted small"></span>
                         </div>
                     </div>
                 </div>
@@ -1280,6 +1319,12 @@
         }
         prowlarrTimeout = Math.max(5, Math.min(180, prowlarrTimeout));
         setInputVal("prowlarrTimeoutInput", prowlarrTimeout);
+        let prowlarrSearchLimit = parseInt(getInputVal("prowlarrSearchLimitInput"), 10);
+        if (isNaN(prowlarrSearchLimit)) {
+            prowlarrSearchLimit = 100;
+        }
+        prowlarrSearchLimit = Math.max(1, Math.min(500, prowlarrSearchLimit));
+        setInputVal("prowlarrSearchLimitInput", prowlarrSearchLimit);
         if (categoriesParsed.invalid.length) {
             alert('Prowlarr categories must be numeric IDs only. Invalid values: ' + categoriesParsed.invalid.join(', '));
             $('#submitDownloadSettingsBtn').prop('disabled', false);
@@ -1288,7 +1333,7 @@
         data = {
             enabled: getCheckboxStatus("downloadsEnabledCheck"),
             interval_minutes: parseInt(getInputVal("downloadsIntervalInput"), 10),
-            min_seeders: parseInt(getInputVal("downloadsMinSeedersInput"), 10),
+            category: getInputVal("downloadsCategoryInput"),
             required_terms: splitTerms(getInputVal("downloadsRequiredTermsInput")),
             blacklist_terms: splitTerms(getInputVal("downloadsBlacklistTermsInput")),
             search_prefix: getInputVal("downloadsSearchPrefixInput"),
@@ -1299,15 +1344,22 @@
                 api_key: getInputVal("prowlarrApiKeyInput"),
                 indexer_ids: parseIndexerIds(getInputVal("prowlarrIndexerIdsInput")),
                 categories: categoriesParsed.values,
-                timeout_seconds: prowlarrTimeout
+                timeout_seconds: prowlarrTimeout,
+                search_limit: prowlarrSearchLimit
             },
             torrent_client: {
                 type: getInputVal("torrentClientTypeSelect"),
                 url: getInputVal("torrentClientUrlInput"),
                 username: getInputVal("torrentClientUserInput"),
                 password: getInputVal("torrentClientPasswordInput"),
-                category: getInputVal("downloadsCategoryInput"),
-                download_path: getInputVal("torrentClientPathInput")
+                download_path: getInputVal("torrentClientPathInput"),
+                min_seeders: parseInt(getInputVal("torrentClientMinSeedersInput"), 10)
+            },
+            usenet_client: {
+                type: getInputVal("usenetClientTypeSelect"),
+                url: getInputVal("usenetClientUrlInput"),
+                api_key: getInputVal("usenetClientApiKeyInput"),
+                min_age_minutes: parseInt(getInputVal("usenetClientMinAgeInput"), 10)
             }
         };
 
@@ -1361,11 +1413,18 @@
         }
         prowlarrTimeout = Math.max(5, Math.min(180, prowlarrTimeout));
         setInputVal("prowlarrTimeoutInput", prowlarrTimeout);
+        let prowlarrSearchLimit = parseInt(getInputVal("prowlarrSearchLimitInput"), 10);
+        if (isNaN(prowlarrSearchLimit)) {
+            prowlarrSearchLimit = 100;
+        }
+        prowlarrSearchLimit = Math.max(1, Math.min(500, prowlarrSearchLimit));
+        setInputVal("prowlarrSearchLimitInput", prowlarrSearchLimit);
         data = {
             url: getInputVal("prowlarrUrlInput"),
             api_key: getInputVal("prowlarrApiKeyInput"),
             indexer_ids: parseIndexerIds(getInputVal("prowlarrIndexerIdsInput")),
-            timeout_seconds: prowlarrTimeout
+            timeout_seconds: prowlarrTimeout,
+            search_limit: prowlarrSearchLimit
         };
         $.ajax({
             url: "/api/settings/downloads/test-prowlarr",
@@ -1419,6 +1478,37 @@
             },
             complete: function () {
                 $('#testTorrentClientBtn').prop('disabled', false);
+            }
+        });
+    }
+
+    function testUsenetClientSettings() {
+        $('#testUsenetClientBtn').prop('disabled', true);
+        $('#usenetClientTestResult').text('Testing...').removeClass('text-danger text-success').addClass('text-muted');
+        data = {
+            type: getInputVal("usenetClientTypeSelect"),
+            url: getInputVal("usenetClientUrlInput"),
+            api_key: getInputVal("usenetClientApiKeyInput")
+        };
+        $.ajax({
+            url: "/api/settings/downloads/test-client",
+            type: 'POST',
+            data: JSON.stringify(data),
+            contentType: "application/json",
+            success: function (result) {
+                const ok = result['success'];
+                const warning = result['warning'];
+                let text = result['message'] || (ok ? 'Usenet client OK' : 'Usenet client test failed');
+                if (warning) {
+                    text = `${text} (${warning})`;
+                }
+                $('#usenetClientTestResult')
+                    .text(text)
+                    .removeClass('text-muted text-danger text-success')
+                    .addClass(ok ? 'text-success' : 'text-danger');
+            },
+            complete: function () {
+                $('#testUsenetClientBtn').prop('disabled', false);
             }
         });
     }
@@ -1572,7 +1662,6 @@
             // Downloads settings
             downloadsSettings = result['downloads'] || {};
             setInputVal("downloadsIntervalInput", downloadsSettings['interval_minutes']);
-            setInputVal("downloadsMinSeedersInput", downloadsSettings['min_seeders']);
             setInputVal("downloadsRequiredTermsInput", (downloadsSettings['required_terms'] || []).join(', '));
             setInputVal("downloadsBlacklistTermsInput", (downloadsSettings['blacklist_terms'] || []).join(', '));
             setInputVal("downloadsSearchPrefixInput", downloadsSettings['search_prefix'] || '');
@@ -1582,7 +1671,7 @@
                 formatSearchCharReplacements(downloadsSettings['search_char_replacements'] || [])
             );
             $("#downloadsEnabledCheck").prop("checked", !!downloadsSettings['enabled']);
-            setInputVal("downloadsCategoryInput", downloadsSettings['torrent_client']?.['category'] || 'aerofoil');
+            setInputVal("downloadsCategoryInput", downloadsSettings['category'] || downloadsSettings['torrent_client']?.['category'] || downloadsSettings['usenet_client']?.['category'] || 'aerofoil');
 
             prowlarrSettings = downloadsSettings['prowlarr'] || {};
             setInputVal("prowlarrUrlInput", prowlarrSettings['url'] || '');
@@ -1590,6 +1679,7 @@
             setInputVal("prowlarrIndexerIdsInput", (prowlarrSettings['indexer_ids'] || []).join(', '));
             setInputVal("prowlarrCategoriesInput", (prowlarrSettings['categories'] || []).join(', '));
             setInputVal("prowlarrTimeoutInput", prowlarrSettings['timeout_seconds'] || 15);
+            setInputVal("prowlarrSearchLimitInput", prowlarrSettings['search_limit'] || 100);
 
             torrentSettings = downloadsSettings['torrent_client'] || {};
             setInputVal("torrentClientTypeSelect", torrentSettings['type'] || 'qbittorrent');
@@ -1597,6 +1687,12 @@
             setInputVal("torrentClientUserInput", torrentSettings['username'] || '');
             setInputVal("torrentClientPasswordInput", torrentSettings['password'] || '');
             setInputVal("torrentClientPathInput", torrentSettings['download_path'] || '');
+            setInputVal("torrentClientMinSeedersInput", torrentSettings['min_seeders'] ?? 2);
+            usenetSettings = downloadsSettings['usenet_client'] || {};
+            setInputVal("usenetClientTypeSelect", usenetSettings['type'] || 'sabnzbd');
+            setInputVal("usenetClientUrlInput", usenetSettings['url'] || '');
+            setInputVal("usenetClientApiKeyInput", usenetSettings['api_key'] || '');
+            setInputVal("usenetClientMinAgeInput", usenetSettings['min_age_minutes'] ?? 0);
             updateTorrentClientFieldState();
         });
 

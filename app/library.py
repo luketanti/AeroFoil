@@ -1063,6 +1063,7 @@ def _format_nsz_command(command_template, input_file, output_file, threads=None,
         command_template = '{nsz_runner} --keys "{nsz_keys}" --minimal-output --verify -C -o "{output_dir}" "{input_file}"'
     command = command_template.format(
         nsz_runner=nsz_runner,
+        nsz_exe=nsz_runner,
         nsz_keys=nsz_keys,
         input_file=input_file,
         output_file=output_file,

@@ -9,7 +9,7 @@
                 <div class="d-flex flex-column flex-lg-row justify-content-between gap-2 align-items-lg-center mb-2">
                     <div>
                         <h2 class="pb-2">Downloads</h2>
-                        <p class="text-muted mb-0">Live torrent status and pending AeroFoil download queue.</p>
+                        <p class="text-muted mb-0">Live torrent and usenet status plus the pending AeroFoil download queue.</p>
                     </div>
                 </div>
 
@@ -22,7 +22,7 @@
                                 <div class="d-flex align-items-center justify-content-between mb-3">
                                     <div>
                                         <h5 class="card-title mb-1">Current Downloads</h5>
-                                        <div class="text-muted small">Active AeroFoil-managed torrents from your configured client.</div>
+                                        <div class="text-muted small">Active AeroFoil-managed downloads from your configured torrent and usenet clients.</div>
                                     </div>
                                     <button type="button" id="refreshActiveDownloadsBtn" class="btn btn-outline-primary btn-sm" onclick="loadActiveDownloads()">Refresh</button>
                                 </div>
@@ -31,6 +31,8 @@
                                         <thead>
                                             <tr>
                                                 <th>Name</th>
+                                                <th>Protocol</th>
+                                                <th>Client</th>
                                                 <th>Status</th>
                                                 <th>Progress</th>
                                                 <th>Down</th>
@@ -44,7 +46,7 @@
                                             </tr>
                                         </thead>
                                         <tbody id="activeDownloadsBody">
-                                            <tr><td colspan="11" class="text-muted">Loading...</td></tr>
+                                            <tr><td colspan="13" class="text-muted">Loading...</td></tr>
                                         </tbody>
                                     </table>
                                 </div>
@@ -124,23 +126,23 @@
                 $('#downloadsQueueList').text('No pending downloads.');
                 return;
             }
-            const lines = pending.map(item => `${item['title_id']} v${item['version']} | ${item['expected_name'] || ''} | ${item['hash'] || ''}`);
+            const lines = pending.map(item => `${item['title_id']} v${item['version']} | ${item['protocol'] || '-'} | ${item['client_type'] || '-'} | ${item['expected_name'] || ''} | ${item['hash'] || ''}`);
             $('#downloadsQueueList').text(lines.join('\n'));
         });
     }
 
     function loadActiveDownloads() {
         const body = $('#activeDownloadsBody');
-        body.html('<tr><td colspan="11" class="text-muted">Loading...</td></tr>');
+        body.html('<tr><td colspan="13" class="text-muted">Loading...</td></tr>');
         $.getJSON('/api/downloads/active', function (result) {
             if (!result['success']) {
                 const msg = result['message'] || 'Failed to load active downloads.';
-                body.html(`<tr><td colspan="11" class="text-danger">${msg}</td></tr>`);
+                body.html(`<tr><td colspan="13" class="text-danger">${msg}</td></tr>`);
                 return;
             }
             const items = result['items'] || [];
             if (!items.length) {
-                body.html('<tr><td colspan="11" class="text-muted">No active downloads.</td></tr>');
+                body.html('<tr><td colspan="13" class="text-muted">No active downloads.</td></tr>');
                 return;
             }
             body.empty();
@@ -149,6 +151,8 @@
                 const row = $(`
                     <tr>
                         <td class="small">${(item['name'] || '').toString()}</td>
+                        <td class="small text-muted">${(item['protocol'] || '').toString() || '-'}</td>
+                        <td class="small text-muted">${(item['client_type'] || '').toString() || '-'}</td>
                         <td class="small text-muted">${(item['status'] || '').toString()}</td>
                         <td class="small">${progress.toFixed(1)}%</td>
                         <td class="small">${formatSpeed(item['down_speed'])}</td>
