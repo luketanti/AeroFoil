@@ -656,6 +656,8 @@ def _extract_update_version_from_name(name):
         return None
     match = re.search(r"\[v(\d+)\]", name, re.IGNORECASE)
     if not match:
+        match = re.search(r"(?<![a-z0-9])v(\d+)(?!\.\d)", name, re.IGNORECASE)
+    if not match:
         return None
     try:
         return int(match.group(1))

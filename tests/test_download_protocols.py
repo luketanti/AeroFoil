@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from app.downloads.manager import _infer_protocol
+from app.downloads.manager import _extract_update_version_from_name, _infer_protocol
 from app.downloads.prowlarr import ProwlarrClient, _normalize_result, filter_results, pick_best_result
 from app.settings import _normalize_download_settings
 
@@ -83,6 +83,15 @@ class DownloadProtocolTests(unittest.TestCase):
         ]
         filtered = filter_results(results, min_seeders=0, min_age_minutes=60)
         self.assertEqual([item["title"] for item in filtered], ["Older NZB", "Torrent"])
+
+    def test_extract_update_version_prefers_bracketed_token(self):
+        self.assertEqual(_extract_update_version_from_name("Game [v1245184] v999.nsp"), 1245184)
+
+    def test_extract_update_version_falls_back_to_plain_token(self):
+        self.assertEqual(_extract_update_version_from_name("sxs-uno_v1245184.nsp.hdf"), 1245184)
+
+    def test_extract_update_version_ignores_semantic_version(self):
+        self.assertIsNone(_extract_update_version_from_name("UNO Update v1.1.10 NSW-SUXXORS"))
 
 
 if __name__ == "__main__":
