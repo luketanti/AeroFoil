@@ -3,9 +3,12 @@ from unittest.mock import patch
 
 from app.downloads.client import queue_download
 from app.downloads.manager import (
+    _check_completed,
     _adopt_untracked_completed_item,
     _format_pending_label,
     _infer_update_info_from_completed_item,
+    _iter_importable_download_files,
+    _normalize_imported_wrapped_files,
     get_downloads_state,
     queue_download_url,
 )
@@ -129,9 +132,9 @@ class QueueRoutingTests(unittest.TestCase):
             _format_pending_label({
                 "title_id": None,
                 "version": None,
-                "expected_name": "Super Mario 3D World plus Bowsers Fury NSW-VENOM",
+                "expected_name": "Example Release NSW-GRP",
             }),
-            "Super Mario 3D World plus Bowsers Fury NSW-VENOM",
+            "Example Release NSW-GRP",
         )
 
     @patch("app.downloads.manager._state_lock")
@@ -144,8 +147,8 @@ class QueueRoutingTests(unittest.TestCase):
                 "version": None,
                 "hash": "SABnzbd_nzo_2goo76g2",
                 "id": "SABnzbd_nzo_2goo76g2",
-                "expected_name": "Super Mario 3D World plus Bowsers Fury NSW-VENOM",
-                "title_name": "Super Mario 3D World plus Bowsers Fury NSW-VENOM",
+                "expected_name": "Example Release NSW-GRP",
+                "title_name": "Example Release NSW-GRP",
                 "protocol": "usenet",
                 "client_type": "sabnzbd",
             }
@@ -155,8 +158,8 @@ class QueueRoutingTests(unittest.TestCase):
     def test_get_downloads_state_exposes_label_for_manual_pending_items(self, _state_lock_mock):
         state = get_downloads_state()
 
-        self.assertEqual(state["pending"][0]["label"], "Super Mario 3D World plus Bowsers Fury NSW-VENOM")
-        self.assertEqual(state["pending"][0]["expected_name"], "Super Mario 3D World plus Bowsers Fury NSW-VENOM")
+        self.assertEqual(state["pending"][0]["label"], "Example Release NSW-GRP")
+        self.assertEqual(state["pending"][0]["expected_name"], "Example Release NSW-GRP")
         self.assertIsNone(state["pending"][0]["title_id"])
         self.assertIsNone(state["pending"][0]["version"])
 
@@ -269,6 +272,189 @@ class SabSelectionTests(unittest.TestCase):
 
 
 class CompletedAdoptionTests(unittest.TestCase):
+    @patch("app.downloads.manager.os.walk")
+    @patch("app.downloads.manager.os.path.isdir", return_value=True)
+    @patch("app.downloads.manager.os.path.isfile")
+    def test_iter_importable_download_files_ignores_scene_extras(
+        self,
+        isfile_mock,
+        isdir_mock,
+        walk_mock,
+    ):
+        walk_mock.return_value = [
+            ("X:\\fixture-root\\Example Release NSW-GRP", [], [
+                "example-base.nsp.hdf",
+                "example-update.nsp",
+                "proof.nfo",
+                "checksum.sfv",
+            ]),
+        ]
+        isfile_mock.side_effect = lambda path: str(path).lower().endswith((
+            "example-base.nsp.hdf",
+            "example-update.nsp",
+            "proof.nfo",
+            "checksum.sfv",
+        ))
+
+        self.assertEqual(
+            _iter_importable_download_files("X:\\fixture-root\\Example Release NSW-GRP"),
+            [
+                "X:\\fixture-root\\Example Release NSW-GRP\\example-base.nsp.hdf",
+                "X:\\fixture-root\\Example Release NSW-GRP\\example-update.nsp",
+            ],
+        )
+
+    @patch("app.downloads.manager.shutil.move")
+    @patch("app.downloads.manager._ensure_unique_path", side_effect=lambda path: path)
+    @patch("app.downloads.manager.os.walk")
+    @patch("app.downloads.manager.os.path.isdir", return_value=True)
+    @patch("app.downloads.manager.os.path.isfile", return_value=False)
+    @patch("app.downloads.manager.os.path.exists", return_value=True)
+    def test_normalize_imported_wrapped_files_strips_hdf_inside_directories(
+        self,
+        exists_mock,
+        isfile_mock,
+        isdir_mock,
+        walk_mock,
+        ensure_unique_path_mock,
+        move_mock,
+    ):
+        walk_mock.return_value = [
+            ("X:\\fixture-root\\Example Release NSW-GRP", [], ["base.nsp.hdf", "note.nfo", "update.nsz.hdf"]),
+        ]
+
+        result = _normalize_imported_wrapped_files("X:\\fixture-root\\Example Release NSW-GRP")
+
+        self.assertEqual(result, "X:\\fixture-root\\Example Release NSW-GRP")
+        self.assertEqual(move_mock.call_args_list[0].args, (
+            "X:\\fixture-root\\Example Release NSW-GRP\\base.nsp.hdf",
+            "X:\\fixture-root\\Example Release NSW-GRP\\base.nsp",
+        ))
+        self.assertEqual(move_mock.call_args_list[1].args, (
+            "X:\\fixture-root\\Example Release NSW-GRP\\update.nsz.hdf",
+            "X:\\fixture-root\\Example Release NSW-GRP\\update.nsz",
+        ))
+
+    @patch("app.downloads.manager.shutil.move")
+    @patch("app.downloads.manager._ensure_unique_path", side_effect=lambda path: path)
+    @patch("app.downloads.manager.os.path.isdir", return_value=False)
+    @patch("app.downloads.manager.os.path.isfile", return_value=True)
+    @patch("app.downloads.manager.os.path.exists", return_value=True)
+    def test_normalize_imported_wrapped_files_returns_new_single_file_path(
+        self,
+        exists_mock,
+        isfile_mock,
+        isdir_mock,
+        ensure_unique_path_mock,
+        move_mock,
+    ):
+        result = _normalize_imported_wrapped_files("X:\\fixture-root\\incoming\\example-base.nsp.hdf")
+
+        self.assertEqual(result, "X:\\fixture-root\\incoming\\example-base.nsp")
+        move_mock.assert_called_once_with(
+            "X:\\fixture-root\\incoming\\example-base.nsp.hdf",
+            "X:\\fixture-root\\incoming\\example-base.nsp",
+        )
+
+    @patch("app.downloads.manager.enqueue_organize_paths")
+    @patch("app.downloads.manager.enqueue_cleanup_roots")
+    @patch("app.downloads.manager.remove_completed_download", return_value=(True, "ok"))
+    @patch("app.downloads.manager._move_completed", return_value="X:\\fixture-root\\Example Title [0100]\\Example Base.nsp")
+    @patch("app.downloads.manager.list_completed_downloads")
+    @patch("app.downloads.manager._get_completed_poll_targets")
+    @patch("app.downloads.manager._state_lock")
+    @patch("app.downloads.manager._state", {
+        "running": False,
+        "last_run": 0.0,
+        "pending": {
+            "manual:1": {
+                "title_id": None,
+                "version": None,
+                "hash": "item-123",
+                "id": "item-123",
+                "expected_name": "Example Release NSW-GRP",
+                "title_name": "Example Release NSW-GRP",
+                "protocol": "usenet",
+                "client_type": "sabnzbd",
+            }
+        },
+        "completed": set(),
+    })
+    def test_check_completed_enqueues_paths_before_post_processing(
+        self,
+        _state_lock_mock,
+        poll_targets_mock,
+        list_completed_mock,
+        move_completed_mock,
+        remove_completed_mock,
+        enqueue_cleanup_roots_mock,
+        enqueue_paths_mock,
+    ):
+        poll_targets_mock.return_value = [("usenet", {"type": "sabnzbd"})]
+        list_completed_mock.return_value = [{
+            "id": "item-123",
+            "hash": "item-123",
+            "name": "Example Release NSW-GRP",
+            "path": "X:\\fixture-root\\incoming\\Example Release NSW-GRP",
+        }]
+        events = []
+
+        def scan_cb():
+            events.append("scan")
+
+        def post_cb():
+            events.append("post")
+
+        enqueue_paths_mock.side_effect = lambda paths: events.append(("enqueue", list(paths)))
+        enqueue_cleanup_roots_mock.side_effect = lambda paths: events.append(("cleanup", list(paths)))
+
+        _check_completed({}, scan_cb=scan_cb, post_cb=post_cb)
+
+        self.assertEqual(events, [
+            ("enqueue", ["X:\\fixture-root\\Example Title [0100]\\Example Base.nsp"]),
+            ("cleanup", []),
+            "scan",
+            "post",
+        ])
+
+    @patch("app.downloads.manager.os.path.isdir", return_value=True)
+    @patch("app.downloads.manager.enqueue_organize_paths")
+    @patch("app.downloads.manager.enqueue_cleanup_roots")
+    @patch("app.downloads.manager.remove_completed_download", return_value=(True, "ok"))
+    @patch("app.downloads.manager._move_completed", return_value="X:\\fixture-root\\Example Release NSW-GRP")
+    @patch("app.downloads.manager.list_completed_downloads")
+    @patch("app.downloads.manager._get_completed_poll_targets")
+    @patch("app.downloads.manager._state_lock")
+    @patch("app.downloads.manager._state", {
+        "running": False,
+        "last_run": 0.0,
+        "pending": {},
+        "completed": set(),
+    })
+    def test_check_completed_enqueues_cleanup_roots_for_release_directories(
+        self,
+        _state_lock_mock,
+        poll_targets_mock,
+        list_completed_mock,
+        move_completed_mock,
+        remove_completed_mock,
+        enqueue_cleanup_roots_mock,
+        enqueue_paths_mock,
+        isdir_mock,
+    ):
+        poll_targets_mock.return_value = [("usenet", {"type": "sabnzbd"})]
+        list_completed_mock.return_value = [{
+            "id": "item-123",
+            "hash": "item-123",
+            "name": "Example Release NSW-GRP",
+            "path": "X:\\fixture-root\\incoming\\Example Release NSW-GRP",
+        }]
+
+        _check_completed({})
+
+        enqueue_paths_mock.assert_called_once_with(["X:\\fixture-root\\Example Release NSW-GRP"])
+        enqueue_cleanup_roots_mock.assert_called_once_with(["X:\\fixture-root\\Example Release NSW-GRP"])
+
     @patch("app.downloads.manager.titles_lib.release_titledb")
     @patch("app.downloads.manager.titles_lib.get_game_info", return_value={"name": "Sample Game"})
     @patch("app.downloads.manager.titles_lib.get_all_existing_versions", return_value=[{"version": 1245184}])

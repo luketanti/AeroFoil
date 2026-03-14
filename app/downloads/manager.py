@@ -7,7 +7,7 @@ import time
 import unicodedata
 
 from app import titles as titles_lib
-from app.constants import APP_TYPE_UPD
+from app.constants import ALLOWED_EXTENSIONS, APP_TYPE_UPD
 from app.db import get_all_title_apps, get_all_titles, get_libraries_path
 from app.downloads.client import (
     TORRENT_CLIENT_TYPES,
@@ -18,7 +18,7 @@ from app.downloads.client import (
     remove_completed_download,
 )
 from app.downloads.prowlarr import ProwlarrClient, pick_best_result
-from app.library import _ensure_unique_path, _sanitize_component, enqueue_organize_paths
+from app.library import _ensure_unique_path, _sanitize_component, enqueue_cleanup_roots, enqueue_organize_paths
 from app.settings import load_settings
 
 logger = logging.getLogger("downloads.manager")
@@ -716,6 +716,14 @@ def _adopt_untracked_completed_item(item):
     return moved_path
 
 
+def _coerce_moved_paths(moved_result):
+    if not moved_result:
+        return []
+    if isinstance(moved_result, (list, tuple, set)):
+        return [path for path in moved_result if path]
+    return [moved_result]
+
+
 def _looks_like_update_download(item):
     name = str((item or {}).get("name") or "").lower()
     if "update" in name:
@@ -753,8 +761,8 @@ def _check_completed(downloads, scan_cb=None, post_cb=None):
             match = _match_completed_item(info, bucket["items"])
             if not match:
                 continue
-            moved_path = _move_completed(match, info)
-            if not moved_path:
+            moved_match_paths = _coerce_moved_paths(_move_completed(match, info))
+            if not moved_match_paths:
                 logger.warning(
                     "Matched completed download for pending key %s, but move failed. Keeping pending entry for retry.",
                     key,
@@ -765,7 +773,7 @@ def _check_completed(downloads, scan_cb=None, post_cb=None):
                 bucket["matched_ids"].add(matched_id)
             _state["pending"].pop(key, None)
             _state["completed"].add(key)
-            moved_paths.append(moved_path)
+            moved_paths.extend(moved_match_paths)
             if matched_id:
                 ok, message = remove_completed_download(protocol, bucket["client_cfg"], matched_id)
                 if not ok:
@@ -778,14 +786,14 @@ def _check_completed(downloads, scan_cb=None, post_cb=None):
                 item_id = item.get("id") or item.get("hash")
                 if item_id and item_id in bucket["matched_ids"]:
                     continue
-                moved_path = _adopt_untracked_completed_item(item)
-                if moved_path:
+                moved_item_paths = _coerce_moved_paths(_adopt_untracked_completed_item(item))
+                if moved_item_paths:
                     matched_id = item.get("id") or item.get("hash")
                     if matched_id:
                         ok, message = remove_completed_download(protocol, bucket["client_cfg"], matched_id)
                         if not ok:
                             logger.warning("Failed to remove adopted %s item %s: %s", protocol, matched_id, message)
-                    moved_paths.append(moved_path)
+                    moved_paths.extend(moved_item_paths)
                     newly_completed = True
                     continue
                 unmatched_count += 1
@@ -796,13 +804,15 @@ def _check_completed(downloads, scan_cb=None, post_cb=None):
                     protocol,
                 )
 
-    if newly_completed and scan_cb:
-        logger.info("New downloads completed. Scanning library.")
-        scan_cb()
-        if post_cb:
-            post_cb()
+    if newly_completed:
         if moved_paths:
             enqueue_organize_paths(moved_paths)
+            enqueue_cleanup_roots([path for path in moved_paths if os.path.isdir(path)])
+        if scan_cb:
+            logger.info("New downloads completed. Scanning library.")
+            scan_cb()
+            if post_cb:
+                post_cb()
 
 
 def _extract_update_version_from_name(name):
@@ -894,6 +904,81 @@ def _cleanup_download_path(src_path, dest_root):
         return
 
 
+def _is_wrapped_import_path(path):
+    lowered = str(path or "").lower()
+    return any(lowered.endswith(f".{ext}.hdf") for ext in ALLOWED_EXTENSIONS)
+
+
+def _is_importable_download_file(path):
+    if not path or not os.path.isfile(path):
+        return False
+    extension = os.path.splitext(path)[1].lstrip(".").lower()
+    return extension in ALLOWED_EXTENSIONS or _is_wrapped_import_path(path)
+
+
+def _iter_importable_download_files(src_path):
+    if not src_path:
+        return []
+    if os.path.isfile(src_path):
+        return [src_path] if _is_importable_download_file(src_path) else []
+    if not os.path.isdir(src_path):
+        return []
+    matches = []
+    for root, _, filenames in os.walk(src_path):
+        for filename in filenames:
+            candidate = os.path.join(root, filename)
+            if _is_importable_download_file(candidate):
+                matches.append(candidate)
+    return matches
+
+
+def _build_generic_import_destination(dest_root, src_path):
+    normalized_extension = _get_import_extension(src_path)
+    basename = os.path.basename(src_path)
+    lowered = basename.lower()
+    if normalized_extension and lowered.endswith(f".{normalized_extension}.hdf"):
+        basename = basename[:-4]
+    return _ensure_unique_path(os.path.join(dest_root, basename))
+
+
+def _normalize_imported_wrapped_files(dest_path):
+    if not dest_path or not os.path.exists(dest_path):
+        return dest_path
+
+    if os.path.isfile(dest_path):
+        candidate_paths = [dest_path]
+        is_single_file = True
+    elif os.path.isdir(dest_path):
+        candidate_paths = []
+        for root, _, filenames in os.walk(dest_path):
+            for filename in filenames:
+                candidate_paths.append(os.path.join(root, filename))
+        is_single_file = False
+    else:
+        return dest_path
+
+    renamed_single_path = dest_path
+    for path in candidate_paths:
+        normalized_extension = _get_import_extension(path)
+        current_extension = os.path.splitext(path)[1].lstrip(".").lower()
+        if not normalized_extension or normalized_extension == current_extension:
+            continue
+        lowered = path.lower()
+        if lowered.endswith(f".{normalized_extension}.hdf"):
+            normalized_path = path[:-4]
+        else:
+            normalized_path = f"{os.path.splitext(path)[0]}.{normalized_extension}"
+        normalized_path = _ensure_unique_path(normalized_path)
+        try:
+            shutil.move(path, normalized_path)
+            logger.info("Normalized wrapped import path: %s -> %s", path, normalized_path)
+            if is_single_file and os.path.normpath(path) == os.path.normpath(dest_path):
+                renamed_single_path = normalized_path
+        except Exception as e:
+            logger.warning("Failed to normalize wrapped import %s: %s", path, e)
+    return renamed_single_path
+
+
 def _move_completed(item, update_info=None):
     library_paths = get_libraries_path()
     if not library_paths:
@@ -931,14 +1016,22 @@ def _move_completed(item, update_info=None):
             logger.warning("Failed to move update %s: %s", update_path, e)
             return None
 
-    dest_path = os.path.join(dest_root, os.path.basename(src_path))
     if os.path.abspath(os.path.dirname(src_path)) == os.path.abspath(dest_root):
-        return src_path
-    dest_path = _ensure_unique_path(dest_path)
+        return _normalize_imported_wrapped_files(src_path)
+    importable_paths = _iter_importable_download_files(src_path)
+    if not importable_paths:
+        logger.warning("No importable files found in completed download: %s", src_path)
+        return None
+    moved_paths = []
     try:
-        shutil.move(src_path, dest_path)
-        logger.info("Moved download to library: %s", dest_path)
-        return dest_path
+        for import_path in importable_paths:
+            dest_path = _build_generic_import_destination(dest_root, import_path)
+            shutil.move(import_path, dest_path)
+            dest_path = _normalize_imported_wrapped_files(dest_path)
+            moved_paths.append(dest_path)
+        _cleanup_download_path(src_path, dest_root)
+        logger.info("Moved download to library: %s", ", ".join(moved_paths))
+        return moved_paths[0] if len(moved_paths) == 1 else moved_paths
     except Exception as e:
         logger.warning("Failed to move download %s: %s", src_path, e)
         return None

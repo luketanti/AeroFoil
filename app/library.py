@@ -17,6 +17,7 @@ from app.utils import *
 
 _organize_lock = threading.Lock()
 _pending_organize_paths = set()
+_pending_cleanup_roots = set()
 _SCAN_ADD_BATCH_SIZE = 250
 _SCAN_DELETE_PROGRESS_INTERVAL = 250
 _IDENTIFY_QUERY_BATCH_SIZE = 500
@@ -1714,18 +1715,63 @@ def enqueue_organize_paths(filepaths):
         return
     with _organize_lock:
         for path in filepaths:
-            if path:
-                _pending_organize_paths.add(path)
+            if not path:
+                continue
+            normalized_path = os.path.normpath(path)
+            if os.path.isfile(normalized_path):
+                _pending_organize_paths.add(normalized_path)
+                continue
+            if os.path.isdir(normalized_path):
+                for root, _, filenames in os.walk(normalized_path):
+                    for filename in filenames:
+                        _pending_organize_paths.add(os.path.normpath(os.path.join(root, filename)))
+                continue
+            _pending_organize_paths.add(normalized_path)
+
+
+def enqueue_cleanup_roots(paths):
+    if not paths:
+        return
+    with _organize_lock:
+        for path in paths:
+            if path and os.path.isdir(path):
+                _pending_cleanup_roots.add(os.path.normpath(path))
+
+
+def _cleanup_import_staging_roots(paths):
+    for root in paths or []:
+        if not root or not os.path.isdir(root):
+            continue
+        for dirpath, _, filenames in os.walk(root, topdown=False):
+            for filename in filenames:
+                extension = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+                if extension in ALLOWED_EXTENSIONS:
+                    continue
+                try:
+                    os.remove(os.path.join(dirpath, filename))
+                except OSError:
+                    continue
+            try:
+                if not os.listdir(dirpath):
+                    os.rmdir(dirpath)
+            except OSError:
+                continue
 
 def organize_pending_downloads():
     with _organize_lock:
         if not _pending_organize_paths:
-            return
-        pending = list(_pending_organize_paths)
-        _pending_organize_paths.clear()
-    results = organize_files(pending, dry_run=False, verbose=False)
-    if not results.get('success'):
-        logger.warning("Failed to auto-organize completed downloads: %s", results.get('errors'))
+            pending = []
+        else:
+            pending = list(_pending_organize_paths)
+            _pending_organize_paths.clear()
+        cleanup_roots = list(_pending_cleanup_roots)
+        _pending_cleanup_roots.clear()
+    if pending:
+        results = organize_files(pending, dry_run=False, verbose=False)
+        if not results.get('success'):
+            logger.warning("Failed to auto-organize completed downloads: %s", results.get('errors'))
+    if cleanup_roots:
+        _cleanup_import_staging_roots(cleanup_roots)
 
 def delete_older_updates(dry_run=False, verbose=False, detail_limit=200):
     results = {
