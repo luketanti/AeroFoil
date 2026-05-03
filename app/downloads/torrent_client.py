@@ -19,6 +19,7 @@ from app.downloads.versioning import (
     select_update_entry_ids,
     select_update_file_indices as shared_select_update_file_indices,
 )
+from app.downloads.resolver import get_metainfo_base64
 
 logger = logging.getLogger("downloads.qbittorrent")
 AEROFOIL_MANAGED_TAG = "aerofoil"
@@ -122,16 +123,16 @@ def test_torrent_client(client_type, url, username=None, password=None, timeout_
     return False, UNSUPPORTED_CLIENT_TYPE_MESSAGE
 
 
-def add_torrent(client_type, url, username=None, password=None, download_url=None, category=None, download_path=None, timeout_seconds=15, expected_name=None, update_only=False, exclude_russian=False, expected_update_number=None, expected_version=None):
-    if not download_url:
-        return False, "Download URL is required.", None
+def add_torrent(client_type, url, username=None, password=None, download_url=None, torrent_content=None, category=None, download_path=None, timeout_seconds=15, expected_name=None, update_only=False, exclude_russian=False, expected_update_number=None, expected_version=None):
+    if not download_url and not torrent_content:
+        return False, "Download URL or torrent content is required.", None
     client_type = (client_type or "").lower()
     if client_type == "qbittorrent":
-        return _add_qbittorrent(url, username, password, download_url, category, download_path, timeout_seconds, expected_name, update_only, exclude_russian, expected_update_number, expected_version)
+        return _add_qbittorrent(url, username, password, download_url, torrent_content, category, download_path, timeout_seconds, expected_name, update_only, exclude_russian, expected_update_number, expected_version)
     if client_type == "transmission":
-        return _add_transmission(url, username, password, download_url, category, download_path, timeout_seconds, expected_name, update_only, exclude_russian, expected_update_number, expected_version)
+        return _add_transmission(url, username, password, download_url, torrent_content, category, download_path, timeout_seconds, expected_name, update_only, exclude_russian, expected_update_number, expected_version)
     if client_type == "deluge":
-        return _add_deluge(url, password, download_url, category, download_path, timeout_seconds, update_only, exclude_russian, expected_update_number, expected_version)
+        return _add_deluge(url, password, download_url, torrent_content, category, download_path, timeout_seconds, update_only, exclude_russian, expected_update_number, expected_version)
     return False, UNSUPPORTED_CLIENT_TYPE_MESSAGE, None
 
 
@@ -231,7 +232,7 @@ def _test_deluge(url, password=None, timeout_seconds=10):
     return True, f"Deluge OK{f' (v{version})' if version else ''}."
 
 
-def _add_deluge(url, password, download_url, category, download_path, timeout_seconds, update_only, exclude_russian, expected_update_number, expected_version):
+def _add_deluge(url, password, download_url, torrent_content, category, download_path, timeout_seconds, update_only, exclude_russian, expected_update_number, expected_version):
     ok, logged_in = _deluge_login(url, password, timeout_seconds=timeout_seconds)
     if not ok or not logged_in:
         return False, "Deluge login failed.", None
@@ -250,13 +251,25 @@ def _add_deluge(url, password, download_url, category, download_path, timeout_se
             return False, "Deluge label error.", None
     options["label"] = managed_label
 
-    ok, result = _deluge_json_rpc(
-        url,
-        password,
-        "core.add_torrent_url",
-        [download_url, options],
-        timeout_seconds=timeout_seconds
-    )
+    if torrent_content:
+        metainfo = get_metainfo_base64(torrent_content)
+        filename = f"aerofoil_{int(time.time())}.torrent"
+        ok, result = _deluge_json_rpc(
+            url,
+            password,
+            "core.add_torrent_file",
+            [filename, metainfo, options],
+            timeout_seconds=timeout_seconds
+        )
+    else:
+        ok, result = _deluge_json_rpc(
+            url,
+            password,
+            "core.add_torrent_url",
+            [download_url, options],
+            timeout_seconds=timeout_seconds
+        )
+        
     if not ok:
         return False, "Deluge returned an error.", None
     torrent_hash = None
@@ -265,7 +278,7 @@ def _add_deluge(url, password, download_url, category, download_path, timeout_se
     elif isinstance(result, dict):
         torrent_hash = result.get("id")
     if not torrent_hash:
-        torrent_hash = _extract_magnet_hash(download_url)
+        torrent_hash = _extract_magnet_hash(download_url) if download_url else None
 
     if update_only and torrent_hash:
         file_names = poll_update_file_names(
@@ -302,23 +315,42 @@ def _add_deluge(url, password, download_url, category, download_path, timeout_se
     return True, "Deluge accepted torrent.", torrent_hash
 
 
-def _add_qbittorrent(url, username, password, download_url, category, download_path, timeout_seconds, expected_name, update_only, exclude_russian, expected_update_number, expected_version):
+def _add_qbittorrent(url, username, password, download_url, torrent_content, category, download_path, timeout_seconds, expected_name, update_only, exclude_russian, expected_update_number, expected_version):
     base = url.rstrip("/")
     session = _new_client_session()
     if not _login_qbittorrent(session, base, username, password, timeout_seconds):
         return False, "qBittorrent login failed.", None
 
-    data = {"urls": download_url}
+    data = {}
+    files = None
+    if torrent_content:
+        files = {'torrents': (f'aerofoil_{int(time.time())}.torrent', torrent_content)}
+    else:
+        data["urls"] = download_url
+        
     temp_tag = None
     if update_only:
-        preflight_files = _get_torrent_file_list(download_url, timeout_seconds)
-        if not preflight_has_matching_update(
-            preflight_files,
-            expected_update_number=expected_update_number,
-            expected_version=expected_version,
-            exclude_russian=exclude_russian,
-        ):
-            return False, TORRENT_UPDATE_SELECTION_ERROR, None
+        # Preflight check for torrent files only (not magnets)
+        if download_url and not download_url.lower().startswith("magnet:"):
+             preflight_files = _get_torrent_file_list(download_url, timeout_seconds)
+             if not preflight_has_matching_update(
+                preflight_files,
+                expected_update_number=expected_update_number,
+                expected_version=expected_version,
+                exclude_russian=exclude_russian,
+             ):
+                return False, TORRENT_UPDATE_SELECTION_ERROR, None
+        elif torrent_content:
+             # If we have the content, we can parse it locally
+             preflight_files = _get_torrent_file_list_from_content(torrent_content)
+             if not preflight_has_matching_update(
+                preflight_files,
+                expected_update_number=expected_update_number,
+                expected_version=expected_version,
+                exclude_russian=exclude_russian,
+             ):
+                return False, TORRENT_UPDATE_SELECTION_ERROR, None
+
         temp_tag = f"aerofoil_update_{int(time.time())}_{secrets.token_hex(3)}"
     if category:
         data["category"] = category
@@ -330,16 +362,24 @@ def _add_qbittorrent(url, username, password, download_url, category, download_p
     if download_path:
         data["savepath"] = download_path
     added_at = int(time.time())
-    infohash_v1 = _compute_torrent_infohash(download_url, timeout_seconds)
+    
+    infohash_v1 = None
+    if download_url:
+        infohash_v1 = _compute_torrent_infohash(download_url, timeout_seconds)
+    elif torrent_content:
+        infohash_v1 = _compute_torrent_infohash_from_content(torrent_content)
+
     if update_only and infohash_v1:
         logger.info("Computed torrent infohash_v1: %s", infohash_v1)
-    resp = session.post(f"{base}/api/v2/torrents/add", data=data, timeout=timeout_seconds)
+        
+    resp = session.post(f"{base}/api/v2/torrents/add", data=data, files=files, timeout=timeout_seconds)
     if resp.status_code != 200:
         return False, f"qBittorrent returned {resp.status_code}.", None
     add_response_text = str(resp.text or "").strip()
     if add_response_text and add_response_text.lower() not in ("ok", "ok."):
         return False, f"qBittorrent rejected torrent add: {add_response_text}", None
-    torrent_hash = _extract_magnet_hash(download_url)
+        
+    torrent_hash = _extract_magnet_hash(download_url) if download_url else None
     if torrent_hash:
         resolved_hash = None
         for _ in range(10):
@@ -403,13 +443,17 @@ def _add_qbittorrent(url, username, password, download_url, category, download_p
     return True, "qBittorrent accepted torrent.", torrent_hash
 
 
-def _add_transmission(url, username, password, download_url, category, download_path, timeout_seconds, expected_name, update_only, exclude_russian, expected_update_number, expected_version):
+def _add_transmission(url, username, password, download_url, torrent_content, category, download_path, timeout_seconds, expected_name, update_only, exclude_russian, expected_update_number, expected_version):
     base = url.rstrip("/")
     session = _new_client_session(username, password)
 
     preflight_files = None
     if update_only:
-        preflight_files = _get_torrent_file_list(download_url, timeout_seconds)
+        if download_url:
+            preflight_files = _get_torrent_file_list(download_url, timeout_seconds)
+        elif torrent_content:
+            preflight_files = _get_torrent_file_list_from_content(torrent_content)
+            
         if not preflight_has_matching_update(
             preflight_files,
             expected_update_number=expected_update_number,
@@ -418,7 +462,12 @@ def _add_transmission(url, username, password, download_url, category, download_
         ):
             return False, TORRENT_UPDATE_SELECTION_ERROR, None
 
-    payload = {"method": "torrent-add", "arguments": {"filename": download_url}}
+    if torrent_content:
+        metainfo = get_metainfo_base64(torrent_content)
+        payload = {"method": "torrent-add", "arguments": {"metainfo": metainfo}}
+    else:
+        payload = {"method": "torrent-add", "arguments": {"filename": download_url}}
+        
     if update_only:
         payload["arguments"]["paused"] = True
     labels = [AEROFOIL_MANAGED_TAG]
@@ -436,7 +485,7 @@ def _add_transmission(url, username, password, download_url, category, download_
         return False, f"Transmission returned {resp.status_code}.", None
     data = resp.json().get("arguments", {})
     torrent = data.get("torrent-added") or data.get("torrent-duplicate") or {}
-    torrent_hash = torrent.get("hashString") or _extract_magnet_hash(download_url)
+    torrent_hash = torrent.get("hashString") or (_extract_magnet_hash(download_url) if download_url else None)
     torrent_id = torrent.get("id") or torrent.get("hashString")
 
     if update_only and not torrent_id:
@@ -469,8 +518,6 @@ def _add_transmission(url, username, password, download_url, category, download_
         _request(set_payload)
         _request({"method": "torrent-start", "arguments": {"ids": [torrent_id]}})
     return True, "Transmission accepted torrent.", torrent_hash
-
-
 
 
 def _is_path_within(path, base):
@@ -899,8 +946,16 @@ def _compute_torrent_infohash(download_url, timeout_seconds):
         resp = requests.get(download_url, timeout=timeout_seconds)
         if resp.status_code != 200:
             return None
-        data = resp.content
-        info_slice = _extract_info_bencode_slice(data)
+        return _compute_torrent_infohash_from_content(resp.content)
+    except Exception:
+        return None
+
+
+def _compute_torrent_infohash_from_content(content):
+    if not content:
+        return None
+    try:
+        info_slice = _extract_info_bencode_slice(content)
         if not info_slice:
             return None
         return hashlib.sha1(info_slice).hexdigest()
@@ -963,8 +1018,16 @@ def _get_torrent_file_list(download_url, timeout_seconds):
         resp = requests.get(download_url, timeout=timeout_seconds)
         if resp.status_code != 200:
             return None
-        data = resp.content
-        metadata, _ = _bdecode_value(data, 0)
+        return _get_torrent_file_list_from_content(resp.content)
+    except Exception:
+        return None
+
+
+def _get_torrent_file_list_from_content(content):
+    if not content:
+        return None
+    try:
+        metadata, _ = _bdecode_value(content, 0)
         if not isinstance(metadata, dict):
             return None
         info = metadata.get(b"info")

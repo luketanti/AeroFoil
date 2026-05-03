@@ -29,7 +29,7 @@ class _FakeSession:
         self._files_by_hash = dict(files_by_hash or {})
         self.file_prio_calls = []
 
-    def post(self, url, data=None, timeout=None):
+    def post(self, url, data=None, timeout=None, files=None):
         if url.endswith("/api/v2/auth/login"):
             return _FakeResponse(status_code=200, text="Ok.")
         if url.endswith("/api/v2/torrents/add"):
@@ -76,6 +76,7 @@ class QBittorrentAddTests(unittest.TestCase):
                 username="admin",
                 password="admin",
                 download_url=self.magnet_url,
+                torrent_content=None,
                 category="aerofoil",
                 download_path="",
                 timeout_seconds=1,
@@ -111,6 +112,7 @@ class QBittorrentAddTests(unittest.TestCase):
                 username="admin",
                 password="admin",
                 download_url=self.magnet_url,
+                torrent_content=None,
                 category="aerofoil",
                 download_path="",
                 timeout_seconds=1,
@@ -135,6 +137,7 @@ class QBittorrentAddTests(unittest.TestCase):
                 username="admin",
                 password="admin",
                 download_url=self.magnet_url,
+                torrent_content=None,
                 category="aerofoil",
                 download_path="",
                 timeout_seconds=1,

@@ -1,3 +1,4 @@
+from app.downloads.resolver import resolve_download_url
 from app.downloads.torrent_client import (
     add_torrent,
     list_active as list_active_torrents,
@@ -85,17 +86,22 @@ def test_download_client(client_type, url, username=None, password=None, api_key
     return False, UNSUPPORTED_CLIENT_TYPE_MESSAGE
 
 
-def queue_download(protocol, client_cfg, download_url, timeout_seconds=15, **kwargs):
+def queue_download(protocol, client_cfg, download_url, timeout_seconds=30, **kwargs):
     protocol, client_type = _normalize_protocol_and_type(protocol, client_cfg)
     common_kwargs = _get_common_client_kwargs(client_cfg)
     queue_options = _get_queue_download_options(kwargs)
+
     if _is_torrent_client(protocol, client_type):
+        # Resolve Prowlarr URL to magnet or file content locally before passing to client
+        # We give the resolver a bit more time if needed, but respect the overall timeout
+        resolved_type, resolved_data = resolve_download_url(download_url, timeout=timeout_seconds)
         return add_torrent(
             client_type=client_type,
             url=common_kwargs["url"],
             username=common_kwargs["username"],
             password=common_kwargs["password"],
-            download_url=download_url,
+            download_url=resolved_data if resolved_type in ("url", "magnet") else None,
+            torrent_content=resolved_data if resolved_type == "torrent_content" else None,
             category=common_kwargs["category"],
             download_path=common_kwargs["download_path"],
             timeout_seconds=timeout_seconds,
@@ -111,6 +117,7 @@ def queue_download(protocol, client_cfg, download_url, timeout_seconds=15, **kwa
             **queue_options,
         )
     return False, UNSUPPORTED_DOWNLOAD_PROTOCOL_MESSAGE, None
+
 
 
 def list_active_downloads(protocol, client_cfg, timeout_seconds=15):
