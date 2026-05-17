@@ -512,10 +512,44 @@ def identify_library_files(library):
             processed=processed
         )
 
+def _cleanup_phantom_base_apps():
+    """Remove BASE-type apps that were incorrectly created by filename identification.
+
+    When filename-based identification encounters an update file whose name
+    contains the title_id (ending in 000) rather than the update app_id
+    (ending in 800), it misclassifies the file as a BASE app.  After a
+    subsequent CNMT-based rescan creates the correct UPDATE entry, the
+    phantom BASE row remains in the database with no linked files and
+    owned=False.  This function removes those orphans.
+    """
+    has_files = (
+        db.session.query(app_files.c.app_id)
+        .filter(app_files.c.app_id == Apps.id)
+        .exists()
+    )
+    deleted = (
+        db.session.query(Apps)
+        .filter(
+            Apps.app_type == APP_TYPE_BASE,
+            Apps.owned.is_(False),
+            ~has_files,
+            Apps.app_version != '0',
+        )
+        .delete(synchronize_session=False)
+    )
+    if deleted:
+        db.session.commit()
+        logger.info("Removed %d phantom BASE app entries (no files, not owned, version != 0).", deleted)
+    return deleted
+
 def add_missing_apps_to_db():
     phase = 'add_missing_apps_to_db'
     _diag_phase_start(phase)
     logger.info('Adding missing apps to database...')
+
+    # Clean up phantom BASE entries from previous filename mis-identification.
+    _cleanup_phantom_base_apps()
+
     apps_added = 0
     processed = 0
     last_title_pk = 0
