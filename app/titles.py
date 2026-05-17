@@ -96,6 +96,7 @@ def keys_loaded():
 
 app_id_regex = r"\[([0-9A-Fa-f]{16})\]"
 version_regex = r"\[v(\d+)\]"
+type_tag_regex = r"\[(BASE|UPDATE|DLC)\]"
 
 # Global variables for TitleDB data
 identification_in_progress_count = 0
@@ -1146,6 +1147,19 @@ def unload_titledb():
             _english_title_lookup_cache.clear()
         logger.info("TitleDBs unloaded.")
 
+def get_type_tag_from_filename(filename):
+    type_tag_match = re.search(type_tag_regex, filename, re.IGNORECASE)
+    if type_tag_match is None:
+        return None
+    tag = type_tag_match[1].upper()
+    if tag == 'BASE':
+        return APP_TYPE_BASE
+    elif tag == 'UPDATE':
+        return APP_TYPE_UPD
+    elif tag == 'DLC':
+        return APP_TYPE_DLC
+    return None
+
 def identify_file_from_filename(filename):
     title_id = None
     app_id = None
@@ -1158,6 +1172,24 @@ def identify_file_from_filename(filename):
         errors.append('Could not determine App ID from filename, pattern [APPID] not found. Title ID and Type cannot be derived.')
     else:
         title_id, app_type = identify_appId(app_id)
+
+    # Check for explicit [BASE], [UPDATE], or [DLC] type tags in the filename.
+    # Naming conventions typically embed the title_id (ending in 000) rather than
+    # the app_id, so the ID-based type detection can misclassify UPDATE/DLC files
+    # as BASE.  The explicit tag takes precedence when present.
+    filename_type_tag = get_type_tag_from_filename(filename)
+    if filename_type_tag is not None and app_id is not None:
+        if filename_type_tag != app_type:
+            if filename_type_tag == APP_TYPE_UPD:
+                # Derive the correct update app_id from the title_id
+                base_id = (title_id or app_id)
+                app_id = base_id[:-3] + '800'
+                title_id = base_id[:-3] + '000'
+            elif filename_type_tag == APP_TYPE_DLC and app_type == APP_TYPE_BASE:
+                # DLC app_id can't be reliably derived from title_id alone;
+                # keep the extracted ID but correct the type.
+                title_id = get_title_id_from_app_id(app_id, APP_TYPE_DLC) if not app_id.endswith('000') else app_id
+            app_type = filename_type_tag
 
     version = get_version_from_filename(filename)
     if version is None:
