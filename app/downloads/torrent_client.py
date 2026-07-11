@@ -288,7 +288,34 @@ def _add_deluge(url, password, download_url, category, download_path, timeout_se
     return True, "Deluge accepted torrent.", torrent_hash
 
 
+def _resolve_torrent_url(download_url, timeout_seconds):
+    """
+    If download_url is an HTTP(S) URL that redirects to a magnet link (common for
+    Prowlarr-proxied indexers like 1337x), follow the redirect and return the
+    magnet URI instead.  rdt-client's HttpClient cannot follow magnet: redirects
+    and throws UriFormatException when it tries to open an HTTP connection to one.
+    Returns the original URL unchanged for all other cases.
+    """
+    if not download_url or not str(download_url).lower().startswith("http"):
+        return download_url
+    try:
+        resp = requests.get(
+            download_url,
+            allow_redirects=False,
+            timeout=min(timeout_seconds, 10),
+            headers={"User-Agent": "AeroFoil/Downloads"},
+        )
+        location = resp.headers.get("Location", "")
+        if resp.status_code in (301, 302, 303, 307, 308) and location.lower().startswith("magnet:"):
+            logger.info("Resolved Prowlarr proxy URL to magnet link: %s", location[:80])
+            return location
+    except Exception as exc:
+        logger.debug("Could not resolve download URL %s: %s", download_url, exc)
+    return download_url
+
+
 def _add_qbittorrent(url, username, password, download_url, category, download_path, timeout_seconds, expected_name, update_only, exclude_russian, expected_update_number, expected_version):
+    download_url = _resolve_torrent_url(download_url, timeout_seconds)
     base = url.rstrip("/")
     session = requests.Session()
     session.headers.update({"User-Agent": "AeroFoil/Downloads"})
