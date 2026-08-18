@@ -968,6 +968,7 @@ def search_update_options(title_id, version, limit=20):
                 required_terms_match=downloads.get("required_terms_match") or "all",
                 blacklist_terms=downloads.get("blacklist_terms") or [],
                 allowed_protocols=allowed_protocols,
+                require_exact_version=True,
             ) is not None
         ]
         if results:

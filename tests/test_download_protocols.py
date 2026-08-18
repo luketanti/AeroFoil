@@ -187,6 +187,13 @@ class DownloadProtocolTests(unittest.TestCase):
 
         self.assertEqual(select_update_file_indices(file_names), [1])
 
+    def test_select_update_file_indices_rejects_torrent_without_requested_version(self):
+        file_names = [
+            "Example Title Update [0100DAA012C1A800][v4054232].nsp",
+        ]
+
+        self.assertEqual(select_update_file_indices(file_names, expected_version=4128768), [])
+
     def test_extract_update_version_prefers_bracketed_token(self):
         self.assertEqual(_extract_update_version_from_name("Game [v1245184] v999.nsp"), 1245184)
 

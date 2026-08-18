@@ -453,9 +453,12 @@ class QueueRoutingTests(unittest.TestCase):
             {"title": "Example Release Torrent", "protocol": "torrent", "download_url": "magnet:?xt=urn:btih:abcdef"},
             {"title": "Example Release NZB", "protocol": "usenet", "download_url": "https://indexer.example/file.nzb"},
         ]
-        pick_best_result_mock.side_effect = lambda items, **kwargs: (
-            items[0] if items[0].get("protocol") in (kwargs.get("allowed_protocols") or []) else None
-        )
+        def pick_result(items, **kwargs):
+            self.assertTrue(kwargs["require_exact_version"])
+            self.assertEqual(kwargs["version"], 123)
+            return items[0] if items[0].get("protocol") in (kwargs.get("allowed_protocols") or []) else None
+
+        pick_best_result_mock.side_effect = pick_result
 
         ok, message, results = search_update_options("0100000000010000", 123, limit=20)
 

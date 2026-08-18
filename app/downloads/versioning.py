@@ -107,7 +107,9 @@ def select_update_entry_ids(file_entries, expected_update_number=None, expected_
             expected_value = int(expected_version)
         except (TypeError, ValueError):
             expected_value = None
-    if expected_value and expected_value > 0:
+    if expected_version is not None:
+        if not expected_value or expected_value <= 0:
+            return []
         exact_internal = [entry_id for version, entry_id in internal_versions if version == expected_value]
         if exact_internal:
             return exact_internal
@@ -116,6 +118,7 @@ def select_update_entry_ids(file_entries, expected_update_number=None, expected_
             exact_semantic = [entry_id for version, entry_id in semantic_versions if version == expected_semantic]
             if exact_semantic:
                 return exact_semantic
+        return []
     if expected_update_number is not None and expected_update_number > 0:
         exact_update_number = [
             entry_id for version, entry_id in internal_versions

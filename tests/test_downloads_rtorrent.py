@@ -115,7 +115,7 @@ class RTorrentClientTests(unittest.TestCase):
             "http://rtorrent.local",
             download_url="magnet:?xt=urn:btih:abcdef",
             update_only=True,
-            expected_version=1,
+            expected_version=65536,
         )
 
         self.assertFalse(ok)
