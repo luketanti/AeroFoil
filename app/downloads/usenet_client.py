@@ -547,7 +547,7 @@ def add_nzbget(
             username,
             password,
             "append",
-            params=[name, str(download_url), str(category or ""), 0, bool(update_only), "", 0, "SCORE"],
+            params=[name, str(download_url), str(category or ""), 0, true, bool(update_only), "", 0, "SCORE"],
             timeout_seconds=timeout_seconds,
         )
     except Exception as exc:
