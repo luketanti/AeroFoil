@@ -519,6 +519,18 @@ def test_nzbget(url, username=None, password=None, timeout_seconds=10):
     return True, f"NZBGet OK{f' (v{version_text})' if version_text else ''}."
 
 
+def download_file_as_base64(url, timeout_seconds=15):
+    try:
+        response = requests.get(
+            url,
+            timeout=timeout_seconds,
+            headers={"User-Agent": DOWNLOADS_USER_AGENT},
+        )
+        response.raise_for_status()
+        return True, base64.b64encode(response.content).decode("ascii"), None
+    except Exception as exc:
+        return False, None, str(exc)
+
 def add_nzbget(
     url,
     username,
@@ -539,6 +551,11 @@ def add_nzbget(
         return False, "NZBGet username is required.", None
     if password is None:
         return False, "NZBGet password is required.", None
+
+    success, b64_content, error = download_file_as_base64(download_url)
+    if not success:
+        return False, f"Failed to download NZB: {error}", None
+    
     name = str(expected_name or "").strip() or os.path.basename(str(download_url or "").split("?", 1)[0]) or "aerofoil.nzb"
     try:
         # append(name, url, category, priority, addPaused, dupeKey, dupeScore, dupeMode)
@@ -547,7 +564,7 @@ def add_nzbget(
             username,
             password,
             "append",
-            params=[name, str(download_url), str(category or ""), 0, true, bool(update_only), "", 0, "SCORE"],
+            params=[name, b64_content, str(category or ""), 0, True, bool(update_only), "", 0, "SCORE", False, [("*unpack:", "yes")]],
             timeout_seconds=timeout_seconds,
         )
     except Exception as exc:
@@ -557,6 +574,7 @@ def add_nzbget(
     group = _nzbget_find_group_by_name(url, username, password, name, category=category, timeout_seconds=timeout_seconds)
     nzo_id = str((group or {}).get("NZBID") or "").strip() or None
     return True, "NZBGet accepted NZB.", nzo_id
+
 
 
 def list_active_nzbget(url, username, password, category=None, timeout_seconds=15):
