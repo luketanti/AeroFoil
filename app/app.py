@@ -2364,6 +2364,16 @@ def create_app():
 app = create_app()
 
 
+@app.context_processor
+def inject_static_asset_version():
+    """Make template assets refresh after an in-place application update."""
+    try:
+        version = os.stat(os.path.join(app.static_folder, 'style.css')).st_mtime_ns
+    except OSError:
+        version = None
+    return {'static_asset_version': version}
+
+
 @app.errorhandler(RequestEntityTooLarge)
 def handle_request_entity_too_large(_error):
     return api_error(
@@ -6201,10 +6211,11 @@ def get_all_titles_api():
     start_ts = time.time()
 
     page = max(1, request.args.get('page', 1, type=int))
-    per_page = max(1, min(request.args.get('per_page', 50, type=int), 200))
+    per_page = max(1, min(request.args.get('per_page', 50, type=int), 10000))
     lite = str(request.args.get('lite', '')).lower() in ('1', 'true', 'yes')
     sort_key = str(request.args.get('sort') or 'title_asc').strip().lower()
     search = (request.args.get('search') or '').strip()
+    initial = str(request.args.get('initial') or '').strip().upper()
     types = request.args.get('types')
     owned = request.args.get('owned')
     updates = request.args.get('updates')
@@ -6434,6 +6445,18 @@ def get_all_titles_api():
                 search_filters.append(Titles.title_id.in_(title_ids_from_search))
             query = query.filter(or_(*search_filters))
 
+    if initial in {'#', '@'} or (len(initial) == 1 and initial.isalpha()):
+        if titles_metadata is None:
+            titles_metadata = _get_cached_titles_metadata()
+        title_name_map = titles_metadata.get('title_name_map') or {}
+        if initial == '#':
+            initial_title_ids = [title_id for title_id, name in title_name_map.items() if str(name or '')[:1].isdigit()]
+        elif initial == '@':
+            initial_title_ids = [title_id for title_id, name in title_name_map.items() if not str(name or '')[:1].isalnum()]
+        else:
+            initial_title_ids = [title_id for title_id, name in title_name_map.items() if str(name or '').startswith(initial.lower())]
+        query = query.filter(Titles.title_id.in_(initial_title_ids) if initial_title_ids else Titles.id == -1)
+
     if genre or recognized in ('recognized', 'unrecognized'):
         if titles_metadata is None:
             titles_metadata = _get_cached_titles_metadata()
@@ -6487,6 +6510,7 @@ def get_all_titles_api():
     count_cache_key = (
         state_token,
         search_normalized,
+        initial,
         ','.join(sorted(allowed_types)),
         str(owned or ''),
         str(updates or ''),

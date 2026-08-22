@@ -1,16 +1,234 @@
 :root {
     --aerofoil-card-radius: 16px;
     --aerofoil-card-radius-tight: 14px;
+    --bs-body-bg: #090a0d;
+    --bs-body-bg-rgb: 9, 10, 13;
 }
 
-/* body {
-    font-family: Arial, sans-serif;
-    background-color: #2a3a4f;
-    color: #8d97ad;
-} */
+html,
+body {
+    background-color: var(--bs-body-bg);
+}
 
 .grid-container {
     padding: 20px;
+}
+
+#libraryArtworkBackdrop {
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: cover;
+    filter: blur(52px) saturate(1.3);
+    inset: -3rem;
+    opacity: 0;
+    pointer-events: none;
+    position: fixed;
+    transform: scale(1.08);
+    transition: background-image 260ms ease, opacity 300ms ease;
+    z-index: 1;
+}
+
+#appDefaultBackdrop {
+    background-image: url('/static/aerofoil-library-backdrop.png');
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: cover;
+    filter: blur(52px) saturate(1.2);
+    inset: -3rem;
+    opacity: 0.34;
+    pointer-events: none;
+    position: fixed;
+    transform: scale(1.1);
+    z-index: 0;
+}
+
+#libraryArtworkBackdrop::after {
+    background: rgba(16, 20, 30, 0.62);
+    content: "";
+    inset: 0;
+    position: absolute;
+}
+
+#libraryArtworkBackdrop.is-visible {
+    opacity: 0.42;
+}
+
+/* Keep library title content above both the default and hover artwork layers. */
+#gameGrid,
+#listContainer,
+#discoverSection {
+    position: relative;
+    z-index: 3;
+}
+
+body > :not(#appDefaultBackdrop):not(#libraryArtworkBackdrop):not(.library-alphabet-rail) {
+    position: relative;
+    z-index: 2;
+}
+
+body .navbar {
+    position: relative;
+    z-index: 3;
+}
+
+.library-alphabet-rail {
+    align-items: center;
+    background: rgba(10, 12, 17, 0.76);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 0.8rem;
+    box-shadow: 0 0.45rem 1.25rem rgba(0, 0, 0, 0.22);
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    right: 0.8rem;
+    padding: 0.35rem 0.25rem;
+    position: fixed;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 20;
+}
+
+.library-alphabet-rail.library-alphabet-rail-with-discovery {
+    max-height: calc(100vh - 4.5rem);
+    overflow-y: auto;
+    position: fixed;
+    transform: none;
+}
+
+.library-alphabet-btn {
+    background: transparent;
+    border: 0;
+    border-radius: 0.3rem;
+    color: rgba(217, 224, 239, 0.74);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.74rem;
+    font-weight: 700;
+    height: 1.18rem;
+    line-height: 1;
+    padding: 0;
+    text-align: center;
+    width: 1.35rem;
+}
+
+.library-alphabet-btn:hover,
+.library-alphabet-btn:focus-visible,
+.library-alphabet-btn.active {
+    background: rgba(var(--bs-primary-rgb), 0.25);
+    color: #d9c6ff;
+    outline: none;
+}
+
+#content {
+    position: relative;
+    z-index: 2;
+}
+
+#gridContainer {
+    padding-left: 4.25rem;
+    padding-right: 4.25rem;
+}
+
+#gameGrid [data-library-initial] {
+    scroll-margin-top: 1rem;
+}
+
+.library-heading {
+    align-items: end;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    display: flex;
+    gap: 1rem;
+    justify-content: space-between;
+    margin: 0.65rem 0 0.65rem;
+    padding: 0 0.35rem 0.65rem;
+}
+
+.library-heading-kicker {
+    color: var(--bs-primary);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    margin-bottom: 0.15rem;
+}
+
+.library-heading h1 {
+    font-size: clamp(1.4rem, 2.4vw, 1.8rem);
+    font-weight: 700;
+    letter-spacing: -0.035em;
+    line-height: 1;
+    margin: 0;
+}
+
+.library-heading p {
+    color: var(--bs-secondary-color);
+    font-size: 0.9rem;
+    line-height: 1.25;
+    margin: 0.25rem 0 0;
+}
+
+.library-heading-count {
+    color: var(--bs-secondary-color);
+    font-size: 0.9rem;
+    padding-bottom: 0.1rem;
+    white-space: nowrap;
+}
+
+.library-heading-actions {
+    align-items: end;
+    display: flex;
+    gap: 0.75rem;
+}
+
+.library-toolbar {
+    background: rgba(36, 42, 55, 0.58);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: var(--aerofoil-card-radius-tight);
+    margin-left: 0;
+    margin-right: 0;
+    padding: 0.7rem;
+    position: relative;
+    z-index: 20;
+}
+
+.library-toolbar .dropdown-menu {
+    z-index: 1050;
+}
+
+.library-toolbar .btn-primary {
+    --bs-btn-bg: rgba(255, 255, 255, 0.08);
+    --bs-btn-border-color: rgba(255, 255, 255, 0.13);
+    --bs-btn-hover-bg: rgba(255, 255, 255, 0.15);
+    --bs-btn-hover-border-color: rgba(255, 255, 255, 0.22);
+    --bs-btn-active-bg: rgba(255, 255, 255, 0.18);
+    --bs-btn-active-border-color: rgba(255, 255, 255, 0.22);
+}
+
+.library-title-search {
+    min-width: min(100%, 22rem);
+}
+
+.library-title-search .input-group-text,
+.library-title-search .form-control {
+    background: rgba(0, 0, 0, 0.16);
+    border-color: rgba(255, 255, 255, 0.12);
+}
+
+.library-title-search .input-group-text {
+    color: var(--bs-secondary-color);
+}
+
+.library-title-search .form-control:focus {
+    box-shadow: 0 0 0 0.2rem rgba(var(--bs-primary-rgb), 0.2);
+}
+
+#torrentSearchInput {
+    background: rgba(0, 0, 0, 0.16);
+    border-color: rgba(255, 255, 255, 0.12);
+}
+
+#torrentSearchInput:focus {
+    box-shadow: 0 0 0 0.2rem rgba(var(--bs-primary-rgb), 0.2);
 }
 
 .navbar-brand-banner {
@@ -89,6 +307,9 @@
 }
 
 #detailsModal .modal-content {
+    background-color: rgba(30, 35, 47, 0.88);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
     height: calc(100vh - 3.5rem);
     max-height: calc(100vh - 3.5rem);
     overflow: hidden;
@@ -210,7 +431,14 @@
     position: sticky;
     top: 0;
     z-index: 2;
-    background-color: var(--bs-body-bg);
+    background-color: rgba(30, 35, 47, 0.94);
+}
+
+#detailsModal .details-list-scroll .table {
+    --bs-table-bg: rgba(30, 35, 47, 0.56);
+    --bs-table-striped-bg: rgba(255, 255, 255, 0.055);
+    --bs-table-hover-bg: rgba(255, 255, 255, 0.09);
+    --bs-table-border-color: rgba(255, 255, 255, 0.11);
 }
 
 @keyframes details-skeleton-shimmer {
@@ -243,7 +471,7 @@
     max-height: 1200px;
     opacity: 1;
     overflow: hidden;
-    transition: max-height 240ms ease, opacity 200ms ease, margin 240ms ease, padding 240ms ease;
+    transition: opacity 120ms ease;
 }
 
 #discoverSection.discover-collapsed {
@@ -279,6 +507,21 @@
 
 .library-icon-tile .discover-tile-body {
     position: relative;
+    background: rgba(37, 43, 56, 0.72);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border-color: rgba(255, 255, 255, 0.14);
+    box-shadow: 0 0.3rem 0.9rem rgba(0, 0, 0, 0.14);
+    min-height: 100%;
+    padding: 0.6rem;
+    transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.library-icon-tile:hover .discover-tile-body,
+.library-icon-tile:focus-visible .discover-tile-body {
+    border-color: rgba(var(--bs-primary-rgb), 0.7);
+    box-shadow: 0 0.65rem 1.35rem rgba(0, 0, 0, 0.24);
+    transform: translateY(-3px);
 }
 
 .library-icon-img {
@@ -333,6 +576,65 @@
     overflow: hidden;
 }
 
+/* Shared glass treatment for pages outside the Library.  Library game cards
+   retain their own artwork-aware surface further below. */
+body .navbar {
+    background-color: rgba(16, 19, 27, 0.72) !important;
+    backdrop-filter: blur(16px) saturate(1.15);
+    -webkit-backdrop-filter: blur(16px) saturate(1.15);
+    position: relative;
+    z-index: 1050;
+    isolation: isolate;
+    overflow: visible;
+}
+
+body .navbar .navbar-collapse,
+body .navbar .navbar-nav,
+body .navbar .nav-item.dropdown {
+    overflow: visible;
+}
+
+body .navbar .dropdown-menu {
+    position: absolute;
+    z-index: 1060 !important;
+}
+
+body .card:not(.game-card),
+body .aerofoil-card:not(.game-card),
+body .modal-content,
+body .settings-page-header,
+body .settings-section-header,
+body .activity-header,
+body .activity-kpi,
+body .activity-section {
+    background: rgba(30, 35, 47, 0.70) !important;
+    backdrop-filter: blur(14px) saturate(1.12);
+    -webkit-backdrop-filter: blur(14px) saturate(1.12);
+    border-color: rgba(255, 255, 255, 0.13) !important;
+}
+
+body #settingsSidebar,
+body #activitySidebar {
+    background-color: rgba(20, 24, 33, 0.76) !important;
+    backdrop-filter: blur(16px) saturate(1.12);
+    -webkit-backdrop-filter: blur(16px) saturate(1.12);
+}
+
+body .form-control,
+body .form-select,
+body .input-group-text {
+    background-color: rgba(8, 11, 17, 0.38);
+    border-color: rgba(255, 255, 255, 0.13);
+}
+
+body .table,
+body .table-dark {
+    --bs-table-bg: rgba(19, 23, 32, 0.50) !important;
+    --bs-table-striped-bg: rgba(255, 255, 255, 0.035) !important;
+    --bs-table-hover-bg: rgba(255, 255, 255, 0.075) !important;
+    --bs-table-border-color: rgba(255, 255, 255, 0.10) !important;
+}
+
 .card-img {
     mask-image: linear-gradient(to top, rgba(7, 0, 91, 0.71), #001233ed);
     border-bottom-right-radius: var(--aerofoil-card-radius);
@@ -341,7 +643,19 @@
 
 /* Card view: keep overlays inside card bounds */
 .game-card {
+    background: rgba(37, 43, 56, 0.72);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border-color: rgba(255, 255, 255, 0.16);
+    min-height: 100%;
     overflow: hidden;
+    transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.game-card:hover {
+    border-color: rgba(var(--bs-primary-rgb), 0.65);
+    box-shadow: 0 0.7rem 1.5rem rgba(0, 0, 0, 0.25);
+    transform: translateY(-3px);
 }
 
 .game-card .card-img {
@@ -349,6 +663,12 @@
     aspect-ratio: 920 / 520;
     object-fit: cover;
     display: block;
+    mask-image: none;
+}
+
+.game-card .game-info {
+    background: linear-gradient(180deg, rgba(15, 19, 28, 0.02) 14%, rgba(15, 19, 28, 0.36) 50%, rgba(15, 19, 28, 0.96) 100%);
+    border-top-color: rgba(255, 255, 255, 0.16);
 }
 
 .game-title {
@@ -356,7 +676,8 @@
     /* font-size: 18px; */
     font-weight: bold;
     margin-bottom: 5px;
-    color: white;
+    color: #f8f9ff;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
 }
 
 p.game-description {
@@ -366,13 +687,16 @@ p.game-description {
     -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
+    color: rgba(242, 245, 255, 0.9);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75);
 }
 
 .game-genre {
     margin-top: 4px;
     margin-bottom: 0;
     font-size: 0.8rem;
-    color: rgba(255, 255, 255, 0.75);
+    color: rgba(220, 229, 247, 0.92);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75);
 }
 
 .tags-container {
@@ -400,6 +724,39 @@ p.game-description {
 }
 
 @media (max-width: 576px) {
+    .library-alphabet-rail {
+        bottom: 0.65rem;
+        flex-direction: row;
+        left: 0.65rem;
+        max-width: calc(100vw - 1.3rem);
+        overflow-x: auto;
+        padding: 0.25rem;
+        top: auto;
+        transform: none;
+    }
+
+    #gridContainer {
+        padding-right: 12px;
+    }
+
+    .library-heading {
+        align-items: start;
+        flex-direction: column;
+        gap: 0.6rem;
+    }
+
+    .library-heading-actions {
+        align-items: start;
+    }
+
+    .library-toolbar {
+        padding: 0.55rem;
+    }
+
+    .library-title-search {
+        min-width: 100%;
+    }
+
     .grid-container {
         padding: 12px;
     }
@@ -592,7 +949,7 @@ p.game-description {
     aspect-ratio: 1 / 1;
     height: auto;
     object-fit: cover;
-    border-radius: 10px;
+    border-radius: 9px;
     display: block;
 }
 

@@ -3,6 +3,12 @@
 
 {% block content %}
 {% include 'nav.html' %}
+<div id="libraryArtworkBackdrop" aria-hidden="true"></div>
+<nav class="library-alphabet-rail" id="libraryAlphabetRail" aria-label="Browse titles by first letter">
+    {% for letter in '#ABCDEFGHIJKLMNOPQRSTUVWXYZ' %}
+    <button type="button" class="library-alphabet-btn" data-initial="{{ letter }}" aria-label="Titles starting with {{ letter }}">{{ letter }}</button>
+    {% endfor %}
+</nav>
 <div id="content" class="container-fluid mt-3">
     <div id="libraryAlert" class="alert d-none mb-3" role="alert"></div>
     <div class="grid-container mt-2 mb-3 discover-collapsed" id="discoverSection">
@@ -51,7 +57,22 @@
         </div>
     </div>
 
-    <div class="row gy-2 gx-3 align-items-center justify-content-md-center mb-3" id="libraryFiltersRow">
+    <section class="library-heading" aria-labelledby="libraryHeading">
+        <div>
+            <div class="library-heading-kicker">GAME COLLECTION</div>
+            <h1 id="libraryHeading">My Library</h1>
+            <p>Browse, filter, and manage your titles.</p>
+        </div>
+        <div class="library-heading-actions">
+            <div class="library-heading-count" id="libraryResultsSummary" aria-live="polite"></div>
+            <button type="button" class="btn btn-outline-secondary btn-sm" id="discoverToggleBtn"
+                aria-controls="discoverSection" aria-expanded="true">
+                <i class="bi bi-stars"></i> Hide discovery
+            </button>
+        </div>
+    </section>
+
+    <div class="row gy-2 gx-3 align-items-center mb-3 library-toolbar" id="libraryFiltersRow">
 
         <div class="col-auto">
             <div class="btn-group dropdown-center" role="group">
@@ -143,8 +164,11 @@
             </div>
         </div>
 
-        <div class="col-auto">
-            <input type="text" id="textFilter" class="form-control" placeholder="Search titles...">
+        <div class="col-12 col-md-auto library-title-search">
+            <div class="input-group">
+                <span class="input-group-text"><i class="bi bi-search"></i></span>
+                <input type="text" id="textFilter" class="form-control" placeholder="Search your library...">
+            </div>
         </div>
         {% if current_user.is_admin or admin_account_created == false %}
         <div class="col-auto">
@@ -186,26 +210,6 @@
                 </button>
                 <ul class="dropdown-menu" id="genreDropdownMenu" aria-labelledby="genreDropdownBtn">
                     <li><button class="dropdown-item genre-option" data-genre="">All genres</button></li>
-                </ul>
-            </div>
-        </div>
-        <div class="col-auto">
-            <div class="btn-group dropdown-center" role="group">
-                <button id="itemsPerPageDropdownBtn" type="button" class="btn btn-primary dropdown-toggle"
-                    data-bs-toggle="dropdown" aria-expanded="false">
-                    Items per page
-                </button>
-                <ul class="dropdown-menu" aria-labelledby="itemsPerPageDropdownBtn">
-                    <li><button class="dropdown-item items-per-page" data-value="9">9</button></li>
-                    <li><button class="dropdown-item items-per-page" data-value="12">12</button></li>
-                    <li><button class="dropdown-item items-per-page" data-value="18">18</button></li>
-                    <li><button class="dropdown-item items-per-page" data-value="27">27</button></li>
-                    <li>
-                        <div class="dropdown-item">
-                            <input type="number" id="customItemsPerPage" class="form-control" placeholder="Custom">
-                            <button id="applyCustomItemsPerPage" class="btn btn-primary mt-2">Apply</button>
-                        </div>
-                    </li>
                 </ul>
             </div>
         </div>
@@ -408,7 +412,8 @@
     let filteredGames;
     let availableGenres = [];
     let discoverySections = null;
-    let itemsPerPage = 12;
+    const LIBRARY_SINGLE_PAGE_SIZE = 10000;
+    let itemsPerPage = LIBRARY_SINGLE_PAGE_SIZE;
     let currentPage = 1;
     let totalGames = 0;
     let cardSize = 3; // Default card size
@@ -727,6 +732,7 @@
     function renderGames() {
         renderDiscoverySections();
         applyCardSizeLimits();
+        $('#libraryResultsSummary').text(`${totalGames.toLocaleString()} title${totalGames === 1 ? '' : 's'}`);
 
         if (currentView === 'card') {
             renderCardView();
@@ -746,6 +752,24 @@
         const popoverTriggerList = document.querySelectorAll('[data-bs-toggle="popover"]')
         const popoverList = [...popoverTriggerList].map(popoverTriggerEl => new bootstrap.Popover(popoverTriggerEl))
     }
+
+    function setLibraryArtworkBackdrop(source) {
+        const backdrop = $('#libraryArtworkBackdrop');
+        const imageSource = String(source || '').trim();
+        if (!imageSource) {
+            return;
+        }
+        backdrop.css('background-image', `url("${imageSource.replace(/["\\\n\r]/g, '\\$&')}")`);
+        backdrop.addClass('is-visible');
+    }
+
+    $(document).on('mouseenter focusin', '.game-card, .library-icon-tile, .discover-tile', function () {
+        setLibraryArtworkBackdrop($(this).data('backdrop-src'));
+    });
+
+    $(document).on('mouseleave', '#gameGrid, #discoverSection', function () {
+        $('#libraryArtworkBackdrop').removeClass('is-visible');
+    });
 
     function getGameTitle(game) {
         return (game && (game.title_id_name || game.title_name || game.name || game.title_id || game.app_id)) || '';
@@ -927,8 +951,10 @@
             btn.setAttribute('data-bs-app-type', game.app_type);
 
             const cacheIconSrc = game.title_id ? `/api/shop/icon/${encodeURIComponent(game.title_id)}?size=web` : '';
+            const cacheBannerSrc = game.title_id ? `/api/shop/banner/${encodeURIComponent(game.title_id)}?size=web` : '';
             const directIconSrc = ((game.icon_url || game.iconUrl || '') + '').trim();
             const iconSrc = cacheIconSrc || directIconSrc || '/static/placeholder-icon.svg';
+            btn.setAttribute('data-backdrop-src', cacheBannerSrc || iconSrc);
             const title = escapeHtml(getLibraryDisplayTitle(game));
             const genre = escapeHtml(getPrimaryGenre(game));
             btn.innerHTML = `
@@ -956,18 +982,48 @@
         });
     }
 
+    function syncLibraryAlphabetRailPosition() {
+        const rail = document.getElementById('libraryAlphabetRail');
+        const discovery = document.getElementById('discoverSection');
+        const grid = document.getElementById('gridContainer');
+        if (!rail || !discovery || !grid) return;
+
+        const followsLibrary = window.innerWidth > 576 && !discovery.classList.contains('discover-collapsed');
+        rail.classList.toggle('library-alphabet-rail-with-discovery', followsLibrary);
+        if (!followsLibrary) {
+            rail.style.top = '';
+            rail.style.maxHeight = '';
+            return;
+        }
+
+        const gridTop = grid.getBoundingClientRect().top;
+        const navHeight = document.querySelector('.navbar')?.getBoundingClientRect().height || 0;
+        const top = Math.max(navHeight + 8, Math.round(gridTop));
+        rail.style.top = `${top}px`;
+        rail.style.maxHeight = `${Math.max(120, window.innerHeight - top - 8)}px`;
+    }
+
     function renderDiscoverySections() {
         const wrapper = document.getElementById('discoverSection');
         if (!wrapper) return;
 
         const newest = discoverySections?.newest || [];
         const recommended = discoverySections?.recommended || [];
+        const toggle = $('#discoverToggleBtn');
         if (!newest.length && !recommended.length) {
             wrapper.classList.add('discover-collapsed');
+            toggle.addClass('d-none');
+            syncLibraryAlphabetRailPosition();
             return;
         }
 
-        wrapper.classList.remove('discover-collapsed');
+        const isCollapsed = localStorage.getItem('aerofoilDiscoveryCollapsed') === 'true';
+        wrapper.classList.toggle('discover-collapsed', isCollapsed);
+        toggle.removeClass('d-none')
+            .attr('aria-expanded', String(!isCollapsed))
+            .html(isCollapsed
+                ? '<i class="bi bi-stars"></i> Show discovery'
+                : '<i class="bi bi-stars"></i> Hide discovery');
 
         renderDiscoverRow('newlyAddedRow', newest);
         renderDiscoverRow('recommendedRow', recommended);
@@ -975,7 +1031,24 @@
         // Initialize scroll buttons
         initDiscoverScrollButtons('newlyAddedRow');
         initDiscoverScrollButtons('recommendedRow');
+        syncLibraryAlphabetRailPosition();
     }
+
+    $('#discoverToggleBtn').on('click', function () {
+        const wrapper = $('#discoverSection');
+        const isCollapsed = !wrapper.hasClass('discover-collapsed');
+        localStorage.setItem('aerofoilDiscoveryCollapsed', String(isCollapsed));
+        wrapper.toggleClass('discover-collapsed', isCollapsed);
+        $(this)
+            .attr('aria-expanded', String(!isCollapsed))
+            .html(isCollapsed
+                ? '<i class="bi bi-stars"></i> Show discovery'
+                : '<i class="bi bi-stars"></i> Hide discovery');
+        requestAnimationFrame(syncLibraryAlphabetRailPosition);
+    });
+
+    window.addEventListener('scroll', syncLibraryAlphabetRailPosition, { passive: true });
+    window.addEventListener('resize', syncLibraryAlphabetRailPosition);
 
     function initDiscoverScrollButtons(rowId) {
         const row = document.getElementById(rowId);
@@ -998,24 +1071,40 @@
             leftBtn.disabled = scrollLeft <= 0;
             rightBtn.disabled = scrollLeft >= maxScroll - 1; // -1 for rounding
         }
-        
-        // Update button states on scroll
-        row.addEventListener('scroll', updateButtonStates);
-        
-        // Update button states on resize
-        window.addEventListener('resize', updateButtonStates);
-        
-        // Initial state
+
+        if (!row.dataset.carouselInitialized) {
+            row.dataset.carouselInitialized = 'true';
+            row.addEventListener('scroll', () => row._updateCarouselButtons?.());
+            window.addEventListener('resize', () => row._updateCarouselButtons?.());
+            leftBtn.addEventListener('click', () => {
+                row.scrollBy({ left: -320, behavior: 'smooth' });
+            });
+            rightBtn.addEventListener('click', () => {
+                row.scrollBy({ left: 320, behavior: 'smooth' });
+            });
+            wrapper.addEventListener('mouseenter', () => { row._carouselPaused = true; });
+            wrapper.addEventListener('mouseleave', () => { row._carouselPaused = false; });
+            wrapper.addEventListener('focusin', () => { row._carouselPaused = true; });
+            wrapper.addEventListener('focusout', () => { row._carouselPaused = false; });
+        }
+
+        row._updateCarouselButtons = updateButtonStates;
         updateButtonStates();
-        
-        // Scroll handlers
-        leftBtn.addEventListener('click', () => {
-            row.scrollBy({ left: -320, behavior: 'smooth' });
-        });
-        
-        rightBtn.addEventListener('click', () => {
-            row.scrollBy({ left: 320, behavior: 'smooth' });
-        });
+
+        if (row._carouselTimer) {
+            clearInterval(row._carouselTimer);
+        }
+        if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+            row._carouselTimer = setInterval(() => {
+                const discovery = document.getElementById('discoverSection');
+                if (row._carouselPaused || discovery?.classList.contains('discover-collapsed') || row.scrollWidth <= row.clientWidth) {
+                    return;
+                }
+                const maxScroll = row.scrollWidth - row.clientWidth;
+                const nextPosition = row.scrollLeft >= maxScroll - 1 ? 0 : Math.min(row.scrollLeft + 320, maxScroll);
+                row.scrollTo({ left: nextPosition, behavior: 'smooth' });
+            }, 3500);
+        }
     }
 
     function renderCardView() {
@@ -1034,6 +1123,7 @@
 
             const cacheBannerSrc = game.title_id ? `/api/shop/banner/${game.title_id}?size=web` : '';
             const bannerFallback = '/static/placeholder-banner.svg';
+            card.attr('data-backdrop-src', cacheBannerSrc || bannerFallback);
             const img = $('<img class="card-img"></img>').attr('src', cacheBannerSrc || bannerFallback);
             img.on('error', function () {
                 if (!this.dataset.triedFallback) {
@@ -1046,6 +1136,7 @@
             const cardOverlay = $('<div class="card-img-overlay game-info"></div>');
 
             const fullTitle = getLibraryDisplayTitle(game);
+            gameCol.attr('data-library-initial', getLibraryTitleInitial(fullTitle));
             const title = $('<h5 class="card-title game-title"></h5>')
                 .text(fullTitle)
                 .attr('data-bs-toggle', 'tooltip')
@@ -1116,7 +1207,9 @@
                 .attr('data-bs-app-id', game.app_id)
                 .attr('data-bs-app-type', game.app_type);
             const cacheIconSrc = game.title_id ? `/api/shop/icon/${game.title_id}?size=web` : '';
+            const cacheBannerSrc = game.title_id ? `/api/shop/banner/${game.title_id}?size=web` : '';
             const iconFallback = '/static/placeholder-icon.svg';
+            iconBtn.attr('data-backdrop-src', cacheBannerSrc || iconFallback);
             const fullTitle = getLibraryDisplayTitle(game);
             const title = escapeHtml(fullTitle);
             const parts = splitGenres(getGameGenre(game));
@@ -1138,6 +1231,7 @@
                 }
             });
             const item = $('<div class="library-icon-item"></div>');
+            item.attr('data-library-initial', getLibraryTitleInitial(fullTitle));
             item.append(iconBtn);
 
             gameGrid.append(item);
@@ -1215,6 +1309,7 @@
                     </td>
                 </tr>
             `);
+            row.attr('data-library-initial', getLibraryTitleInitial(title));
             row.find('td').eq(4).append(statusWrap.children().length ? statusWrap : '-');
             tbody.append(row);
         });
@@ -1422,6 +1517,11 @@
 
         const safeItemsPerPage = Math.max(parseInt(itemsPerPage || 0), 1);
         const totalPages = Math.max(1, Math.ceil((nbDisplayedGames || 0) / safeItemsPerPage));
+        const paginationNav = paginationControls.closest('nav');
+        paginationNav.toggleClass('d-none', totalPages <= 1);
+        if (totalPages <= 1) {
+            return;
+        }
 
         // If switching views results in fewer pages, clamp to last valid page.
         // This prevents a blank grid when currentPage is out of range.
@@ -1703,6 +1803,21 @@
         refreshGames(true, scrollToGrid);
     }
 
+    function getLibraryTitleInitial(title) {
+        const first = String(title || '').trim().charAt(0).toUpperCase();
+        if (/^[A-Z]$/.test(first)) return first;
+        if (/^[0-9]$/.test(first)) return '#';
+        return '@';
+    }
+
+    function scrollToLibraryInitial(initial) {
+        const target = document.querySelector(`#gameGrid [data-library-initial="${initial}"]`);
+        if (!target) {
+            return;
+        }
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
     function loadFiltersFromStorage() {
         const savedFilters = localStorage.getItem('activeFilters');
         if (savedFilters) {
@@ -1730,11 +1845,6 @@
     }
 
     $(document).ready(function () {
-        const savedItemsPerPage = localStorage.getItem('itemsPerPage');
-        if (savedItemsPerPage) {
-            itemsPerPage = parseInt(savedItemsPerPage);
-        }
-
         const savedCurrentView = localStorage.getItem('currentView');
         if (savedCurrentView) {
             currentView = savedCurrentView;
@@ -1762,6 +1872,19 @@
         loadGenreFromStorage();
 
         loadFiltersFromStorage();
+        $('#libraryAlphabetRail').on('click', '.library-alphabet-btn', function () {
+            const initial = String($(this).data('initial') || '');
+            const button = $(this);
+            button.addClass('active').attr('aria-pressed', 'true');
+            setTimeout(() => button.removeClass('active').attr('aria-pressed', 'false'), 800);
+            if (currentSort !== 'title_asc') {
+                currentSort = 'title_asc';
+                localStorage.setItem('sortMethod', currentSort);
+                refreshGames(true).then(() => scrollToLibraryInitial(initial));
+                return;
+            }
+            scrollToLibraryInitial(initial);
+        });
 
         // Fetch initial set of games and render
         refreshGames(true)
@@ -1782,22 +1905,6 @@
             updateGenreButtonLabel();
             renderActiveFilters();
             recomputeFilteredGames(true);
-        });
-
-        // Event listeners for items per page dropdown
-        $('.items-per-page').click(function () {
-            itemsPerPage = $(this).data('value');
-            localStorage.setItem('itemsPerPage', itemsPerPage);
-            refreshGames(true);
-        });
-
-        $('#applyCustomItemsPerPage').click(function () {
-            const customValue = $('#customItemsPerPage').val();
-            if (customValue && customValue > 0) {
-                itemsPerPage = parseInt(customValue);
-                localStorage.setItem('itemsPerPage', itemsPerPage);
-                refreshGames(true);
-            }
         });
 
         // Event listener for card size slider

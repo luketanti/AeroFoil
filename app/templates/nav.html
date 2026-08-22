@@ -123,3 +123,53 @@
         </div>
     </div>
 </nav>
+<script>
+    (function () {
+        const desktopQuery = window.matchMedia('(min-width: 992px)');
+
+        document.addEventListener('shown.bs.dropdown', function (event) {
+            if (!desktopQuery.matches || !event.target.closest('.navbar')) {
+                return;
+            }
+
+            const toggle = event.target;
+            const menu = toggle.parentElement.querySelector(':scope > .dropdown-menu');
+            if (!menu || menu.dataset.navbarPortal === 'true') {
+                return;
+            }
+
+            const bounds = toggle.getBoundingClientRect();
+            menu.dataset.navbarPortal = 'true';
+            menu._navbarPortalParent = menu.parentElement;
+            menu._navbarPortalNextSibling = menu.nextElementSibling;
+            menu.classList.add('navbar-dropdown-portal');
+            menu.style.left = `${bounds.left}px`;
+            menu.style.top = `${bounds.bottom + 4}px`;
+            menu.style.position = 'fixed';
+            menu.style.zIndex = '1060';
+            document.body.appendChild(menu);
+        });
+
+        document.addEventListener('hide.bs.dropdown', function (event) {
+            const menu = event.target.parentElement.querySelector(':scope > .dropdown-menu')
+                || document.querySelector('.navbar-dropdown-portal[data-navbar-portal="true"]');
+            if (!menu || menu.dataset.navbarPortal !== 'true') {
+                return;
+            }
+
+            const parent = menu._navbarPortalParent;
+            const nextSibling = menu._navbarPortalNextSibling;
+            if (parent) {
+                parent.insertBefore(menu, nextSibling || null);
+            }
+            menu.classList.remove('navbar-dropdown-portal');
+            menu.style.left = '';
+            menu.style.top = '';
+            menu.style.position = '';
+            menu.style.zIndex = '';
+            delete menu.dataset.navbarPortal;
+            delete menu._navbarPortalParent;
+            delete menu._navbarPortalNextSibling;
+        });
+    })();
+</script>
