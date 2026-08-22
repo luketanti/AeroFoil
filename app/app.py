@@ -6961,6 +6961,32 @@ def set_ignored_library_content_api():
     return jsonify({'success': True, 'ignored': ignored, 'updated': updated})
 
 
+@app.post('/api/library/ignored-missing-dlc')
+@access_required('admin')
+def ignore_missing_library_dlc_api():
+    data = request.get_json(silent=True) or {}
+    title_id = str(data.get('title_id') or '').strip().upper()
+    if not title_id:
+        return jsonify({'success': False, 'error': 'missing_title_id'}), 400
+
+    updated = (
+        Apps.query
+        .filter(
+            Apps.title_id.in_(db.session.query(Titles.id).filter(Titles.title_id == title_id)),
+            Apps.app_type == APP_TYPE_DLC,
+            Apps.owned.is_(False),
+            Apps.ignored.is_(False),
+        )
+        .update({Apps.ignored: True}, synchronize_session=False)
+    )
+    db.session.commit()
+    if updated:
+        update_titles()
+        invalidate_library_cache_state_token()
+        post_library_change()
+    return jsonify({'success': True, 'updated': updated})
+
+
 def _build_title_details_dlc_items(title_fk, title_id):
     dlc_rows = (
         db.session.query(Apps.app_id, Apps.app_version, Apps.owned, Apps.ignored)

@@ -2134,7 +2134,7 @@
         });
     }
 
-    function renderDetails(game) {
+    function renderDetails(game, preferredTabId = '') {
         if (!game) {
             $('#detailsTitle').text('Content not found');
             $('#detailsSubtitle').text('');
@@ -2306,6 +2306,15 @@
                     </button>
             `
             : '';
+        const missingDlcCount = dlcList.filter(dlc => !dlc.owned && !dlc.ignored).length;
+        const ignoreAllMissingDlcButton = (canManageDownloads && game.title_id && missingDlcCount > 0)
+            ? `
+                    <button type="button" class="btn btn-outline-secondary btn-sm details-ignore-all-dlc-btn"
+                        data-title-id="${escapeHtml(String(game.title_id))}">
+                        <i class="bi bi-eye-slash"></i> Ignore all missing DLC (${missingDlcCount})
+                    </button>
+            `
+            : '';
         const customSearchRow = canManageDownloads
             ? `
                     <div class="input-group input-group-sm mt-2 manual-search-group">
@@ -2317,7 +2326,7 @@
                     </div>
             `
             : '';
-        const actionRow = (updateButton || baseButton || cascadeDeleteButton || dlcSearchButton)
+        const actionRow = (updateButton || baseButton || cascadeDeleteButton || dlcSearchButton || ignoreAllMissingDlcButton)
             ? `
                 <div class="mt-3">
                     <div class="d-flex flex-wrap align-items-center gap-2">
@@ -2325,6 +2334,7 @@
                             ${baseButton}
                             ${updateButton}
                             ${dlcSearchButton}
+                            ${ignoreAllMissingDlcButton}
                         </div>
                         ${cascadeDeleteButton
                             ? `
@@ -2470,6 +2480,16 @@
             `
             : '<div class="text-muted py-2">No cheats are available for this title.</div>';
         const defaultToDlcTab = dlcList.length > 0 && String(game.app_type || '').toUpperCase() === 'DLC';
+        const activeDetailsTab = (
+            preferredTabId === 'details-dlc-tab' && dlcList.length > 0
+        )
+            ? 'dlc'
+            : (preferredTabId === 'details-cheats-tab' && availableCheats.length > 0)
+                ? 'cheats'
+                : defaultToDlcTab ? 'dlc' : 'updates';
+        const updatesTabActive = activeDetailsTab === 'updates';
+        const dlcTabActive = activeDetailsTab === 'dlc';
+        const cheatsTabActive = activeDetailsTab === 'cheats';
 
         if (dlcList.length > 0 || availableCheats.length > 0) {
             $('#detailsVersions').html(`
@@ -2478,39 +2498,39 @@
                 ${customSearchRow}
                 <ul class="nav nav-tabs mb-2 ${actionRow ? 'mt-3' : ''}" id="detailsListTabs" role="tablist">
                     <li class="nav-item" role="presentation">
-                        <button class="nav-link ${defaultToDlcTab ? '' : 'active'}" id="details-updates-tab" data-bs-toggle="tab"
+                        <button class="nav-link ${updatesTabActive ? 'active' : ''}" id="details-updates-tab" data-bs-toggle="tab"
                             data-bs-target="#details-updates-pane" type="button" role="tab"
-                            aria-controls="details-updates-pane" aria-selected="${defaultToDlcTab ? 'false' : 'true'}">
+                            aria-controls="details-updates-pane" aria-selected="${updatesTabActive ? 'true' : 'false'}">
                             Updates <span class="badge rounded-pill text-bg-secondary ms-1">${versions.length}</span>
                         </button>
                     </li>
                     ${dlcList.length ? `
                         <li class="nav-item" role="presentation">
-                            <button class="nav-link ${defaultToDlcTab ? 'active' : ''}" id="details-dlc-tab" data-bs-toggle="tab"
+                            <button class="nav-link ${dlcTabActive ? 'active' : ''}" id="details-dlc-tab" data-bs-toggle="tab"
                                 data-bs-target="#details-dlc-pane" type="button" role="tab"
-                                aria-controls="details-dlc-pane" aria-selected="${defaultToDlcTab ? 'true' : 'false'}">
+                                aria-controls="details-dlc-pane" aria-selected="${dlcTabActive ? 'true' : 'false'}">
                                 DLC <span class="badge rounded-pill text-bg-secondary ms-1">${dlcList.length}</span>
                             </button>
                         </li>
                     ` : ''}
                     <li class="nav-item" role="presentation">
-                        <button class="nav-link" id="details-cheats-tab" data-bs-toggle="tab"
+                        <button class="nav-link ${cheatsTabActive ? 'active' : ''}" id="details-cheats-tab" data-bs-toggle="tab"
                             data-bs-target="#details-cheats-pane" type="button" role="tab"
-                            aria-controls="details-cheats-pane" aria-selected="false">
+                            aria-controls="details-cheats-pane" aria-selected="${cheatsTabActive ? 'true' : 'false'}">
                             Cheats <span class="badge rounded-pill text-bg-secondary ms-1">${availableCheats.length}</span>
                         </button>
                     </li>
                 </ul>
                 <div class="tab-content" id="detailsTabContent">
-                    <div class="tab-pane fade ${defaultToDlcTab ? '' : 'show active'} details-tab-pane" id="details-updates-pane" role="tabpanel" aria-labelledby="details-updates-tab">
+                    <div class="tab-pane fade ${updatesTabActive ? 'show active' : ''} details-tab-pane" id="details-updates-pane" role="tabpanel" aria-labelledby="details-updates-tab">
                         ${updatesTabHtml}
                     </div>
                     ${dlcList.length ? `
-                        <div class="tab-pane fade ${defaultToDlcTab ? 'show active' : ''} details-tab-pane" id="details-dlc-pane" role="tabpanel" aria-labelledby="details-dlc-tab">
+                        <div class="tab-pane fade ${dlcTabActive ? 'show active' : ''} details-tab-pane" id="details-dlc-pane" role="tabpanel" aria-labelledby="details-dlc-tab">
                             ${dlcTabHtml}
                         </div>
                     ` : ''}
-                    <div class="tab-pane fade details-tab-pane" id="details-cheats-pane" role="tabpanel" aria-labelledby="details-cheats-tab">
+                    <div class="tab-pane fade ${cheatsTabActive ? 'show active' : ''} details-tab-pane" id="details-cheats-pane" role="tabpanel" aria-labelledby="details-cheats-tab">
                         ${cheatsTabHtml}
                     </div>
                 </div>
@@ -3023,6 +3043,53 @@
         });
     });
 
+    function setIgnoredContentRowState(button, appType, isIgnored) {
+        const isDlc = appType === 'DLC';
+        const contentLabel = isDlc ? 'DLC' : 'update';
+        const statusCell = button.closest('tr').children('td').eq(1);
+        statusCell.html(isDlc
+            ? `<span class="badge ${isIgnored ? 'text-bg-secondary' : 'text-bg-warning'}">${isIgnored ? 'Ignored' : 'Missing'}</span>`
+            : (isIgnored ? 'Ignored' : 'Missing'));
+        button
+            .data('ignored', isIgnored ? 'false' : 'true')
+            .attr('title', isIgnored ? `Restore ${contentLabel} to completeness checks` : `Ignore ${contentLabel} for completeness checks`)
+            .find('i')
+            .attr('class', `bi bi-${isIgnored ? 'arrow-counterclockwise' : 'eye-slash'}`);
+    }
+
+    $(document).on('click', '.details-ignore-all-dlc-btn', function () {
+        const button = $(this);
+        const titleId = String(button.data('title-id') || '').trim();
+        if (!titleId) {
+            return;
+        }
+
+        button.prop('disabled', true);
+        $.ajax({
+            url: '/api/library/ignored-missing-dlc',
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ title_id: titleId }),
+        }).done(function (response) {
+            if (!response || response.success !== true) {
+                setDetailsStatus('Unable to ignore missing DLC.', 'danger');
+                button.prop('disabled', false);
+                return;
+            }
+            $('.details-ignore-content-btn[data-app-type="DLC"]').each(function () {
+                const dlcButton = $(this);
+                if (String(dlcButton.data('ignored')) === 'true') {
+                    setIgnoredContentRowState(dlcButton, 'DLC', true);
+                }
+            });
+            button.remove();
+            gameDetailsCache.clear();
+        }).fail(function () {
+            setDetailsStatus('Unable to ignore missing DLC.', 'danger');
+            button.prop('disabled', false);
+        });
+    });
+
     $(document).on('click', '.details-ignore-content-btn', function () {
         const button = $(this);
         const appId = String(button.data('app-id') || '').trim();
@@ -3034,6 +3101,7 @@
         }
 
         button.prop('disabled', true);
+        setIgnoredContentRowState(button, appType, ignored);
         $.ajax({
             url: '/api/library/ignored-content',
             type: 'POST',
@@ -3041,19 +3109,14 @@
             data: JSON.stringify({ app_id: appId, app_type: appType, version, ignored }),
         }).done(function (response) {
             if (!response || response.success !== true) {
+                setIgnoredContentRowState(button, appType, !ignored);
                 setDetailsStatus('Unable to update ignored content.', 'danger');
                 return;
             }
+            setIgnoredContentRowState(button, appType, response.ignored === true);
             gameDetailsCache.clear();
-            fetchGames().then(() => {
-                recomputeFilteredGames();
-                renderGenresDropdown();
-            }).catch(() => {});
-            const context = currentDetailsContext || {};
-            $.getJSON(`/api/title-details?app_id=${encodeURIComponent(context.appId || appId)}&app_type=${encodeURIComponent(context.appType || appType)}`)
-                .done(data => renderDetails(data && data.game ? data.game : null))
-                .fail(() => setDetailsStatus('Saved, but refreshing title details failed.', 'danger'));
         }).fail(function () {
+            setIgnoredContentRowState(button, appType, !ignored);
             setDetailsStatus('Unable to update ignored content.', 'danger');
         }).always(function () {
             button.prop('disabled', false);
