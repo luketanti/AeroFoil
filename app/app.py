@@ -6828,6 +6828,7 @@ def get_title_details_api():
                 'category': app_info.get('category') or '',
                 'genre': app_info.get('category') or '',
                 'nsuId': app_info.get('nsuId'),
+                'rating': app_info.get('rating'),
                 'description': app_info.get('description'),
                 'screenshots': app_info.get('screenshots') or [],
                 'title_id': row.title_id,
@@ -7080,6 +7081,9 @@ def get_title_info_api(title_id):
         'iconUrl': info.get('iconUrl'),
         'bannerUrl': info.get('bannerUrl'),
         'description': info.get('description'),
+        'category': info.get('category'),
+        'nsuId': info.get('nsuId'),
+        'rating': info.get('rating'),
         'screenshots': info.get('screenshots') or []
     })
 
@@ -7096,6 +7100,9 @@ def set_manual_title_info_api():
         'description': data.get('description'),
         'iconUrl': data.get('iconUrl'),
         'bannerUrl': data.get('bannerUrl'),
+        'category': data.get('category'),
+        'nsuId': data.get('nsuId'),
+        'rating': data.get('rating'),
         'screenshots': data.get('screenshots') or [],
     }
     ok = set_manual_title_override(title_id, payload)

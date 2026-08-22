@@ -122,6 +122,9 @@ class TitlesLanguagePreferenceTests(unittest.TestCase):
                 'description': '',
                 'iconUrl': '',
                 'bannerUrl': '',
+                'category': '',
+                'nsuId': '',
+                'rating': '',
                 'screenshots': [],
             },
         })

@@ -1375,10 +1375,12 @@ def _apply_manual_title_override(title_id, info):
     if not isinstance(override, dict) or not override:
         return out
 
-    for key in ('name', 'description', 'iconUrl', 'bannerUrl'):
+    for key in ('name', 'description', 'iconUrl', 'bannerUrl', 'category', 'nsuId'):
         value = str(override.get(key) or '').strip()
         if value:
             out[key] = value
+    if str(override.get('rating') or '').strip():
+        out['rating'] = _coerce_rating(override.get('rating'))
     screenshots = override.get('screenshots')
     if isinstance(screenshots, list) and screenshots:
         out['screenshots'] = [str(u).strip() for u in screenshots if str(u or '').strip()][:12]

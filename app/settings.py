@@ -137,6 +137,9 @@ def _normalize_titles_manual_overrides(raw_overrides):
             'description': str(value.get('description') or '').strip(),
             'iconUrl': str(value.get('iconUrl') or '').strip(),
             'bannerUrl': str(value.get('bannerUrl') or '').strip(),
+            'category': str(value.get('category') or '').strip(),
+            'nsuId': str(value.get('nsuId') or '').strip(),
+            'rating': str(value.get('rating') or '').strip(),
             'screenshots': screenshots[:12],
         }
     return out
@@ -955,6 +958,9 @@ def set_manual_title_override(title_id, data):
         payload.get('description'),
         payload.get('iconUrl'),
         payload.get('bannerUrl'),
+        payload.get('category'),
+        payload.get('nsuId'),
+        payload.get('rating'),
         bool(payload.get('screenshots')),
     ])
     if has_value:

@@ -278,6 +278,10 @@
                         <div id="gameInfoStatus" class="text-muted small mb-2"></div>
                         <div id="gameInfoBody" class="game-info-body"></div>
                         {% if current_user.is_admin or admin_account_created == false %}
+                        <button type="button" class="btn btn-outline-secondary btn-sm mt-3" id="toggleManualTitleInfoEditorBtn"
+                            aria-controls="manualTitleInfoEditor" aria-expanded="false">
+                            <i class="bi bi-pencil-square"></i> Edit metadata
+                        </button>
                         <div id="manualTitleInfoEditor" class="border rounded p-3 mt-3 d-none">
                             <div class="fw-semibold mb-2">Manual metadata override</div>
                             <div class="text-muted small mb-2">Use this when TitleDB does not identify the title correctly.</div>
@@ -290,6 +294,18 @@
                                     <label for="manualTitleIconUrlInput" class="form-label">Icon URL</label>
                                     <input type="text" class="form-control form-control-sm" id="manualTitleIconUrlInput" placeholder="https://...">
                                 </div>
+                                <div class="col-md-6">
+                                    <label for="manualTitleCategoryInput" class="form-label">Genres / category</label>
+                                    <input type="text" class="form-control form-control-sm" id="manualTitleCategoryInput" placeholder="Action, Adventure">
+                                </div>
+                                <div class="col-md-3">
+                                    <label for="manualTitleNsuIdInput" class="form-label">NSU ID</label>
+                                    <input type="text" class="form-control form-control-sm" id="manualTitleNsuIdInput">
+                                </div>
+                                <div class="col-md-3">
+                                    <label for="manualTitleRatingInput" class="form-label">Age rating</label>
+                                    <input type="number" min="0" class="form-control form-control-sm" id="manualTitleRatingInput">
+                                </div>
                                 <div class="col-12">
                                     <label for="manualTitleBannerUrlInput" class="form-label">Banner URL</label>
                                     <input type="text" class="form-control form-control-sm" id="manualTitleBannerUrlInput" placeholder="https://...">
@@ -297,6 +313,10 @@
                                 <div class="col-12">
                                     <label for="manualTitleDescriptionInput" class="form-label">Description</label>
                                     <textarea class="form-control form-control-sm" id="manualTitleDescriptionInput" rows="4"></textarea>
+                                </div>
+                                <div class="col-12">
+                                    <label for="manualTitleScreenshotsInput" class="form-label">Screenshot URLs</label>
+                                    <textarea class="form-control form-control-sm" id="manualTitleScreenshotsInput" rows="3" placeholder="One URL per line"></textarea>
                                 </div>
                             </div>
                             <div class="d-flex align-items-center gap-2 mt-2">
@@ -2784,6 +2804,20 @@
         return games.find(g => (g && String(g.title_id || '').toUpperCase() === tid)) || null;
     }
 
+    function setManualTitleInfoEditorVisible(isVisible) {
+        const editor = $('#manualTitleInfoEditor');
+        const toggle = $('#toggleManualTitleInfoEditorBtn');
+        editor.toggleClass('d-none', !isVisible);
+        toggle.attr('aria-expanded', String(isVisible));
+        toggle.html(isVisible
+            ? '<i class="bi bi-pencil-square"></i> Hide metadata editor'
+            : '<i class="bi bi-pencil-square"></i> Edit metadata');
+    }
+
+    $('#toggleManualTitleInfoEditorBtn').on('click', function () {
+        setManualTitleInfoEditorVisible($('#manualTitleInfoEditor').hasClass('d-none'));
+    });
+
     function renderGameInfoModalFromTitleDb(game, titleId, title) {
         gameInfoCurrentTitleId = (titleId || '').trim().toUpperCase();
         gameInfoCurrentGame = game || null;
@@ -2860,11 +2894,15 @@
             const unresolved = !game || String(game.name || '').trim().toLowerCase() === 'unrecognized'
                 || String(game.id || '').toLowerCase().includes('not found in titledb')
                 || !desc;
-            $('#manualTitleInfoEditor').toggleClass('d-none', !unresolved);
+            setManualTitleInfoEditorVisible(unresolved);
             $('#manualTitleNameInput').val((game && game.name && game.name !== 'Unrecognized') ? game.name : '');
             $('#manualTitleDescriptionInput').val((game && game.description) ? game.description : '');
             $('#manualTitleIconUrlInput').val((game && game.iconUrl) ? game.iconUrl : '');
             $('#manualTitleBannerUrlInput').val((game && game.bannerUrl) ? game.bannerUrl : '');
+            $('#manualTitleCategoryInput').val((game && game.category) ? game.category : '');
+            $('#manualTitleNsuIdInput').val((game && game.nsuId) ? game.nsuId : '');
+            $('#manualTitleRatingInput').val((game && game.rating !== undefined && game.rating !== null) ? game.rating : '');
+            $('#manualTitleScreenshotsInput').val((game && Array.isArray(game.screenshots)) ? game.screenshots.join('\n') : '');
             $('#manualTitleInfoStatus').text('').removeClass('text-danger text-success').addClass('text-muted');
         }
     }
@@ -2884,7 +2922,10 @@
             description: ($('#manualTitleDescriptionInput').val() || '').trim(),
             iconUrl: ($('#manualTitleIconUrlInput').val() || '').trim(),
             bannerUrl: ($('#manualTitleBannerUrlInput').val() || '').trim(),
-            screenshots: []
+            category: ($('#manualTitleCategoryInput').val() || '').trim(),
+            nsuId: ($('#manualTitleNsuIdInput').val() || '').trim(),
+            rating: ($('#manualTitleRatingInput').val() || '').trim(),
+            screenshots: ($('#manualTitleScreenshotsInput').val() || '').split(/\r?\n/).map(url => url.trim()).filter(Boolean)
         };
 
         $.ajax({
@@ -2904,6 +2945,9 @@
                         iconUrl: info.iconUrl || payload.iconUrl || '',
                         bannerUrl: info.bannerUrl || payload.bannerUrl || '',
                         description: info.description || payload.description || '',
+                        category: info.category || payload.category || '',
+                        nsuId: info.nsuId || payload.nsuId || '',
+                        rating: info.rating ?? payload.rating ?? null,
                         screenshots: Array.isArray(info.screenshots) ? info.screenshots : [],
                         id: titleId
                     });
