@@ -922,11 +922,12 @@ def search_update_options(title_id, version, limit=20):
     settings = load_settings()
     downloads = settings.get("downloads", {})
     prowlarr_cfg = downloads.get("prowlarr", {})
+    # Listing options only needs Prowlarr; a download client is required to
+    # queue, and queue_download_url reports that clearly at that point. With
+    # no client configured the protocol filter simply is not applied.
     allowed_protocols = _get_configured_protocols(downloads)
     if not prowlarr_cfg.get("url") or not prowlarr_cfg.get("api_key"):
         return False, "Prowlarr is not configured.", []
-    if not allowed_protocols:
-        return False, "No download client is configured.", []
 
     title_name = title_id
     titles_lib.load_titledb()
