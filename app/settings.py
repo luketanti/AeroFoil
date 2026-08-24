@@ -336,6 +336,10 @@ def _normalize_download_settings(downloads):
         raw_torrent_client.get('remove_completed_torrents_on_finish'),
         default=(defaults.get('torrent_client', {}) or {}).get('remove_completed_torrents_on_finish', True),
     )
+    merged['torrent_client']['use_hardlinks_when_seeding'] = _coerce_bool(
+        raw_torrent_client.get('use_hardlinks_when_seeding'),
+        default=(defaults.get('torrent_client', {}) or {}).get('use_hardlinks_when_seeding', False),
+    )
     raw_usenet_client = dict(raw_downloads.get('usenet_client') or {})
     merged['usenet_client'] = _normalize_download_client_config(
         raw_usenet_client,

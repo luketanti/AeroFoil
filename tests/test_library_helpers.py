@@ -31,6 +31,7 @@ try:
         _delete_target_apps,
         _finalize_staged_conversion_output,
         _format_nsz_command,
+        _is_hardlinked_file,
         _iter_library_files,
         _parse_command_args,
         _pending_cleanup_roots,
@@ -83,6 +84,19 @@ class LibraryHelperTests(unittest.TestCase):
             filepath=filepath,
             apps=list(linked_apps),
         )
+
+    @patch('app.library.os.stat')
+    def test_hardlinked_file_detection_uses_link_count(self, stat_mock):
+        stat_mock.return_value = SimpleNamespace(st_nlink=2)
+
+        self.assertTrue(_is_hardlinked_file('X:\\fixture-root\\Example Title.nsp'))
+
+        stat_mock.return_value = SimpleNamespace(st_nlink=1)
+        self.assertFalse(_is_hardlinked_file('X:\\fixture-root\\Example Title.nsp'))
+
+    @patch('app.library.os.stat', side_effect=OSError('unavailable'))
+    def test_hardlinked_file_detection_tolerates_stat_failure(self, stat_mock):
+        self.assertFalse(_is_hardlinked_file('X:\\fixture-root\\Example Title.nsp'))
 
     @patch('app.app.os.path.isfile')
     def test_build_library_download_files_exposes_existing_files_only(self, isfile_mock):

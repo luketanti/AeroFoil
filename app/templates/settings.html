@@ -1041,6 +1041,11 @@
                             <label class="form-check-label" for="torrentClientRemoveOnFinishCheck">Remove finished torrents from client</label>
                             <div class="form-text">Disable this to keep finished torrents in the client for seeding.</div>
                         </div>
+                        <div class="form-check form-switch mb-3">
+                            <input class="form-check-input" type="checkbox" id="torrentClientHardlinksWhenSeedingCheck">
+                            <label class="form-check-label" for="torrentClientHardlinksWhenSeedingCheck">Use hardlinks instead of copying when seeding</label>
+                            <div class="form-text">Requires the torrent download and library paths to be on the same share or volume. AeroFoil copies files automatically when a hardlink is unavailable.</div>
+                        </div>
                         <div class="d-flex align-items-center gap-3">
                             <button type="button" id="testTorrentClientBtn" class="btn btn-outline-secondary"
                                 onClick='testTorrentClientSettings()'>Test torrent client</button>
@@ -2493,6 +2498,15 @@
         );
     }
 
+    function updateTorrentHardlinkFieldState() {
+        const isSeeding = !getCheckboxStatus("torrentClientRemoveOnFinishCheck");
+        const hardlinkInput = $("#torrentClientHardlinksWhenSeedingCheck");
+        hardlinkInput.prop("disabled", !isSeeding);
+        if (!isSeeding) {
+            hardlinkInput.prop("checked", false);
+        }
+    }
+
     function updateUsenetClientFieldState() {
         const clientType = getInputVal("usenetClientTypeSelect");
         const caps = downloadClientCapabilities.find(item => item.protocol === 'usenet' && item.type === clientType) || {};
@@ -2628,7 +2642,8 @@
                 api_key: getInputVal("torrentClientApiKeyInput"),
                 download_path: getInputVal("torrentClientPathInput"),
                 min_seeders: parseInt(getInputVal("torrentClientMinSeedersInput"), 10),
-                remove_completed_torrents_on_finish: getCheckboxStatus("torrentClientRemoveOnFinishCheck")
+                remove_completed_torrents_on_finish: getCheckboxStatus("torrentClientRemoveOnFinishCheck"),
+                use_hardlinks_when_seeding: getCheckboxStatus("torrentClientHardlinksWhenSeedingCheck")
             },
             usenet_client: {
                 type: getInputVal("usenetClientTypeSelect"),
@@ -2924,6 +2939,7 @@
         fillLibraryTable();
         $("#torrentClientTypeSelect").on("change", updateTorrentClientFieldState);
         $("#usenetClientTypeSelect").on("change", updateUsenetClientFieldState);
+        $("#torrentClientRemoveOnFinishCheck").on("change", updateTorrentHardlinkFieldState);
         $("#tinfoilOnlyModeCheck").on("change", syncTinfoilOnlyModeControls);
         $('#libraryTemplateBaseFolderInput, #libraryTemplateBaseFilenameInput, #libraryTemplateUpdateFolderInput, #libraryTemplateUpdateFilenameInput, #libraryTemplateDlcFolderInput, #libraryTemplateDlcFilenameInput, #libraryTemplateOtherFolderInput, #libraryTemplateOtherFilenameInput')
             .on('change', function () { submitLibrarySettings(); });
@@ -3079,6 +3095,7 @@
             setInputVal("torrentClientPathInput", torrentSettings['download_path'] || '');
             setInputVal("torrentClientMinSeedersInput", torrentSettings['min_seeders'] ?? 2);
             $("#torrentClientRemoveOnFinishCheck").prop("checked", torrentSettings['remove_completed_torrents_on_finish'] !== false);
+            $("#torrentClientHardlinksWhenSeedingCheck").prop("checked", !!torrentSettings['use_hardlinks_when_seeding']);
             usenetSettings = downloadsSettings['usenet_client'] || {};
             setInputVal("usenetClientUrlInput", usenetSettings['url'] || '');
             setInputVal("usenetClientUserInput", usenetSettings['username'] || '');
@@ -3086,6 +3103,7 @@
             setInputVal("usenetClientApiKeyInput", usenetSettings['api_key'] || '');
             setInputVal("usenetClientMinAgeInput", usenetSettings['min_age_minutes'] ?? 0);
             updateTorrentClientFieldState();
+            updateTorrentHardlinkFieldState();
             updateUsenetClientFieldState();
         });
 

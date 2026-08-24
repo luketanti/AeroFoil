@@ -1897,6 +1897,7 @@ class CompletedAdoptionTests(unittest.TestCase):
 
         move_completed_mock.assert_called_once()
         self.assertTrue(move_completed_mock.call_args.kwargs["copy_files"])
+        self.assertFalse(move_completed_mock.call_args.kwargs["hardlink_files"])
         remove_completed_mock.assert_not_called()
         enqueue_paths_mock.assert_called_once_with(["X:\\fixture-root\\Example Title [0100]\\Example Base.nsp"])
         enqueue_cleanup_roots_mock.assert_called_once_with([])
@@ -1924,6 +1925,37 @@ class CompletedAdoptionTests(unittest.TestCase):
 
         self.assertEqual(moved_path, "X:\\library\\Example Base.nsp")
         self.assertIsNone(reason)
+        copy_mock.assert_called_once_with("C:\\tests\\completed\\Example Base.nsp", "X:\\library\\Example Base.nsp")
+        move_mock.assert_not_called()
+        cleanup_mock.assert_not_called()
+
+    @patch("app.downloads.manager._cleanup_download_path")
+    @patch("app.downloads.manager._normalize_imported_wrapped_files", side_effect=lambda path: path)
+    @patch("app.downloads.manager._build_generic_import_destination", return_value="X:\\library\\Example Base.nsp")
+    @patch("app.downloads.manager.shutil.copy2")
+    @patch("app.downloads.manager.os.link", side_effect=OSError("cross-device link"))
+    @patch("app.downloads.manager.shutil.move")
+    @patch("app.downloads.manager._iter_importable_download_files", return_value=["C:\\tests\\completed\\Example Base.nsp"])
+    def test_retained_torrent_hardlink_falls_back_to_copy(
+        self,
+        importable_files_mock,
+        move_mock,
+        link_mock,
+        copy_mock,
+        build_destination_mock,
+        normalize_mock,
+        cleanup_mock,
+    ):
+        moved_path, reason = downloads_manager._move_generic_importable_files(
+            "C:\\tests\\completed\\Example Release",
+            "X:\\library",
+            copy_files=True,
+            hardlink_files=True,
+        )
+
+        self.assertEqual(moved_path, "X:\\library\\Example Base.nsp")
+        self.assertIsNone(reason)
+        link_mock.assert_called_once_with("C:\\tests\\completed\\Example Base.nsp", "X:\\library\\Example Base.nsp")
         copy_mock.assert_called_once_with("C:\\tests\\completed\\Example Base.nsp", "X:\\library\\Example Base.nsp")
         move_mock.assert_not_called()
         cleanup_mock.assert_not_called()

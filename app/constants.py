@@ -139,6 +139,7 @@ DEFAULT_SETTINGS = {
             "download_path": "",
             "min_seeders": 2,
             "remove_completed_torrents_on_finish": True,
+            "use_hardlinks_when_seeding": False,
         },
         "usenet_client": {
             "type": "sabnzbd",

@@ -1362,6 +1362,13 @@ def _finalize_staged_conversion_output(source_path, staged_output_path, staging_
     _cleanup_empty_parent_dirs(os.path.dirname(staged_output_path), staging_root)
     return final_output_path
 
+
+def _is_hardlinked_file(path):
+    try:
+        return os.stat(path).st_nlink > 1
+    except OSError:
+        return False
+
 def _summarize_conversion_failure(log_text, output_file=None):
     text = str(log_text or '')
     lowered = text.lower()
@@ -2444,7 +2451,7 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
     query = Files.query.filter(Files.extension.in_(['nsp', 'xci']))
     if library_id:
         query = query.filter_by(library_id=library_id)
-    files = query.all()
+    files = [file_entry for file_entry in query.all() if not _is_hardlinked_file(file_entry.filepath)]
     total_files = len(files)
     processed = 0
     if progress_cb:
@@ -2472,6 +2479,16 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
             add_detail('Skip missing file path.')
             if log_cb:
                 log_cb('Skip missing file path.')
+            processed += 1
+            if progress_cb:
+                progress_cb(processed, total_files)
+            continue
+
+        if _is_hardlinked_file(source_path):
+            results['skipped'] += 1
+            add_detail(f"Skip hardlinked file retained for torrent seeding: {source_path}.")
+            if log_cb:
+                log_cb(f"Skip hardlinked file retained for torrent seeding: {source_path}.")
             processed += 1
             if progress_cb:
                 progress_cb(processed, total_files)
@@ -2682,7 +2699,8 @@ def list_convertible_files(limit=2000, library_id=None, min_size_bytes=200 * 102
             'size': file.size or 0
         }
         for file in files
-        if not min_size_bytes or not file.size or file.size >= min_size_bytes
+        if (not min_size_bytes or not file.size or file.size >= min_size_bytes)
+        and not _is_hardlinked_file(file.filepath)
     ]
     return filtered
 
@@ -2721,6 +2739,15 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
     if not source_path or not os.path.exists(source_path):
         results['success'] = False
         results['errors'].append('File path missing.')
+        return results
+
+    if _is_hardlinked_file(source_path):
+        results['skipped'] = 1
+        results['details'].append('Skip hardlinked file retained for torrent seeding.')
+        if log_cb:
+            log_cb(f"Skip hardlinked file retained for torrent seeding: {source_path}.")
+        if progress_cb:
+            progress_cb(1, 1)
         return results
 
     keys_ok, keys_error = _ensure_nsz_keys()

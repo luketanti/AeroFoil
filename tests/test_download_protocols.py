@@ -74,6 +74,7 @@ class DownloadProtocolTests(unittest.TestCase):
         self.assertEqual(normalized["usenet_client"]["category"], "shared-tag")
         self.assertEqual(normalized["torrent_client"]["min_seeders"], 7)
         self.assertTrue(normalized["torrent_client"]["remove_completed_torrents_on_finish"])
+        self.assertFalse(normalized["torrent_client"]["use_hardlinks_when_seeding"])
         self.assertEqual(normalized["usenet_client"]["min_age_minutes"], 0)
         self.assertEqual(normalized["prowlarr"]["search_limit"], 100)
         self.assertEqual(normalized["required_terms_match"], "all")
@@ -90,6 +91,15 @@ class DownloadProtocolTests(unittest.TestCase):
             },
         })
         self.assertFalse(normalized["torrent_client"]["remove_completed_torrents_on_finish"])
+
+    def test_download_settings_allow_hardlinks_when_seeding(self):
+        normalized = _normalize_download_settings({
+            "torrent_client": {
+                "use_hardlinks_when_seeding": True,
+            },
+        })
+
+        self.assertTrue(normalized["torrent_client"]["use_hardlinks_when_seeding"])
 
     @patch.object(ProwlarrClient, "_get")
     def test_prowlarr_search_sends_type_and_nonzero_limit(self, get_mock):

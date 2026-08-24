@@ -282,6 +282,8 @@ AeroFoil can automatically search for missing updates using Prowlarr, route torr
    - **Client**: multiple clients are supported, including qBittorrent, Transmission, Deluge, rTorrent, and others listed in the Settings UI.
    - **Client URL** and credentials.
    - **Download path** (optional): if set, AeroFoil will warn if it doesn't exist or isn't writable.
+   - **Remove finished torrents from client**: disable this to retain completed torrents for seeding.
+   - **Use hardlinks instead of copying when seeding**: optional, and only used when completed torrents are retained. AeroFoil attempts a hardlink for each imported file, then safely falls back to copying if hardlinks are unavailable. The torrent client's download path and AeroFoil library path must be on the same share or volume—such as the shared-volume layout commonly used by Unraid Trash Guides setups—for hardlinks to work.
    - Use **Test torrent client** to validate connectivity.
 5. Configure **Usenet Client** if you want Prowlarr usenet results to queue automatically:
    - **Client**: multiple usenet clients are supported, including SABnzbd, NZBGet, Download Station, NZBVortex, and others listed in the Settings UI.
