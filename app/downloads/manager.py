@@ -950,6 +950,12 @@ def search_update_options(title_id, version, limit=20):
     min_seeders = _get_torrent_min_seeders(downloads)
     min_age_minutes = _get_usenet_min_age_minutes(downloads)
     for query in query_candidates:
+        logger.info(
+            'Prowlarr search (options): "%s" (title %s v%s)',
+            query,
+            update.get("title_id"),
+            update.get("version"),
+        )
         results = client.search(
             query,
             indexer_ids=prowlarr_cfg.get("indexer_ids") or [],
@@ -1079,6 +1085,12 @@ def _search_and_queue(
     query_candidates = _build_queries(update)
     result = None
     for query in query_candidates:
+        logger.info(
+            'Prowlarr search (queue): "%s" (title %s v%s)',
+            query,
+            update.get("title_id"),
+            update.get("version"),
+        )
         results = client.search(query, indexer_ids=indexer_ids, categories=categories, limit=search_limit)
         result = pick_best_result(
             results,
