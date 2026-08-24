@@ -922,11 +922,12 @@ def search_update_options(title_id, version, limit=20):
     settings = load_settings()
     downloads = settings.get("downloads", {})
     prowlarr_cfg = downloads.get("prowlarr", {})
+    # Listing options only needs Prowlarr; a download client is required to
+    # queue, and queue_download_url reports that clearly at that point. With
+    # no client configured the protocol filter simply is not applied.
     allowed_protocols = _get_configured_protocols(downloads)
     if not prowlarr_cfg.get("url") or not prowlarr_cfg.get("api_key"):
         return False, "Prowlarr is not configured.", []
-    if not allowed_protocols:
-        return False, "No download client is configured.", []
 
     title_name = title_id
     titles_lib.load_titledb()
@@ -950,6 +951,12 @@ def search_update_options(title_id, version, limit=20):
     min_seeders = _get_torrent_min_seeders(downloads)
     min_age_minutes = _get_usenet_min_age_minutes(downloads)
     for query in query_candidates:
+        logger.info(
+            'Prowlarr search (options): "%s" (title %s v%s)',
+            query,
+            update.get("title_id"),
+            update.get("version"),
+        )
         results = client.search(
             query,
             indexer_ids=prowlarr_cfg.get("indexer_ids") or [],
@@ -1079,6 +1086,12 @@ def _search_and_queue(
     query_candidates = _build_queries(update)
     result = None
     for query in query_candidates:
+        logger.info(
+            'Prowlarr search (queue): "%s" (title %s v%s)',
+            query,
+            update.get("title_id"),
+            update.get("version"),
+        )
         results = client.search(query, indexer_ids=indexer_ids, categories=categories, limit=search_limit)
         result = pick_best_result(
             results,
