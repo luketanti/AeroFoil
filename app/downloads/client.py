@@ -912,7 +912,7 @@ def test_download_client(client_type, url, username=None, password=None, api_key
     if not adapter:
         return False, UNSUPPORTED_CLIENT_TYPE_MESSAGE
     return adapter.test_fn(
-        client_type=client_type,
+        client_type,
         url=url,
         username=username,
         password=password,

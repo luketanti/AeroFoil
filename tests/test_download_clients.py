@@ -13,6 +13,7 @@ from app.downloads.client import (
     queue_download,
     remove_active_download,
     remove_completed_download,
+    test_download_client,
 )
 from app.downloads.manager import (
     _check_completed,
@@ -90,6 +91,37 @@ class ProwlarrProtocolTests(unittest.TestCase):
 
 
 class QueueRoutingTests(unittest.TestCase):
+    @patch("app.downloads.client.test_sabnzbd")
+    def test_test_download_client_routes_to_sabnzbd(self, test_sabnzbd_mock):
+        test_sabnzbd_mock.return_value = (True, "SABnzbd OK.")
+
+        ok, message = test_download_client(
+            "sabnzbd", "http://sab.local", api_key="secret"
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(message, "SABnzbd OK.")
+        test_sabnzbd_mock.assert_called_once_with(
+            url="http://sab.local", api_key="secret", timeout_seconds=10
+        )
+
+    @patch("app.downloads.client.test_nzbget")
+    def test_test_download_client_routes_to_nzbget(self, test_nzbget_mock):
+        test_nzbget_mock.return_value = (True, "NZBGet OK.")
+
+        ok, message = test_download_client(
+            "nzbget", "http://nzbget.local", username="user", password="secret"
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(message, "NZBGet OK.")
+        test_nzbget_mock.assert_called_once_with(
+            url="http://nzbget.local",
+            username="user",
+            password="secret",
+            timeout_seconds=10,
+        )
+
     def test_supported_download_clients_includes_torrent_and_usenet(self):
         supported = get_supported_download_clients()
         keys = {(item.get("protocol"), item.get("type")) for item in supported}
