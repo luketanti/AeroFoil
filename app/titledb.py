@@ -5,6 +5,7 @@ import os, re
 import json
 import email.utils
 import logging
+import threading
 import time
 
 from app.constants import *
@@ -337,15 +338,23 @@ def update_titledb_files(app_settings):
         _write_latest_commit(latest_remote_commit)
 
 
-def update_titledb(app_settings):
-    logger.info('Updating titledb...')
-    if not os.path.isdir(TITLEDB_DIR):
-        os.makedirs(TITLEDB_DIR, exist_ok=True)
+# Serializes concurrent runs of update_titledb (scheduled job, TitleDB
+# recovery, settings save). Without it, two runs downloaded into the same
+# fixed <file>.tmp paths and corrupted each other's files. A run that
+# waited here typically finds everything up to date and becomes a cheap
+# no-op.
+_update_titledb_run_lock = threading.Lock()
 
-    try:
-        update_titledb_files(app_settings)
-        logger.info('titledb update done.')
-    except Exception as e:
-        logger.error(f'TitleDB update failed: {e}')
-        logger.warning('TitleDB files may be missing. Some features may not work until TitleDB is successfully downloaded.')
-        raise
+def update_titledb(app_settings):
+    with _update_titledb_run_lock:
+        logger.info('Updating titledb...')
+        if not os.path.isdir(TITLEDB_DIR):
+            os.makedirs(TITLEDB_DIR, exist_ok=True)
+
+        try:
+            update_titledb_files(app_settings)
+            logger.info('titledb update done.')
+        except Exception as e:
+            logger.error(f'TitleDB update failed: {e}')
+            logger.warning('TitleDB files may be missing. Some features may not work until TitleDB is successfully downloaded.')
+            raise
