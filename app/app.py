@@ -4307,6 +4307,7 @@ def request_prowlarr_search_api():
         timeout_seconds = max(5, min(timeout_seconds, 180))
         search_limit = _get_prowlarr_search_limit(prowlarr_cfg)
         client = ProwlarrClient(prowlarr_cfg['url'], prowlarr_cfg['api_key'], timeout_seconds=timeout_seconds)
+        logger.info(f'Prowlarr search (requests page): "{full_query}" (title {title_id or "-"})')
         results = client.search(
             full_query,
             indexer_ids=prowlarr_cfg.get('indexer_ids') or [],
@@ -5088,6 +5089,7 @@ def downloads_search():
             if suffix and not full_query.lower().endswith(suffix.lower()):
                 full_query = f"{full_query} {suffix}".strip()
         client = ProwlarrClient(prowlarr_cfg['url'], prowlarr_cfg['api_key'], timeout_seconds=timeout_seconds)
+        logger.info(f'Prowlarr search (manual): "{full_query}"')
         results = client.search(
             full_query,
             indexer_ids=prowlarr_cfg.get('indexer_ids') or [],
