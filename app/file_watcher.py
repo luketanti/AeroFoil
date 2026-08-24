@@ -1,5 +1,6 @@
 from app.constants import *
 from app.utils import *
+import threading
 import time, os
 from watchdog.observers import Observer
 from watchdog.observers.polling import PollingObserver
@@ -33,6 +34,12 @@ class Watcher:
         logger.debug('Stopping observer...')
         self.observer.stop()
         self.observer.join()
+        # Best effort: dispatch any deletions still buffered for the debounced
+        # flush so a clean shutdown does not drop them.
+        try:
+            self.event_handler._flush_deleted_events()
+        except Exception:
+            logger.exception('Failed to flush pending deleted events on stop')
         logger.debug('Successfully stopped observer.')
 
     def add_directory(self, directory):
@@ -63,12 +70,22 @@ class Watcher:
         return False
 
 class Handler(FileSystemEventHandler):
-    def __init__(self, callback, stability_duration=5):
+    def __init__(self, callback, stability_duration=5, delete_batch_window=2):
         self._raw_callback = callback  # Callback to invoke for stable files
         self.directories = []
         self.stability_duration = stability_duration  # Stability duration in seconds
         self.tracked_files = {}  # Tracks files being copied
         self.debounced_check_final = self._debounce(self._check_file_stability, stability_duration)
+        # Deleted events are coalesced into one callback per burst so a mass
+        # deletion does not dispatch (and hit the database) one file at a time.
+        # The window is shorter than stability_duration, so a delete followed
+        # by a re-create of the same path is normally processed in order; the
+        # flush is trailing-only, so a sustained delete stream can postpone it
+        # past a re-create's stabilization — the periodic scan reconciles that
+        # rare case, as it already does for events lost while not running.
+        self.pending_deleted_events = []
+        self._pending_deleted_lock = threading.Lock()
+        self.debounced_flush_deleted = self._debounce(self._flush_deleted_events, delete_batch_window)
 
     def add_directory(self, directory):
         if directory not in self.directories:
@@ -99,6 +116,14 @@ class Handler(FileSystemEventHandler):
         else:
             self.tracked_files[file_path].size = current_size
             self.tracked_files[file_path].timestamp = time.time()
+
+    def _flush_deleted_events(self):
+        """Dispatch every buffered deleted event as a single batch."""
+        with self._pending_deleted_lock:
+            batch = self.pending_deleted_events
+            self.pending_deleted_events = []
+        if batch:
+            self._raw_callback(batch)
 
     def _check_file_stability(self):
         """Check for stable files and invoke the callback."""
@@ -142,7 +167,9 @@ class Handler(FileSystemEventHandler):
             library_event.type = 'deleted'
 
         if library_event.type == 'deleted':
-            self._raw_callback([library_event])
+            with self._pending_deleted_lock:
+                self.pending_deleted_events.append(library_event)
+            self.debounced_flush_deleted()
 
         else:
             # Track file on create or modify

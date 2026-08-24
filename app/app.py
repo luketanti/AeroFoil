@@ -2296,13 +2296,12 @@ def on_library_change(events):
         created_events = [e for e in events if e.type == 'created']
         modified_events = [e for e in events if e.type != 'created']
 
+        deleted_paths = []
         for event in modified_events:
             if event.type == 'moved':
                 moved_outside_library = not event.dest_path or not event.dest_path.startswith(event.directory)
                 if moved_outside_library:
-                    if file_exists_in_db(event.src_path):
-                        has_changes = True
-                    delete_file_by_filepath(event.src_path)
+                    deleted_paths.append(event.src_path)
                     continue
                 if file_exists_in_db(event.src_path):
                     # update the path
@@ -2314,10 +2313,7 @@ def on_library_change(events):
                     created_events.append(event)
 
             elif event.type == 'deleted':
-                # delete the file from library if it exists
-                if file_exists_in_db(event.src_path):
-                    has_changes = True
-                delete_file_by_filepath(event.src_path)
+                deleted_paths.append(event.src_path)
 
             elif event.type == 'modified':
                 # can happen if file copy has started before the app was running
@@ -2325,6 +2321,26 @@ def on_library_change(events):
                     continue
                 add_files_to_library(event.directory, [event.src_path])
                 has_changes = True
+
+        if deleted_paths:
+            # One transaction for the whole event batch: per-event deletes paid
+            # an existence query plus a commit (and fsync) per file, which made
+            # mass deletions crawl through the watcher one file at a time.
+            unique_deleted = list(dict.fromkeys(deleted_paths))
+            try:
+                deleted_count, apps_updated = delete_files_by_filepaths_batch(unique_deleted, commit=True)
+            except Exception as e:
+                # Keep the watcher thread alive; the periodic scan reconciles
+                # anything this batch failed to remove.
+                db.session.rollback()
+                logger.error(f"Failed to remove deleted files from the database: {e}")
+                deleted_count, apps_updated = 0, 0
+            if deleted_count > 0:
+                has_changes = True
+                logger.info(
+                    f"Removed {deleted_count} deleted files from the database "
+                    f"({apps_updated} app references updated)."
+                )
 
         if created_events:
             directories = list(set(e.directory for e in created_events))
