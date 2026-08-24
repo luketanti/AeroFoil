@@ -635,7 +635,28 @@
                     scrollToResults();
                 }
             })
-            .catch(() => {});
+            .catch(() => {
+                showLoadError();
+            });
+    }
+
+    function showLoadError() {
+        const gameGrid = $('#gameGrid');
+        gameGrid.removeClass('icon-grid list-view').addClass('row g-4');
+        gameGrid.empty();
+        const errorCol = $(`
+            <div class="col-12 text-center py-5">
+                <i class="bi bi-exclamation-triangle text-warning fs-1 d-block mb-3"></i>
+                <p class="text-muted mb-3">Failed to load the game library. The server may still be starting up.</p>
+                <button type="button" class="btn btn-primary library-retry-btn">
+                    <i class="bi bi-arrow-clockwise"></i> Retry
+                </button>
+            </div>
+        `);
+        errorCol.find('.library-retry-btn').on('click', function () {
+            refreshGames();
+        });
+        gameGrid.append(errorCol);
     }
 
     function showLoadingPlaceholders() {
@@ -959,7 +980,7 @@
             const genre = escapeHtml(getPrimaryGenre(game));
             btn.innerHTML = `
                 <div class="discover-tile-body">
-                    <img class="discover-tile-img" src="${iconSrc}" alt="">
+                    <img class="discover-tile-img" src="${iconSrc}" alt="" loading="lazy" decoding="async">
                     <div class="discover-tile-title">${title}</div>
                     <div class="discover-tile-subtitle">${genre}</div>
                 </div>
@@ -1124,7 +1145,10 @@
             const cacheBannerSrc = game.title_id ? `/api/shop/banner/${game.title_id}?size=web` : '';
             const bannerFallback = '/static/placeholder-banner.svg';
             card.attr('data-backdrop-src', cacheBannerSrc || bannerFallback);
-            const img = $('<img class="card-img"></img>').attr('src', cacheBannerSrc || bannerFallback);
+            const img = $('<img class="card-img"></img>')
+                .attr('loading', 'lazy')
+                .attr('decoding', 'async')
+                .attr('src', cacheBannerSrc || bannerFallback);
             img.on('error', function () {
                 if (!this.dataset.triedFallback) {
                     this.dataset.triedFallback = '1';
@@ -1217,7 +1241,7 @@
 
             iconBtn.html(`
                 <div class="discover-tile-body">
-                    <img class="library-icon-img" src="${cacheIconSrc || iconFallback}" alt="">
+                    <img class="library-icon-img" src="${cacheIconSrc || iconFallback}" alt="" loading="lazy" decoding="async">
                     <div class="discover-tile-title" data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="${title}">${title}</div>
                     <div class="discover-tile-subtitle">${genre}</div>
                 </div>
