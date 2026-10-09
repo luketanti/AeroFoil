@@ -6640,15 +6640,15 @@ def get_all_titles_api():
             'release_date': 'Unknown',
         })
 
-    # Covers both branches: the not-use_name_sort case always needs this, and the
-    # use_name_sort cache-hit case does too, since info_cache is only pre-populated
-    # for the full set on a cache miss (see above). Redundant but cheap on a miss.
-    all_lookup_ids.update([tid for tid in title_id_by_fk.values() if tid])
-    all_lookup_ids.update([aid for aid in dlc_app_ids if aid])
-    with titles.titledb_session() as titledb_loaded:
-        if titledb_loaded:
-            for lookup_id in all_lookup_ids:
-                info_cache[lookup_id] = titles.get_game_info(lookup_id) or {}
+    # A cold name sort already loaded metadata; fetch only missing page IDs.
+    page_lookup_ids = {tid for tid in title_id_by_fk.values() if tid}
+    page_lookup_ids.update(aid for aid in dlc_app_ids if aid)
+    missing_lookup_ids = page_lookup_ids.difference(info_cache)
+    if missing_lookup_ids:
+        with titles.titledb_session() as titledb_loaded:
+            if titledb_loaded:
+                for lookup_id in missing_lookup_ids:
+                    info_cache[lookup_id] = titles.get_game_info(lookup_id) or {}
 
     with titles.titledb_session() as titledb_loaded:
         if titledb_loaded:
