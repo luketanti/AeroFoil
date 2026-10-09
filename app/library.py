@@ -485,8 +485,10 @@ def identify_library_files(library):
                         file.last_attempt = datetime.datetime.now()
                     processed += 1
 
+                    # Commit per file: an open transaction holds SQLite's write
+                    # lock while the next (slow) file is identified.
+                    db.session.commit()
                     if processed % _IDENTIFY_COMMIT_INTERVAL == 0:
-                        db.session.commit()
                         db.session.expunge_all()
                         _diag_sample_identity_map(phase)
                         if processed % (_IDENTIFY_COMMIT_INTERVAL * 10) == 0:
