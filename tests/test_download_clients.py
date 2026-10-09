@@ -2763,12 +2763,65 @@ class ManagedCompletionStateTests(unittest.TestCase):
         _state_lock_mock,
         delete_payload_mock,
     ):
-        ok, message = remove_duplicate_download("dup-1")
+        snapshot = {
+            "active_by_protocol": {"torrent": {"items": []}},
+            "errors_by_protocol": {},
+        }
+        with patch.object(downloads_manager, "load_settings", return_value={}), \
+                patch.object(downloads_manager, "_get_download_activity_snapshot", return_value=snapshot):
+            ok, message = remove_duplicate_download("dup-1")
 
         self.assertTrue(ok)
         self.assertEqual(message, "Deleted rejected duplicate file.")
         self.assertEqual(downloads_manager._state.get("duplicates"), [])
         delete_payload_mock.assert_called_once_with("X:\\fixture-root\\downloads\\Example Release")
+
+    def test_remove_duplicate_download_refuses_when_activity_cannot_be_verified(self):
+        cases = (
+            ("snapshot exception", {}, {"side_effect": RuntimeError("client unavailable")}),
+            ("settings exception", {"side_effect": RuntimeError("settings unavailable")}, {}),
+            ("snapshot error", {}, {"return_value": {
+                "active_by_protocol": {"torrent": {"items": []}},
+                "errors_by_protocol": {"torrent": ["active: timeout"]},
+            }}),
+        )
+        for label, settings_args, snapshot_args in cases:
+            with self.subTest(label):
+                state = {"duplicates": [{
+                    "id": "dup-unverified",
+                    "path": "X:\\fixture-root\\downloads\\Example Release",
+                }]}
+                with patch.object(downloads_manager, "_state", state), \
+                        patch.object(downloads_manager, "_state_lock"), \
+                        patch.object(downloads_manager, "_ensure_downloads_state_loaded"), \
+                        patch.object(downloads_manager, "load_settings", **({"return_value": {}} | settings_args)), \
+                        patch.object(downloads_manager, "_get_download_activity_snapshot", **snapshot_args), \
+                        patch.object(downloads_manager, "_delete_download_payload") as delete_mock, \
+                        patch.object(downloads_manager, "_persist_downloads_state_locked") as persist_mock:
+                    ok, message = remove_duplicate_download("dup-unverified")
+
+                self.assertFalse(ok)
+                self.assertIn("Could not verify downloader activity", message)
+                self.assertIn("dismiss", message)
+                self.assertEqual(len(state["duplicates"]), 1)
+                delete_mock.assert_not_called()
+                persist_mock.assert_not_called()
+
+    @patch("app.downloads.manager._delete_download_payload", return_value=(True, None))
+    @patch("app.downloads.manager.load_settings", return_value={})
+    @patch("app.downloads.manager._get_download_activity_snapshot", return_value={
+        "active_by_protocol": {"torrent": {"items": [{"name": "Example Release"}]}},
+    })
+    @patch("app.downloads.manager._state_lock")
+    @patch("app.downloads.manager._state", {
+        "duplicates": [{"id": "dup-active", "path": "X:\\fixture-root\\downloads\\Example Release"}],
+    })
+    def test_remove_duplicate_download_refuses_while_still_downloading(self, _lock, _snapshot, _settings, delete_mock):
+        ok, message = remove_duplicate_download("dup-active")
+
+        self.assertFalse(ok)
+        self.assertIn("Still downloading", message)
+        delete_mock.assert_not_called()
 
     @patch("app.downloads.manager._state_lock")
     @patch("app.downloads.manager._state", {
