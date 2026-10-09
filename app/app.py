@@ -2622,7 +2622,7 @@ def _block_frozen_web_ui():
             return None
 
         message = (getattr(current_user, 'frozen_message', None) or '').strip() or 'Account is frozen.'
-        if path.startswith('/api/'):
+        if path.startswith('/api/') or (path == '/' and request.method == 'OPTIONS'):
             return jsonify({'success': False, 'error': message}), 403
         return render_template('frozen.html', title='Library', message=message)
     except Exception:
@@ -3877,8 +3877,94 @@ def access_shop():
 def access_shop_auth():
     return access_shop()
 
-@app.route('/')
+def _sphaira_access_error():
+    """Use shop credentials without the Tinfoil encryption/Hauth response format."""
+    _maybe_sync_request_settings()
+    shop = app_settings.get('shop') or {}
+    if bool(shop.get('external_tinfoil_only')):
+        remote = _effective_remote_addr()
+        if remote and not _is_private_ip(remote):
+            return jsonify({'error': 'External access is restricted to Tinfoil/CyberFoil clients.'}), 403
+    if request.authorization is not None:
+        success, error, _ = basic_auth(request)
+        if not success:
+            return jsonify({'error': error}), 401
+    elif current_user.is_authenticated:
+        if bool(getattr(current_user, 'frozen', False)) or not current_user.has_access('shop'):
+            return jsonify({'error': 'This account does not have access to the shop.'}), 403
+    elif not shop.get('public', False):
+        success, error, _ = basic_auth(request)
+        if not success:
+            return jsonify({'error': error}), 401
+    return None
+
+
+def sphaira_handshake():
+    denied = _sphaira_access_error()
+    if denied is not None:
+        return denied
+    from app import discovery
+    shop = app_settings.get('shop') or {}
+    return jsonify({
+        'uid': discovery._server_uid(), 'name': shop.get('discovery_name') or 'AeroFoil',
+        'version': APP_VERSION, 'protocol_version': 1,
+        'motd': _render_motd_template(shop.get('motd') or '') if shop.get('motd_enabled', True) else '',
+        'public': bool(shop.get('public', False)), 'remote': shop.get('host') or '',
+        'features': {'shop': True, 'resumable_download': True, 'dumps_upload': False,
+                     'save_backup': False, 'resumable_upload': False},
+    })
+
+
+@app.post('/api/graphql')
+def sphaira_graphql_api():
+    denied = _sphaira_access_error()
+    if denied is not None:
+        return denied
+    from app.sphaira import Catalogue, execute
+    cap, block_unrated = _user_rating_cap()
+    catalogue = Catalogue(cap, block_unrated, _title_allowed, _file_blocked_by_cap)
+    with titles.titledb_session():
+        return jsonify(execute(request.get_json(silent=True), catalogue))
+
+
+@app.get('/api/shop/screenshot/<title_id>/<int:position>')
+def sphaira_screenshot_api(title_id, position):
+    denied = _sphaira_access_error()
+    if denied is not None:
+        return denied
+    from app.sphaira import SCREENSHOT_SIZES, cached_screenshot, screenshot_source
+    title_id = str(title_id).strip().upper()
+    if not re.fullmatch(r'[0-9A-F]{16}', title_id):
+        return Response(status=404)
+    size = str(request.args.get('size') or 'client').upper()
+    if size not in SCREENSHOT_SIZES:
+        return jsonify({'error': 'Invalid screenshot size.'}), 400
+    cap, block_unrated = _user_rating_cap()
+    with titles.titledb_session():
+        info = titles.get_game_info(title_id) or {}
+    if not _title_allowed(cap, _coerce_rating_value(info.get('rating')), block_unrated):
+        return Response(status=403)
+    screenshots = info.get('screenshots') or []
+    if position >= len(screenshots):
+        return Response(status=404)
+    source = screenshot_source(screenshots[position])
+    if not source:
+        return Response(status=404)
+    try:
+        path = cached_screenshot(os.path.join(CACHE_DIR, 'screenshots'), title_id, position, source, size)
+    except Exception:
+        logger.warning('Could not load screenshot %s for title %s.', position, title_id, exc_info=True)
+        return jsonify({'error': 'Screenshot is unavailable.'}), 502
+    response = send_from_directory(os.path.dirname(path), os.path.basename(path))
+    # The URL is positional, so it may point at new artwork after a metadata update.
+    response.headers['Cache-Control'] = 'private, max-age=3600'
+    return response
+
+
+@app.route('/', methods=['GET', 'OPTIONS'])
 def index():
+    if request.method == 'OPTIONS':
+        return sphaira_handshake()
     is_shop_client = _is_shop_client_request()
     is_allowed_external_client = _is_shop_client_request()
     tinfoil_only_mode = bool((app_settings.get('shop') or {}).get('tinfoil_only_mode', False))

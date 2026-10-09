@@ -6,7 +6,6 @@
 ![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-8A2BE2)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?logo=discord&logoColor=white)](https://discord.gg/gGy7hWxJeP)
 
-
 AeroFoil is a Personal library manager that turns your library into a fully customizable, self-hosted Remote. The goal of this project is to manage your library, identify any missing content (DLCs or updates) and provide a user friendly way to browse your content. Some of the features include:
 
  - multi user authentication
@@ -37,6 +36,7 @@ The project is still in development, expect things to break or change without no
 - [Deployment notes](#deployment-notes)
   - [Reverse proxy](#reverse-proxy-real-client-ip-activity-page)
   - [TitleDB sources](#titledb-sources-and-downloads)
+- [LAN discovery](#lan-discovery)
 - [Roadmap](#roadmap)
 
 <a id="installation"></a>
@@ -44,6 +44,7 @@ The project is still in development, expect things to break or change without no
 <summary><strong>Installation</strong></summary>
 
 ## Using Docker
+
 ### Docker run
 
 Running this command will start the remote on port `8465` with the library in `/your/game/directory`:
@@ -58,8 +59,15 @@ Running this command will start the remote on port `8465` with the library in `/
 The remote is now accessible with your computer/server IP and port, i.e. `http://localhost:8465` from the same computer or `http://192.168.1.100:8465` from a device in your network.
 
 ### Docker compose
+
+The Compose examples use host networking for [LAN discovery](#lan-discovery).
+Use a Docker platform that supports LAN broadcast delivery in host mode.
+For bridge networking, remove `network_mode: host`, publish the TCP web port
+with `ports: ["8465:8465"]`, and configure clients with the server address manually.
+
 Create a file named `docker-compose.yml` with the following content:
-```
+
+```yaml
 version: "3"
 
 services:
@@ -85,9 +93,9 @@ services:
       - ./data:/app/data
       - ./conversion-tmp:/app/conversion-tmp
       - /your/downloads/directory:/downloads
-    ports:
-      - "8465:8465"
+    network_mode: host
 ```
+
 > [!NOTE]
 > You can control the `UID` and `GID` of the user running the app in the container with the `PUID` and `PGID` environment variables. By default the user is created with `1000:1000`. If you want to have the same ownership for mounted directories, you need to set those variables with the UID and GID returned by the `id` command.
 
@@ -98,6 +106,7 @@ You can then create and start the container with the command (executed in the sa
 This is useful if you don't want to remember the `docker run` command and want a persistent, reproducible container configuration.
 
 ## Environment variables
+
 New `AEROFOIL_*` variables are preferred. Legacy `OWNFOIL_*` names are still accepted for backward compatibility.
 
 - `PUID` / `PGID`: control the user ID/group ID inside the container (default `1000:1000`).
@@ -133,26 +142,34 @@ New `AEROFOIL_*` variables are preferred. Legacy `OWNFOIL_*` names are still acc
 - `AEROFOIL_USE_FLASK_DEV`: set to `true`/`1` to force Flask dev server instead of Waitress.
 - `AEROFOIL_STATIC_MAX_AGE_S`: static asset cache max-age in seconds (legacy `OWNFOIL_STATIC_MAX_AGE_S` also supported; default `3600`).
 - `WATCHDOG_POLLING`: set to `1`/`true`/`yes` to force polling-based file watcher observer.
-- `AEROFOIL_WATCHDOG_POLL_INTERVAL_S`: delay between recursive filesystem snapshots when polling is enabled (default `10` seconds; range `1`�`3600`). Increase to `30` or `60` for lower idle filesystem/CPU overhead on large or network libraries. Longer intervals delay detection of external changes; snapshot time and file-stability checks add to that delay. Native watching is unaffected.
+- `AEROFOIL_WATCHDOG_POLL_INTERVAL_S`: delay between recursive filesystem snapshots when polling is enabled (default `10` seconds; range `1`-`3600`). Increase to `30` or `60` for lower idle filesystem/CPU overhead on large or network libraries. Longer intervals delay detection of external changes; snapshot time and file-stability checks add to that delay. Native watching is unaffected.
 - `LOG_LEVEL`: Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL (default: INFO)
 
 ## Using Python
+
 Clone the repository using `git`, install the dependencies and you're good to go:
-```
+
+```bash
 $ git clone https://github.com/luketanti/aerofoil
 $ cd aerofoil
 $ pip install -r requirements.txt
 $ python app/app.py
 ```
+
 To update the app you will need to pull the latest commits.
 
 By default, `python app/app.py` runs AeroFoil with the Waitress WSGI server (production-oriented). Set `AEROFOIL_USE_FLASK_DEV=true` only if you need the Flask development server for debugging.
 
 ## CyberFoil setup
+
 In CyberFoil, set the AeroFoil Remote URL in Settings:
+
  - URL: `http://<server-ip>:8465` (or `https://` if using an SSL-enabled reverse proxy) and port 443
  - Username: username as created in AeroFoil settings (if the remote is private)
  - Password: password as created in AeroFoil settings (if the remote is private)
+
+See [CyberFoil virtual compressed streaming](#cyberfoil-virtual-compressed-streaming)
+for server-side decompression of compressed library files.
 
 ## Cheats
 
@@ -169,7 +186,9 @@ Enable **Show the Cheats section in CyberFoil** at the top of the manager and sa
 Cheat management is admin-only. In **Users**, enable the **Cheats** permission for each account that may browse or download cheats from a private shop. Disabling it hides the CyberFoil Cheats section and denies the cheat APIs for that user. Public shops cannot apply this permission because requests have no per-user identity.
 
 ## Save backups (Save Sync)
+
 AeroFoil supports per-user save backup management when the user has the **Backup** flag enabled:
+
 - Save archives are stored per user under `data/saves/<username>/`.
 - Multiple backup versions per title are supported.
 - Each uploaded version can include a note.
@@ -178,13 +197,16 @@ AeroFoil supports per-user save backup management when the user has the **Backup
   - AeroFoil web page `Save Data Backups` (title picker + upload, download, delete).
 
 Save sync API endpoints:
+
 - `GET /api/saves/list`
 - `POST /api/saves/upload/<title_id>`
 - `GET /api/saves/download/<title_id>/<save_id>.zip`
 - `DELETE /api/saves/delete/<title_id>/<save_id>` (also accepts `POST` for compatibility)
 
 ## Requests
+
 AeroFoil supports title request tracking across users:
+
 - A game request entry is shared by title, and multiple users can be linked to that request.
 - Users can view their own requests and current request state in the Web UI.
 - Admins can review all requests, run download search from request entries, deny requests, and delete requests.
@@ -199,9 +221,11 @@ AeroFoil supports title request tracking across users:
 Once AeroFoil is running you can access the Remote Web UI by navigating to the `http://<computer/server IP>:8465`.
 
 ## User administration
+
 AeroFoil requires an `admin` user to be created to enable Authentication for your Remote. Go to the `Settings` to create a first user that will have admin rights. Then you can add more users to your remote the same way.
 
 ## Content rating controls (ESRB)
+
 AeroFoil can restrict each user's catalog and downloads using the ESRB age rating supplied by TitleDB. The restriction is applied per user: users without a maximum rating remain unrestricted.
 
 The available maximum ratings are:
@@ -215,6 +239,7 @@ The available maximum ratings are:
 When a user has a maximum rating, titles above that limit are hidden from the web library, discovery sections, and the Tinfoil/Remote catalog. Direct download requests for blocked content are also rejected.
 
 ### Setup
+
 1. Open **Users** and create or edit the account you want to restrict.
 2. Set **Max rating** to the highest ESRB tier that user may access. Select **No limit** to leave the user unrestricted.
 3. In **Settings**, choose whether **Hide unrated titles from age-capped users** should remain enabled. It is enabled by default and recommended for child accounts.
@@ -222,17 +247,21 @@ When a user has a maximum rating, titles above that limit are hidden from the we
 With that option enabled, homebrew, unidentified files, and titles without a known TitleDB rating are hidden from users who have a maximum rating. Disable it only if you want unrated content to remain visible to those users.
 
 ## Library administration
+
 In the `Settings` page under the `Library` section, you can add directories containing your content. You can then manually trigger the library scan: AeroFoil will scan the content of the directories and try to identify every supported file (currently `nsp`, `nsz`, `xci`, `xcz`).
 There is watchdog in place for all your added directories: files moved, renamed, added or removed will be reflected directly in your library.
 
 ## Library management
+
 In the `Manage` page, you can organize your library structure, delete older update files, delete scoped library content, clean up orphaned add-ons, and convert `nsp`/`xci` to `nsz`.
 
 ## Library browser UI
+
 - Card view: the Base/Update/DLC status icons are displayed above the action buttons.
 - Icon view: the `Game info` button is shown as an overlay on the game tile.
 
 ### Discovery sections (`New` and `Recommended`)
+
 The home-page discovery rows are generated from **owned BASE titles only** (not update/DLC rows), and only when a real library file is linked.
 
 - `New`: sorted by most recent library file id (newest first), then the first items are used for the section.
@@ -241,7 +270,9 @@ The home-page discovery rows are generated from **owned BASE titles only** (not 
 For the Web UI, these sections are returned through `/api/titles` as `discovery.newest` and `discovery.recommended`.
 
 ## Game info (TitleDB)
+
 The `Game info` modal uses TitleDB metadata:
+
 - `description`: shown as the game summary.
 - `screenshots`: displayed in a grid; click a screenshot to open it larger.
 - `DLC search`: admins can trigger a download search for related add-ons directly from the details flow.
@@ -254,6 +285,7 @@ AeroFoil will download the TitleDB descriptions/screenshot dataset on demand to 
 > Once the download finishes, refresh the page and names/metadata will appear.
 
 Conversion details:
+
 - Uses the installed Python `nsz` package (with progress output).
 - Uses the same `keys.txt` uploaded in the `Settings` page.
 - Optional conversion staging directory lets you run temporary conversion IO on a different disk/pool before finalizing output into the library path.
@@ -262,9 +294,11 @@ Conversion details:
 - The `Verbose` checkbox shows detailed task output; otherwise the task output stays clean.
 
 ## Automatic update downloads (Prowlarr + Download Clients)
+
 AeroFoil can automatically search for missing updates using Prowlarr, route torrent results to a configured torrent client, route usenet results to a configured usenet client, and ingest completed downloads back into the library. The UI is modeled after apps like Sonarr/Radarr with explicit connection tests.
 
 ### Setup
+
 1. Open the `Settings` page and scroll to the **Downloads** section.
 2. Enable **Automatic downloads** and configure:
    - **Search interval (minutes)**: how often AeroFoil will look for missing updates.
@@ -293,6 +327,7 @@ AeroFoil can automatically search for missing updates using Prowlarr, route torr
    - Use **Test usenet client** to validate connectivity.
 
 ### Notes
+
 - Prowlarr is used for searching and ranking results; AeroFoil routes each match to the configured torrent or usenet client based on the result protocol.
 - Warnings do not block tests; they highlight misconfigurations (e.g. missing indexer IDs or invalid download paths).
 - The downloader runs on a schedule and respects the configured interval, skipping runs if the interval has not elapsed.
@@ -305,13 +340,16 @@ AeroFoil can automatically search for missing updates using Prowlarr, route torr
 - Successfully imported items are removed from the pending queue and no longer shown in Downloads (this page is for active/pending state, not historical completed items).
 
 ## Titles configuration
+
 In the `Settings` page under the `Titles` section is where you specify the language of your Remote (currently the same for all users).
 
 This is where you can also upload your `console keys` file to enable content identification using decryption, instead of only using filenames. If you do not provide keys, AeroFoil expects the files to be named `[APP_ID][vVERSION]`.
 
 ## Remote customization
+
 In the `Settings` page under the Remote section is where you customize your Remote, including the message displayed when accessing the remote from Tinfoil and whether the remote is private or public.
 MOTD supports variables and optional API-backed variables:
+
 - Built-in variables: `{username}`, `{user_id}`, `{is_admin}`, `{shop_access}`, `{backup_access}`, `{frozen}`, `{client_uid}`, `{remote_addr}`, `{user_agent}`, `{host}`, `{path}`, `{date}`, `{time}`, `{datetime}`, `{timestamp}`.
 - Optional custom MOTD API URL:
   - Plain text response is exposed as `{api_text}`.
@@ -320,12 +358,37 @@ MOTD supports variables and optional API-backed variables:
 The encryption option only affects the Tinfoil payload; the web interface and admin UI remain accessible as normal.
 Encryption uses the Tinfoil public key and AES, and requires the `pycryptodome` dependency.
 `Fast transfer mode` prioritizes throughput for `/api/get_game` by skipping per-chunk transfer accounting; Activity live byte counters and exact transfer bytes may be less precise.
-`CyberFoil virtual compressed streaming` controls how CyberFoil receives compressed Switch content:
-- Enabled (default): `.nsz`, `.ncz`, and `.xcz` files are streamed as virtual uncompressed `.nsp`, `.nca`, and `.xci` data, so CyberFoil does not need to decompress them after download.
-- Disabled: AeroFoil serves the original compressed files unchanged, matching the legacy behavior.
 
-Virtual streams support CyberFoil's single byte-range requests. AeroFoil logs each use as `CyberFoil virtual stream: <source> -> <virtual output>`.
-The same section also includes login protection controls: temporary IP lockout after repeated failed auth attempts, a permanent IP/CIDR blacklist, and an admin view to list and unlock current temporary lockouts.
+### CyberFoil virtual compressed streaming
+
+Enable or disable **CyberFoil virtual compressed streaming** in
+**Settings > Shop > Access And Delivery**. It is enabled by default.
+
+- Enabled: AeroFoil decompresses content as it is requested and sends CyberFoil
+  a virtual uncompressed file: `.nsz` -> `.nsp`, `.ncz` -> `.nca`, and `.xcz` -> `.xci`.
+  CyberFoil receives uncompressed data for installation.
+- Disabled: AeroFoil sends the original compressed file, leaving decompression
+  to the client.
+
+The compressed library file stays unchanged. AeroFoil does not save a full
+uncompressed copy or use the conversion staging directory for virtual streaming.
+This shifts decompression work to the server and transfers the uncompressed
+size over the network, so server CPU and network speed affect throughput.
+
+The feature applies to requests identified as CyberFoil by their `User-Agent`.
+Sphaira, Tinfoil, and ordinary web downloads receive the original compressed files.
+
+Virtual streams support one byte range per request, including open-ended and
+suffix ranges. Invalid or multiple ranges return HTTP `416`. NSZ range requests
+can seek within block-compressed NCZ entries; solid compression may require
+decompressing and discarding earlier data. NCZ and XCZ ranges are read from
+the beginning of the virtual stream.
+
+AeroFoil writes `CyberFoil virtual stream: <source> -> <virtual output>` to
+the application log for each virtual response. If creating the response fails,
+it logs the error and falls back to serving the original compressed file.
+
+The Shop settings also include login protection controls: temporary IP lockout after repeated failed auth attempts, a permanent IP/CIDR blacklist, and an admin view to list and unlock current temporary lockouts.
 
 </details>
 
@@ -348,11 +411,13 @@ The same section also includes login protection controls: temporary IP lockout a
 - Update the container with `docker pull luketanti/aerofoil:latest` and restart it.
 
 ## Reverse proxy: real client IP (Activity page)
+
 If you run AeroFoil behind a reverse proxy (e.g. Nginx Proxy Manager), AeroFoil will only trust `X-Forwarded-For` when explicitly configured.
 
 You can set this via `settings.yaml` or with environment variables (`AEROFOIL_TRUST_PROXY_HEADERS` and `AEROFOIL_TRUSTED_PROXIES`).
 
 In `config/settings.yaml`:
+
 ```yaml
 security:
   trust_proxy_headers: true
@@ -364,6 +429,7 @@ security:
 Set `trusted_proxies` to your proxy IP(s) and/or your Docker network subnet so the Activity page shows the WAN/client IP instead of the proxy's LAN IP.
 
 ## TitleDB sources and downloads
+
 - TitleDB artifacts are downloaded separately from the metadata dataset.
 - The descriptions/screenshot dataset (`US.en.json`) is downloaded to `/app/data/titledb/US.en.json` and is not part of the TitleDB artifacts zip.
 - The TitleDB artifacts zip may be very large (multi-GB) depending on the upstream workflow output.
@@ -375,6 +441,7 @@ Set `trusted_proxies` to your proxy IP(s) and/or your Docker network subnet so t
 <summary><strong>Roadmap</strong></summary>
 
 Planned feature, in no particular order.
+
  - Library browser:
     - [x] Add "details" view for every content, to display versions etc
  - Library management:
@@ -394,22 +461,70 @@ Planned feature, in no particular order.
 
 </details>
 
-### Sphaira LAN discovery
+### LAN discovery
 
-Enable **Settings > Shop > Access And Delivery → Sphaira LAN discovery** to advertise
-this server to Sphaira on the local IPv4 network. Discovery is disabled by default.
+Enable **Settings > Shop > Access And Delivery → LAN discovery** to advertise
+this server to compatible clients on the local IPv4 network. Sphaira is compatible
+with LAN discovery. Discovery is disabled by default.
 You can choose a discovery name and advertised web port; `0` uses the application
 port (`AEROFOIL_PORT`, with the existing legacy fallback, default `8465`). If Docker
 maps a different host TCP port, set the advertised web port to that host port.
 
-Allow inbound **UDP 8465** in the host firewall. Both Compose examples publish
-`8465:8465/udp` alongside the existing TCP web port. Broadcast delivery depends on
-your Docker platform/network; if bridge networking does not deliver LAN broadcasts,
-use host networking on a supported platform or enter the server address manually.
+Allow inbound **UDP 8465** and the TCP web port in the host firewall. Both Compose
+files use `network_mode: host` so LAN broadcasts can reach the container on
+supported platforms. Host networking uses the application port directly and
+does not use port mappings. If your platform cannot deliver LAN broadcasts,
+use bridge networking with a published TCP web port and enter the server address manually.
 Guest Wi-Fi isolation and separate subnets can also prevent discovery.
+
+#### Docker networking and discovery
+
+Publishing TCP and UDP port `8465` does not guarantee that LAN discovery broadcasts
+reach a container on a Docker bridge network. If the server is reachable by its
+address but is absent from the client's discovery list, use host networking where
+your Docker platform supports LAN broadcast delivery:
+
+```yaml
+services:
+  aerofoil:
+    image: luketanti/aerofoil:latest
+    network_mode: host
+    # Keep your existing environment and volume mappings.
+```
+
+In your Compose configuration, add `network_mode: host` at the same level as
+`image:`, `environment:` and `volumes:`. Remove the service's `ports:` block and
+`networks:` entry. Remove the top-level network declaration only if no other
+service uses it, then redeploy to recreate the container.
+
+The web interface uses the Docker host's LAN IP and application port (default
+`8465`). Host networking does not use port mappings; if you previously mapped a
+different web port, set `AEROFOIL_PORT` to that port. Leave the advertised web port
+at `0` to use the application port. Allow inbound UDP `8465` from your LAN in the
+host firewall, and enable discovery in this server's AeroFoil settings.
+
+If a reverse proxy previously reached AeroFoil by container name on a shared
+Docker network, update its upstream address to the Docker host's LAN IP and
+AeroFoil's application port.
+
+Host mode is one option; discovery requires LAN broadcast delivery to the container.
+Macvlan/IPvlan networks configured for LAN broadcast delivery or a broadcast relay
+can also support discovery. Bridge networking remains suitable for manually
+configured server addresses.
 
 Discovery advertises the name, version, public-shop flag, web port and configured
 remote host. Its stable server ID is stored in `config/discovery_uid`; preserve that
 file with the configuration volume. Existing authentication and download routes
-remain in use. Discovery alone does not provide the GraphQL catalogue required by
-Sphaira's dedicated Ownfoil menu.
+remain in use. Sphaira's dedicated Ownfoil menu can connect using the `OPTIONS /`
+handshake and read-only `/api/graphql` catalogue. It supports paged browsing,
+search, installed-title filters, updates, DLC, title details and download links.
+Screenshots are fetched and cached by AeroFoil, then served to Sphaira as JPEG
+images through the server, so the console does not need direct access to the
+upstream image CDN. Page and full-screen views use separate image sizes.
+Private shops use the same shop username/password as other clients. Frozen
+accounts and per-user age limits also apply. The external Tinfoil/CyberFoil-only
+restriction, when enabled, continues to block native Sphaira access off the LAN.
+Install the updated requirements before restarting a local Python deployment.
+No database migration is required. Sorting by date added uses file insertion
+order; display-version labels are unavailable in the current library schema.
+Native dump uploads and save backups are not advertised by this integration.

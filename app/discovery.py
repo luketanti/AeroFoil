@@ -1,4 +1,4 @@
-"""Sphaira-compatible IPv4 LAN discovery, independent of the HTTP API."""
+"""IPv4 LAN discovery for compatible clients, independent of the HTTP API."""
 import json
 import logging
 import os

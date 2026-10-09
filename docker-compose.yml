@@ -3,6 +3,13 @@ version: "3"
 services:
   aerofoil:
     container_name: aerofoil
+    # Share the host network so LAN discovery broadcasts reach the container.
+    network_mode: host
+    # If LAN discovery is not required, use bridge networking with port mappings:
+    # remove or comment out network_mode above, then uncomment ports below.
+    # ports:
+    #   - "8465:8465/tcp"
+    #   - "8465:8465/udp" # Optional; does not guarantee LAN broadcast delivery.
     image: luketanti/aerofoil:latest
     environment:
       # For write permission in config directory
@@ -21,6 +28,3 @@ services:
       - ./config:/app/config
       - ./data:/app/data
       - ./conversion-tmp:/app/conversion-tmp
-    ports:
-      - "8465:8465"
-      - "8465:8465/udp" # Optional Sphaira LAN discovery
