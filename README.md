@@ -393,3 +393,23 @@ Planned feature, in no particular order.
     - [x] Automated update downloader pipeline (search -> download -> ingest)
 
 </details>
+
+### Sphaira LAN discovery
+
+Enable **Settings > Shop > Access And Delivery → Sphaira LAN discovery** to advertise
+this server to Sphaira on the local IPv4 network. Discovery is disabled by default.
+You can choose a discovery name and advertised web port; `0` uses the application
+port (`AEROFOIL_PORT`, with the existing legacy fallback, default `8465`). If Docker
+maps a different host TCP port, set the advertised web port to that host port.
+
+Allow inbound **UDP 8465** in the host firewall. Both Compose examples publish
+`8465:8465/udp` alongside the existing TCP web port. Broadcast delivery depends on
+your Docker platform/network; if bridge networking does not deliver LAN broadcasts,
+use host networking on a supported platform or enter the server address manually.
+Guest Wi-Fi isolation and separate subnets can also prevent discovery.
+
+Discovery advertises the name, version, public-shop flag, web port and configured
+remote host. Its stable server ID is stored in `config/discovery_uid`; preserve that
+file with the configuration volume. Existing authentication and download routes
+remain in use. Discovery alone does not provide the GraphQL catalogue required by
+Sphaira's dedicated Ownfoil menu.

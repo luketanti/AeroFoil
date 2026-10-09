@@ -53,6 +53,7 @@ import zipfile
 import tempfile
 from urllib.parse import quote
 
+from app import discovery
 from app import compressed_stream
 
 from app.db import add_access_event, get_access_events
@@ -4794,6 +4795,7 @@ def set_shop_settings_api():
     if not success:
         return jsonify({'success': False, 'errors': errors}), 400
     set_shop_settings(shop_data)
+    discovery.reconcile()
     if security_data:
         set_security_settings(security_data)
     reload_conf()
@@ -8153,6 +8155,7 @@ if __name__ == '__main__':
     port = _read_int_env('AEROFOIL_PORT', _read_int_env('OWNFOIL_PORT', 8465, minimum=1, maximum=65535), minimum=1, maximum=65535)
     use_flask_dev_server = str(os.environ.get('AEROFOIL_USE_FLASK_DEV') or os.environ.get('OWNFOIL_USE_FLASK_DEV') or '').strip().lower() in ('1', 'true', 'yes', 'on')
 
+    discovery.reconcile(http_port=port)
     try:
         if waitress_serve is not None and not use_flask_dev_server:
             wsgi_threads = _read_int_env('AEROFOIL_WSGI_THREADS', _read_int_env('OWNFOIL_WSGI_THREADS', 32, minimum=1, maximum=512), minimum=1, maximum=512)
@@ -8202,6 +8205,7 @@ if __name__ == '__main__':
     finally:
         # Shutdown server
         logger.info('Shutting down server...')
+        discovery.stop()
         try:
             watcher.stop()
             watcher_thread.join(timeout=5)
