@@ -3,115 +3,48 @@ name: Build and Push Docker Image (Release)
 on:
   push:
     tags:
-      - 'v*.*.*'  # Only trigger on version tags like v1.0.0, v2.1.3, etc.
+      - 'v*.*.*'
 
 concurrency:
   group: docker-release-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
+  metadata:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tags: ${{ steps.meta.outputs.tags }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Compute tags and metadata
+      - name: Compute release tags
         id: meta
         run: |
-          # Extract version from tag (removes 'v' prefix)
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "aerofoil_version=v$VERSION" >> "$GITHUB_OUTPUT"
-          
-          # Extract major and minor versions for additional tags
-          MAJOR=$(echo $VERSION | cut -d. -f1)
-          MINOR=$(echo $VERSION | cut -d. -f1-2)
-          echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
-          echo "minor=$MINOR" >> "$GITHUB_OUTPUT"
-          
-          # SHA tag
-          echo "sha_tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          version=${GITHUB_REF#refs/tags/v}
+          major=${version%%.*}
+          remainder=${version#*.}
+          minor=$major.${remainder%%.*}
+          echo "version=v$version" >> "$GITHUB_OUTPUT"
+          {
+            echo 'tags<<IMAGE_TAGS'
+            echo 'luketanti/aerofoil:latest'
+            echo "luketanti/aerofoil:$version"
+            echo "luketanti/aerofoil:$major"
+            echo "luketanti/aerofoil:$minor"
+            echo "luketanti/aerofoil:sha-${GITHUB_SHA::7}"
+            echo IMAGE_TAGS
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Build and push (multi-arch)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          push: true
-          platforms: linux/amd64,linux/arm64
-          build-args: |
-            AEROFOIL_VERSION=${{ steps.meta.outputs.aerofoil_version }}
-          tags: |
-            luketanti/aerofoil:latest
-            luketanti/aerofoil:${{ steps.meta.outputs.version }}
-            luketanti/aerofoil:${{ steps.meta.outputs.major }}
-            luketanti/aerofoil:${{ steps.meta.outputs.minor }}
-            luketanti/aerofoil:sha-${{ steps.meta.outputs.sha_tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: false
-
-      - name: Build Summary
-        if: success()
-        run: |
-          echo "## ✅ Docker Release Build Successful! 🚀" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 🎉 Release Version: \`v${{ steps.meta.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📦 Published Images:" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Tag | Image |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Latest | \`luketanti/aerofoil:latest\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Full Version | \`luketanti/aerofoil:${{ steps.meta.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Major Version | \`luketanti/aerofoil:${{ steps.meta.outputs.major }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Minor Version | \`luketanti/aerofoil:${{ steps.meta.outputs.minor }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| SHA | \`luketanti/aerofoil:sha-${{ steps.meta.outputs.sha_tag }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 🏗️ Build Details:" >> $GITHUB_STEP_SUMMARY
-          echo "- **Platforms**: linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
-          echo "- **Commit**: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Released by**: @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "### 📥 Pull Commands:" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-          echo "# Pull latest" >> $GITHUB_STEP_SUMMARY
-          echo "docker pull luketanti/aerofoil:latest" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "# Pull specific version" >> $GITHUB_STEP_SUMMARY
-          echo "docker pull luketanti/aerofoil:${{ steps.meta.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-
-      - name: Build Failed Notification
-        if: failure()
-        run: |
-          echo "## ❌ Docker Release Build Failed" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Release**: \`v${{ steps.meta.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "The build failed. Please check the logs above for details." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Common issues:**" >> $GITHUB_STEP_SUMMARY
-          echo "- Docker Hub credentials expired or incorrect" >> $GITHUB_STEP_SUMMARY
-          echo "- Dockerfile syntax errors" >> $GITHUB_STEP_SUMMARY
-          echo "- Build failures in the application code" >> $GITHUB_STEP_SUMMARY
-          echo "- GitHub Actions runner issues (try re-running)" >> $GITHUB_STEP_SUMMARY
+  build:
+    needs: metadata
+    uses: ./.github/workflows/docker-native-build.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      tags: ${{ needs.metadata.outputs.tags }}
+      cache_scope: release
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
