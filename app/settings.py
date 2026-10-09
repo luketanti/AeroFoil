@@ -527,6 +527,14 @@ def _normalize_shop_settings(raw_shop):
     if isinstance(raw_shop, dict):
         merged.update(raw_shop)
 
+    merged['discovery_enabled'] = _coerce_bool(merged.get('discovery_enabled'), default=False)
+    merged['discovery_name'] = str(merged.get('discovery_name') or 'AeroFoil').strip()[:100] or 'AeroFoil'
+    try:
+        discovery_port = int(merged.get('discovery_http_port', 0))
+    except (TypeError, ValueError):
+        discovery_port = 0
+    merged['discovery_http_port'] = discovery_port if 0 <= discovery_port <= 65535 else 0
+
     merged['motd_enabled'] = _coerce_bool(
         merged.get('motd_enabled'),
         default=defaults.get('motd_enabled', True),
@@ -865,6 +873,18 @@ def verify_settings(section, data):
                         })
                         break
     elif section == 'shop':
+        try:
+            discovery_port = int(data.get('discovery_http_port', 0))
+            valid_discovery_port = (
+                not isinstance(data.get('discovery_http_port'), bool)
+                and str(data.get('discovery_http_port', 0)).strip() == str(discovery_port)
+                and 0 <= discovery_port <= 65535
+            )
+        except (TypeError, ValueError):
+            valid_discovery_port = False
+        if not valid_discovery_port:
+            success = False
+            errors.append({'path': 'shop/discovery_http_port', 'error': 'Discovery web port must be 0 (automatic) or an integer from 1 to 65535.'})
         normalized = _normalize_shop_settings(data)
         public_key_ok, public_key_error = _validate_shop_public_key(normalized.get('public_key'))
         if not public_key_ok:

@@ -23,3 +23,4 @@ services:
       - ./conversion-tmp:/app/conversion-tmp
     ports:
       - "8465:8465"
+      - "8465:8465/udp" # Optional Sphaira LAN discovery

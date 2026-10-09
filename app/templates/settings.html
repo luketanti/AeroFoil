@@ -685,6 +685,19 @@
                         </div>
 
                         <div class="settings-option-stack">
+                            <div class="settings-option">
+                                <div class="form-check">
+                                    <input type="checkbox" class="form-check-input" id="discoveryEnabledCheck">
+                                    <label class="form-check-label" for="discoveryEnabledCheck">Sphaira LAN discovery</label>
+                                </div>
+                                <div class="form-text">Allow Sphaira to find this server on your local network. Requires UDP port 8465. Catalogue support is a separate feature.</div>
+                                <label for="discoveryNameInput" class="form-label mt-2">Discovery name</label>
+                                <input class="form-control" id="discoveryNameInput" maxlength="100" placeholder="AeroFoil">
+                                <label for="discoveryHttpPortInput" class="form-label mt-2">Advertised web port</label>
+                                <input type="number" class="form-control" id="discoveryHttpPortInput" min="0" max="65535" value="0">
+                                <div class="form-text">Use 0 for the application port. For Docker or a proxy, enter the web port reachable from your LAN.</div>
+                            </div>
+
                             <div class="form-check">
                                 <input type="checkbox" class="form-check-input" id="publicShopCheck"
                                     aria-describedby="publicShopCheckHelp">
@@ -1116,6 +1129,7 @@
 
     settings_map = {
         'library/path': 'libraryPathInput',
+        'shop/discovery_http_port': 'discoveryHttpPortInput',
         'shop/public_key': 'shopPublicKeyInput'
     };
 
@@ -1899,6 +1913,9 @@
         data = {
             host: $('#shopHostInput').val(),
             hauth: $('#shopHauthInput').val(),
+            discovery_enabled: getCheckboxStatus("discoveryEnabledCheck"),
+            discovery_name: getInputVal("discoveryNameInput"),
+            discovery_http_port: getInputVal("discoveryHttpPortInput"),
             public: getCheckboxStatus("publicShopCheck"),
             external_tinfoil_only: getCheckboxStatus("externalTinfoilOnlyCheck"),
             encrypt: getCheckboxStatus("encryptShopCheck"),
@@ -3045,6 +3062,9 @@
             $("#motdEnabledCheck").prop("checked", shopSettings['motd_enabled'] !== false);
             setInputVal("motdTextArea", shopSettings['motd']);
             setInputVal("motdApiUrlInput", shopSettings['motd_api_url'] || '');
+            $("#discoveryEnabledCheck").prop("checked", shopSettings.discovery_enabled === true);
+            setInputVal("discoveryNameInput", shopSettings.discovery_name || "AeroFoil");
+            setInputVal("discoveryHttpPortInput", shopSettings.discovery_http_port ?? 0);
             $("#publicShopCheck").prop("checked", shopSettings['public']);
             $("#externalTinfoilOnlyCheck").prop("checked", !!shopSettings['external_tinfoil_only']);
             $("#encryptShopCheck").prop("checked", shopSettings['encrypt']);

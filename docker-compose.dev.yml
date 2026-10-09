@@ -27,3 +27,4 @@ services:
       - ./app:/app
     ports:
       - "8465:8465"
+      - "8465:8465/udp" # Optional Sphaira LAN discovery

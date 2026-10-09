@@ -150,6 +150,9 @@ DEFAULT_SETTINGS = {
         }
     },
     "shop": {
+        "discovery_enabled": False,
+        "discovery_name": "AeroFoil",
+        "discovery_http_port": 0,
         "motd_enabled": True,
         "motd": "Welcome to your own shop!",
         "motd_api_url": "",
