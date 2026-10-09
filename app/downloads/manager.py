@@ -738,12 +738,15 @@ def remove_pending_download(key):
 
 
 def _is_active_download(path):
+    """Return None when downloader activity cannot be verified."""
     # The client may still be writing into a duplicate's folder (other files of the same torrent).
     name = re.split(r"[\\/]", str(path).rstrip("\\/"))[-1]
     try:
         snapshot = _get_download_activity_snapshot(load_settings().get("downloads", {}))
     except Exception:
-        return False
+        return None
+    if snapshot.get("errors_by_protocol"):
+        return None
     return any(
         item.get("name") == name
         for bucket in (snapshot.get("active_by_protocol") or {}).values()
@@ -780,7 +783,10 @@ def remove_duplicate_download(duplicate_id):
     target_path = str(target_entry.get("path") or "").strip()
     if not target_path:
         return False, "Duplicate entry has no deletable path."
-    if _is_active_download(target_path):
+    active = _is_active_download(target_path)
+    if active is None:
+        return False, "Could not verify downloader activity: retry when the client is available or dismiss this entry."
+    if active:
         return False, "Still downloading in the client: dismiss this entry or remove the download there first."
 
     delete_ok, delete_message = _delete_download_payload(target_path)
