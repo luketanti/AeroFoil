@@ -26,10 +26,7 @@ RUN pip install --upgrade pip \
 
 FROM python:3.11-slim
 
-ARG AEROFOIL_VERSION
-
-ENV AEROFOIL_VERSION="${AEROFOIL_VERSION}" \
-    PYTHONDONTWRITEBYTECODE=1 \
+ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
@@ -61,5 +58,9 @@ COPY ./docker/run.sh /app/run.sh
 RUN sed -i 's/\r$//' /app/run.sh \
     && chmod +x /app/run.sh \
     && mkdir -p /app/data
+
+# Commit-specific version metadata must not invalidate dependency layers.
+ARG AEROFOIL_VERSION
+ENV AEROFOIL_VERSION="${AEROFOIL_VERSION}"
 
 ENTRYPOINT ["/app/run.sh"]
