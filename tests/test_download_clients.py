@@ -2169,6 +2169,12 @@ class CompletedAdoptionTests(unittest.TestCase):
 
 
 class ManagedCompletionStateTests(unittest.TestCase):
+    def setUp(self):
+        # _move_completed_with_reason opens a TitleDB session; keep tests off the real TitleDB.
+        patcher = patch("app.downloads.manager.titles_lib.load_titledb", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     @patch("app.downloads.manager.os.path.getsize", return_value=100)
     @patch("app.downloads.manager._iter_completed_files")
     def test_select_completed_update_candidate_ignores_rar_archives(
@@ -2210,6 +2216,33 @@ class ManagedCompletionStateTests(unittest.TestCase):
         self.assertIsNone(reason)
         move_generic_mock.assert_called_once_with("C:\\tests\\completed\\Example Title BASE", "X:\\library")
         select_candidate_mock.assert_not_called()
+
+    @patch("app.downloads.manager.titles_lib.identify_file")
+    @patch("app.downloads.manager.titles_lib.titledb_session")
+    @patch("app.downloads.manager._iter_importable_download_files", return_value=["C:\\tests\\completed\\Example DLC.nsp"])
+    @patch("app.downloads.manager._move_generic_importable_files", return_value=("X:\\library\\Example DLC.nsp", None))
+    @patch("app.downloads.manager.get_libraries_path", return_value=["X:\\library"])
+    @patch("app.downloads.manager.os.path.exists", return_value=True)
+    def test_move_completed_identifies_files_with_titledb_loaded(
+        self,
+        exists_mock,
+        get_libraries_path_mock,
+        move_generic_mock,
+        iter_importable_mock,
+        titledb_session_mock,
+        identify_file_mock,
+    ):
+        state = {"loaded": False}
+        session = titledb_session_mock.return_value
+        session.__enter__.side_effect = lambda *args: state.update(loaded=True)
+        session.__exit__.side_effect = lambda *args: state.update(loaded=False)
+        loaded_at_identify = []
+        identify_file_mock.side_effect = lambda path: loaded_at_identify.append(state["loaded"]) or (None, False, [], "")
+
+        _move_completed_with_reason({"path": "C:\\tests\\completed\\Example DLC"})
+
+        self.assertTrue(loaded_at_identify)
+        self.assertTrue(all(loaded_at_identify))
 
     @patch("app.downloads.manager._cleanup_download_path")
     @patch("app.downloads.manager.shutil.move")

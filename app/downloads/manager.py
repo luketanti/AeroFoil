@@ -2121,6 +2121,12 @@ def _normalize_imported_wrapped_files(dest_path):
 
 
 def _move_completed_with_reason(item, update_info=None, copy_files=False, hardlink_files=False):
+    # Identifying DLC and update files needs TitleDB, which is unloaded while idle.
+    with titles_lib.titledb_session():
+        return _move_completed_in_titledb_session(item, update_info, copy_files, hardlink_files)
+
+
+def _move_completed_in_titledb_session(item, update_info=None, copy_files=False, hardlink_files=False):
     library_paths = get_libraries_path()
     if not library_paths:
         logger.warning("No library paths configured; cannot move download.")
