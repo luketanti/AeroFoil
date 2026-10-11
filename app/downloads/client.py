@@ -238,8 +238,7 @@ def _remove_completed_sabnzbd(_client_type, client_cfg, item_id, timeout_seconds
     )
 
 
-def _test_sabnzbd(_client_type, url, api_key=None, timeout_seconds=10, **_kwargs):
-    return test_sabnzbd(
+def _test_sabnzbd(client_type, url, api_key=None, timeout_seconds=10, **_kwargs):    return test_sabnzbd(
         url=url,
         api_key=api_key,
         timeout_seconds=timeout_seconds,
