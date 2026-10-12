@@ -743,6 +743,7 @@ def load_settings(force_reload=False):
         _merge_section('security')
         _merge_section('shop')
         _merge_section('titles')
+        _merge_section('metadata_sources')
         _merge_section('library')
         _merge_section('cheats')
         _merge_section('content_filter')
@@ -778,6 +779,7 @@ def load_settings(force_reload=False):
         settings['security'] = _normalize_security_settings(settings.get('security'))
         settings['downloads'] = _normalize_download_settings(settings.get('downloads'))
         settings['titles'] = _normalize_titles_settings(settings.get('titles'))
+        settings['metadata_sources'] = _normalize_metadata_sources_settings(settings.get('metadata_sources'))
         settings['shop'] = _normalize_shop_settings(settings.get('shop'))
         settings['cheats'] = _normalize_cheats_settings(settings.get('cheats'))
         settings['content_filter'] = _normalize_content_filter_settings(settings.get('content_filter'))
@@ -951,6 +953,19 @@ def delete_library_path_from_settings(path):
                     'error': f"Path {path} not configured."
                 })
     return success, errors
+
+def _normalize_metadata_sources_settings(data):
+    data = data if isinstance(data, dict) else {}
+    return {'nx_versions_enabled': _coerce_bool(data.get('nx_versions_enabled'), default=True)}
+
+
+def set_metadata_sources_settings(data):
+    settings = load_settings(force_reload=True)
+    settings['metadata_sources'] = _normalize_metadata_sources_settings(data)
+    with open(CONFIG_FILE, 'w') as yaml_file:
+        yaml.dump(settings, yaml_file)
+    _invalidate_settings_cache()
+
 
 def set_titles_settings(region, language, prefer_english_metadata=False):
     settings = load_settings(force_reload=True)

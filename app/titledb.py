@@ -336,6 +336,8 @@ def update_titledb_files(app_settings):
 
     if update_available:
         _write_latest_commit(latest_remote_commit)
+    from app.metadata_sources import update_titledb_source_status
+    update_titledb_source_status(latest_remote_commit, TITLEDB_DIR)
 
 
 # Serializes concurrent runs of update_titledb (scheduled job, TitleDB
@@ -347,6 +349,8 @@ _update_titledb_run_lock = threading.Lock()
 
 def update_titledb(app_settings):
     with _update_titledb_run_lock:
+        from app.metadata_sources import update_metadata_sources
+        update_metadata_sources(app_settings)
         logger.info('Updating titledb...')
         if not os.path.isdir(TITLEDB_DIR):
             os.makedirs(TITLEDB_DIR, exist_ok=True)

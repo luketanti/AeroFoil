@@ -14,6 +14,8 @@ from sqlalchemy.orm import aliased, joinedload
 from app.constants import *
 from app.db import *
 from app import titles as titles_lib
+from app import metadata_sources
+from app.settings import load_settings
 import datetime
 from pathlib import Path
 from app.utils import *
@@ -835,7 +837,7 @@ def _compute_library_cache_state_token():
                 parts.append(f"{label}:{int(mtime_ns)}:{int(st.st_size)}")
             except OSError:
                 parts.append(f"{label}:missing")
-        return "|".join(parts)
+        return "|".join(parts) + '|' + metadata_sources.get_metadata_cache_token()
     else:
         fingerprint = ":".join(str(int(value or 0)) for value in row)
 
@@ -845,7 +847,7 @@ def _compute_library_cache_state_token():
     except OSError:
         config_token = "missing"
 
-    return f"lib:{fingerprint}|cfg:{config_token}"
+    return f"lib:{fingerprint}|cfg:{config_token}|{metadata_sources.get_metadata_cache_token()}"
 
 
 def invalidate_library_cache_state_token():
@@ -1055,6 +1057,7 @@ def generate_library():
 
                     title_apps = apps_by_title.get(title.get('title_id'), [])
                     dlc_apps = [app for app in title_apps if app.get('app_type') == APP_TYPE_DLC and app['app_id'] == title['app_id']]
+                    dlc_version_dates = metadata_sources.get_version_dates(title['app_id'], load_settings())
 
                     version_list = []
                     for dlc_app in dlc_apps:
@@ -1062,7 +1065,7 @@ def generate_library():
                         version_list.append({
                             'version': app_version,
                             'owned': dlc_app.get('owned', False),
-                            'release_date': 'Unknown'
+                            'release_date': dlc_version_dates.get(app_version, 'Unknown')
                         })
 
                     title['version'] = sorted(version_list, key=lambda x: x['version'], reverse=True)

@@ -430,6 +430,11 @@ Set `trusted_proxies` to your proxy IP(s) and/or your Docker network subnet so t
 
 ## TitleDB sources and downloads
 
+- **Settings → Metadata Sources** lists the primary TitleDB provider and optional supplemental providers. **nx-versions** is enabled by default to use the latest numeric update and DLC versions from [16BitWonder/nx-versions](https://github.com/16BitWonder/nx-versions). You can disable it in settings; an explicitly saved disabled setting is preserved.
+- nx-versions supplements TitleDB version history; the highest known version wins. `FULL-CHANGELOG.md` provides fallback dates for versions whose release date is missing from TitleDB. These are the earliest dates nx-versions recorded each version, which may be later than the actual release. Known TitleDB dates take priority. It refreshes when saved as enabled and during scheduled metadata updates, independently of TitleDB download success. Failed refreshes retain validated cached data.
+- Disabling nx-versions stops downloads and excludes its cache from metadata lookups. Version entries already added to the library database remain recorded.
+- nx-versions refreshes use persisted HTTP validators (ETag/Last-Modified), allowing unchanged data to return without downloading the file again. Version lookups reuse a parsed in-memory cache. The changelog is downloaded and parsed once per source revision into a local SQLite date index; normal date lookups query this index without loading the full changelog. Unchanged source revisions skip the changelog download entirely.
+- **Source updated** shows the upstream commit date for the dataset in use, in your local time: the TitleDB revision embedded in its artifacts, or the last commit changing nx-versions' `versions.txt`. These dates do not advance on unchanged refreshes. Small, cached GitHub commit metadata requests supply the dates; unavailable dates appear as **Unknown**.
 - TitleDB artifacts are downloaded separately from the metadata dataset.
 - The descriptions/screenshot dataset (`US.en.json`) is downloaded to `/app/data/titledb/US.en.json` and is not part of the TitleDB artifacts zip.
 - The TitleDB artifacts zip may be very large (multi-GB) depending on the upstream workflow output.

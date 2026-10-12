@@ -339,6 +339,16 @@
                         <span class="settings-nav-subtitle">Automation, providers, torrent and usenet clients</span>
                     </span>
                 </a>
+                <a class="nav-link" href="#" data-section="metadata-sources">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true" style="vertical-align: -0.125em; margin-right: 0.5rem;">
+                        <ellipse cx="8" cy="3" rx="6" ry="2"/>
+                        <path d="M2 5v3c0 1.1 2.7 2 6 2s6-.9 6-2V5c-1.3 1-3.6 1.5-6 1.5S3.3 6 2 5zm0 5v3c0 1.1 2.7 2 6 2s6-.9 6-2v-3c-1.3 1-3.6 1.5-6 1.5S3.3 11 2 10z"/>
+                    </svg>
+                    <span class="settings-nav-copy">
+                        <span class="settings-nav-title">Metadata Sources</span>
+                        <span class="settings-nav-subtitle">Title information and update versions</span>
+                    </span>
+                </a>
             </nav>
         </div>
         
@@ -639,6 +649,43 @@
                 </div>
 
                 <!-- Shop Section -->
+                <div class="settings-section d-none" id="section-metadata-sources" data-section="metadata-sources">
+                    <div class="settings-section-header">
+                        <h3 class="mb-1">Metadata Sources</h3>
+                        <div class="settings-section-subtitle">Choose additional sources to supplement title metadata.</div>
+                    </div>
+                    <div class="settings-panel activity-section aerofoil-card">
+                        <div class="card-body">
+                            <div class="border rounded p-3 mb-3">
+                                <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+                                    <div class="fw-semibold">TitleDB <span class="badge text-bg-secondary">Primary source</span></div>
+                                    <span id="titledbLastUpdated" class="text-muted small" title="Upstream commit date of the TitleDB revision used by the downloaded dataset">Source updated: Unknown</span>
+                                </div>
+                                <div class="form-text">Provides title names, artwork, languages, release dates, and version history. Region and language are configured in Library.</div>
+                            </div>
+                            <div class="border rounded p-3 mb-3">
+                                <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="nxVersionsEnabledCheck" aria-describedby="nxVersionsHelp">
+                                        <label class="form-check-label fw-semibold" for="nxVersionsEnabledCheck">Enable nx-versions</label>
+                                    </div>
+                                    <span id="nxVersionsLastUpdated" class="text-muted small" title="Upstream commit date of the versions.txt dataset">Source updated: Unknown</span>
+                                </div>
+                                <div id="nxVersionsHelp" class="form-text">
+                                    Supplements TitleDB with the latest known update and DLC versions from
+                                    <a href="https://github.com/16BitWonder/nx-versions" target="_blank" rel="noopener noreferrer">16BitWonder/nx-versions</a>.
+                                    The highest known version is used. Changelog dates fill missing release dates using the first recorded availability of each version.
+                                    TitleDB dates take priority. This source has no title names or artwork, and observed dates may be later than the actual release.
+                                    It refreshes when enabled and during scheduled metadata updates. If a refresh fails, cached data is retained.
+                                    Disabling stops this source from refreshing or supplementing lookups; versions already discovered in your library remain recorded.
+                                </div>
+                            </div>
+                            <button type="button" id="submitMetadataSourcesBtn" class="btn btn-primary" onclick="submitMetadataSourcesSettings()">Save metadata sources</button>
+                            <div id="metadataSourcesStatus" class="form-text" role="status" aria-live="polite"></div>
+                        </div>
+                    </div>
+                </div>
+
                 <div class="settings-section d-none" id="section-shop" data-section="shop">
                 <div class="settings-section-header">
                     <div class="d-flex flex-wrap align-items-start justify-content-between gap-3">
@@ -1683,6 +1730,39 @@
                     console.log('Error adding path ' + path);
                 }
                 $('#submitNewLibraryPathBtn').prop('disabled', false);
+            }
+        });
+    }
+
+    function fillMetadataSourceStatus(status) {
+        status = status || {};
+        [['titledb', 'titledbLastUpdated'], ['nx-versions', 'nxVersionsLastUpdated']].forEach(function (entry) {
+            const timestamp = (status[entry[0]] || {}).last_updated;
+            const date = timestamp ? new Date(timestamp) : null;
+            const text = date && !Number.isNaN(date.getTime()) ? date.toLocaleString() : 'Unknown';
+            $('#' + entry[1]).text('Source updated: ' + text);
+        });
+    }
+
+    function submitMetadataSourcesSettings() {
+        $('#submitMetadataSourcesBtn').prop('disabled', true);
+        $('#metadataSourcesStatus').text('Saving and refreshing metadata sources...');
+        $.ajax({
+            url: '/api/settings/metadata-sources',
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({nx_versions_enabled: $('#nxVersionsEnabledCheck').is(':checked')}),
+            success: function (result) {
+                if (result.metadata_source_status) fillMetadataSourceStatus(result.metadata_source_status);
+                $('#metadataSourcesStatus').text(result.success
+                    ? (result.warning || 'Metadata sources saved.')
+                    : 'Could not save metadata sources.');
+            },
+            error: function () {
+                $('#metadataSourcesStatus').text('Could not complete the request. Reload settings to check the saved selection.');
+            },
+            complete: function () {
+                $('#submitMetadataSourcesBtn').prop('disabled', false);
             }
         });
     }
@@ -2932,7 +3012,7 @@
     // Handle URL hash for direct navigation
     function handleHashNavigation() {
         const hash = window.location.hash.substring(1);
-        if (['library', 'shop', 'downloads'].includes(hash)) {
+        if (['library', 'shop', 'downloads', 'metadata-sources'].includes(hash)) {
             showSettingsSection(hash);
         } else {
             // Default to library if no hash
@@ -3048,6 +3128,8 @@
             }
             // Titles settings
             titlesSettings = result['titles'];
+            $('#nxVersionsEnabledCheck').prop('checked', !!(result.metadata_sources || {}).nx_versions_enabled);
+            fillMetadataSourceStatus(result.metadata_source_status);
 
             // Fill region and language
             setInputVal("selectRegion", titlesSettings['region']);

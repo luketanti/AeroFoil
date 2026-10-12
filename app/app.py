@@ -37,6 +37,7 @@ from app.utils import *
 from app.library import *
 from app.library import _get_nsz_runner, _ensure_unique_path
 from app import titledb
+from app import metadata_sources
 from app import cheats
 from app.title_requests import create_title_request, list_requests
 import requests
@@ -4798,6 +4799,7 @@ def get_settings_api():
         pass
     settings.setdefault('downloads', {})
     settings['downloads']['client_capabilities'] = get_supported_download_clients()
+    settings['metadata_source_status'] = metadata_sources.get_metadata_source_status()
     return jsonify(settings)
 
 @app.post('/api/settings/content-filter')
@@ -4810,6 +4812,20 @@ def set_content_filter_settings_api():
     # Encrypted shop payloads vary by filter; drop caches so changes apply now.
     _invalidate_shop_root_cache()
     return jsonify({'success': True, 'errors': []})
+
+
+@app.post('/api/settings/metadata-sources')
+@access_required('admin')
+def set_metadata_sources_settings_api():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or type(data.get('nx_versions_enabled')) is not bool:
+        return jsonify({'success': False, 'errors': [{'error': 'nx_versions_enabled must be a boolean.'}]}), 400
+    set_metadata_sources_settings(data)
+    reload_conf()
+    warning = metadata_sources.update_metadata_sources(app_settings)
+    post_library_change()
+    return jsonify({'success': True, 'errors': [], 'warning': warning,
+                    'metadata_source_status': metadata_sources.get_metadata_source_status()})
 
 
 @app.post('/api/settings/titles')

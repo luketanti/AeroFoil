@@ -13,6 +13,7 @@ import shutil
 from contextlib import contextmanager
 
 from app import titledb
+from app import metadata_sources
 from app.constants import *
 from app.utils import *
 from app.settings import *
@@ -1936,6 +1937,22 @@ def get_game_latest_version(all_existing_versions):
     return max(v['version'] for v in all_existing_versions)
 
 def get_all_existing_versions(titleid):
+    out = _get_titledb_existing_versions(titleid)
+    if not re.fullmatch(r'[0-9a-fA-F]{16}', str(titleid or '')):
+        return out
+    app_settings = load_settings()
+    update_id = str(titleid)[:-3] + '800'
+    latest = metadata_sources.get_latest_version(update_id, app_settings)
+    if latest and all(item['version'] != latest for item in out):
+        out.append({'version': latest, 'update_number': get_update_number(latest), 'release_date': 'Unknown'})
+    dates = metadata_sources.get_version_dates(update_id, app_settings)
+    for item in out:
+        if str(item.get('release_date') or '').strip().lower() in ('', 'unknown'):
+            item['release_date'] = dates.get(item['version'], 'Unknown')
+    return sorted(out, key=lambda item: item['version'])
+
+
+def _get_titledb_existing_versions(titleid):
     global _versions_index_ready
     if not _versions_index_ready:
         _warn_titledb_state_once('versions_not_loaded', "versions index is not loaded. Call load_titledb first.")
@@ -1975,6 +1992,14 @@ def get_all_existing_versions(titleid):
     return out
 
 def get_all_app_existing_versions(app_id):
+    versions = _get_titledb_app_existing_versions(app_id) or []
+    latest = metadata_sources.get_latest_version(app_id, load_settings())
+    if latest is not None and str(latest) not in versions:
+        versions.append(str(latest))
+    return sorted(versions) if versions else None
+
+
+def _get_titledb_app_existing_versions(app_id):
     global _cnmts_index_ready
     if not _cnmts_index_ready:
         _warn_titledb_state_once('cnmts_not_loaded', "cnmts index is not loaded. Call load_titledb first.")

@@ -46,6 +46,9 @@ AEROFOIL_DB = 'sqlite:///' + DB_FILE
 OWNFOIL_DB = AEROFOIL_DB
 
 DEFAULT_SETTINGS = {
+    "metadata_sources": {
+        "nx_versions_enabled": True,
+    },
     "security": {
         # When true, the application will not re-enter "setup mode" even if all admin
         # accounts are removed. Recovery must be done via environment-initialized users.
