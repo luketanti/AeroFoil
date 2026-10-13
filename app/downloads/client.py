@@ -173,7 +173,7 @@ def _test_torrent(client_type, url, username=None, password=None, timeout_second
     )
 
 
-def _queue_sabnzbd(_client_type, client_cfg, download_url, timeout_seconds=15, **kwargs):
+def _queue_sabnzbd(client_type, client_cfg, download_url, timeout_seconds=15, **kwargs):
     common_kwargs = _get_common_client_kwargs(client_cfg)
     queue_options = _get_queue_download_options(kwargs)
     return add_nzb(
@@ -186,7 +186,7 @@ def _queue_sabnzbd(_client_type, client_cfg, download_url, timeout_seconds=15, *
     )
 
 
-def _list_active_sabnzbd(_client_type, client_cfg, timeout_seconds=15):
+def _list_active_sabnzbd(client_type, client_cfg, timeout_seconds=15):
     common_kwargs = _get_common_client_kwargs(client_cfg)
     return list_active_usenet(
         url=common_kwargs["url"],
@@ -196,7 +196,7 @@ def _list_active_sabnzbd(_client_type, client_cfg, timeout_seconds=15):
     )
 
 
-def _list_completed_sabnzbd(_client_type, client_cfg, timeout_seconds=15):
+def _list_completed_sabnzbd(client_type, client_cfg, timeout_seconds=15):
     common_kwargs = _get_common_client_kwargs(client_cfg)
     return list_completed_usenet(
         url=common_kwargs["url"],
@@ -206,7 +206,7 @@ def _list_completed_sabnzbd(_client_type, client_cfg, timeout_seconds=15):
     )
 
 
-def _list_history_sabnzbd(_client_type, client_cfg, timeout_seconds=15):
+def _list_history_sabnzbd(client_type, client_cfg, timeout_seconds=15):
     common_kwargs = _get_common_client_kwargs(client_cfg)
     return list_history_usenet(
         url=common_kwargs["url"],
@@ -216,7 +216,7 @@ def _list_history_sabnzbd(_client_type, client_cfg, timeout_seconds=15):
     )
 
 
-def _remove_active_sabnzbd(_client_type, client_cfg, item_id, timeout_seconds=15, delete_files=False):
+def _remove_active_sabnzbd(client_type, client_cfg, item_id, timeout_seconds=15, delete_files=False):
     common_kwargs = _get_common_client_kwargs(client_cfg)
     return remove_queue_item(
         url=common_kwargs["url"],
@@ -227,7 +227,7 @@ def _remove_active_sabnzbd(_client_type, client_cfg, item_id, timeout_seconds=15
     )
 
 
-def _remove_completed_sabnzbd(_client_type, client_cfg, item_id, timeout_seconds=15, delete_files=False):
+def _remove_completed_sabnzbd(client_type, client_cfg, item_id, timeout_seconds=15, delete_files=False):
     common_kwargs = _get_common_client_kwargs(client_cfg)
     return remove_history(
         url=common_kwargs["url"],
@@ -238,7 +238,7 @@ def _remove_completed_sabnzbd(_client_type, client_cfg, item_id, timeout_seconds
     )
 
 
-def _test_sabnzbd(_client_type, url, api_key=None, timeout_seconds=10, **_kwargs):
+def _test_sabnzbd(client_type, url, api_key=None, timeout_seconds=10, **_kwargs):
     return test_sabnzbd(
         url=url,
         api_key=api_key,
@@ -246,7 +246,7 @@ def _test_sabnzbd(_client_type, url, api_key=None, timeout_seconds=10, **_kwargs
     )
 
 
-def _queue_nzbget(_client_type, client_cfg, download_url, timeout_seconds=15, **kwargs):
+def _queue_nzbget(client_type, client_cfg, download_url, timeout_seconds=15, **kwargs):
     common_kwargs = _get_common_client_kwargs(client_cfg)
     queue_options = _get_queue_download_options(kwargs)
     return add_nzbget(
@@ -260,7 +260,7 @@ def _queue_nzbget(_client_type, client_cfg, download_url, timeout_seconds=15, **
     )
 
 
-def _list_active_nzbget(_client_type, client_cfg, timeout_seconds=15):
+def _list_active_nzbget(client_type, client_cfg, timeout_seconds=15):
     common_kwargs = _get_common_client_kwargs(client_cfg)
     return list_active_nzbget(
         url=common_kwargs["url"],
@@ -271,7 +271,7 @@ def _list_active_nzbget(_client_type, client_cfg, timeout_seconds=15):
     )
 
 
-def _list_completed_nzbget(_client_type, client_cfg, timeout_seconds=15):
+def _list_completed_nzbget(client_type, client_cfg, timeout_seconds=15):
     common_kwargs = _get_common_client_kwargs(client_cfg)
     return list_completed_nzbget(
         url=common_kwargs["url"],
@@ -282,7 +282,7 @@ def _list_completed_nzbget(_client_type, client_cfg, timeout_seconds=15):
     )
 
 
-def _list_history_nzbget(_client_type, client_cfg, timeout_seconds=15):
+def _list_history_nzbget(client_type, client_cfg, timeout_seconds=15):
     common_kwargs = _get_common_client_kwargs(client_cfg)
     return list_history_nzbget(
         url=common_kwargs["url"],
@@ -293,7 +293,7 @@ def _list_history_nzbget(_client_type, client_cfg, timeout_seconds=15):
     )
 
 
-def _remove_active_nzbget(_client_type, client_cfg, item_id, timeout_seconds=15, delete_files=False):
+def _remove_active_nzbget(client_type, client_cfg, item_id, timeout_seconds=15, delete_files=False):
     common_kwargs = _get_common_client_kwargs(client_cfg)
     return remove_queue_item_nzbget(
         url=common_kwargs["url"],
@@ -305,7 +305,7 @@ def _remove_active_nzbget(_client_type, client_cfg, item_id, timeout_seconds=15,
     )
 
 
-def _remove_completed_nzbget(_client_type, client_cfg, item_id, timeout_seconds=15, delete_files=False):
+def _remove_completed_nzbget(client_type, client_cfg, item_id, timeout_seconds=15, delete_files=False):
     common_kwargs = _get_common_client_kwargs(client_cfg)
     return remove_history_nzbget(
         url=common_kwargs["url"],
@@ -317,7 +317,7 @@ def _remove_completed_nzbget(_client_type, client_cfg, item_id, timeout_seconds=
     )
 
 
-def _test_nzbget(_client_type, url, username=None, password=None, timeout_seconds=10, **_kwargs):
+def _test_nzbget(client_type, url, username=None, password=None, timeout_seconds=10, **_kwargs):
     return test_nzbget(
         url=url,
         username=username,
@@ -326,7 +326,7 @@ def _test_nzbget(_client_type, url, username=None, password=None, timeout_second
     )
 
 
-def _queue_pneumatic(_client_type, client_cfg, download_url, timeout_seconds=15, **_kwargs):
+def _queue_pneumatic(client_type, client_cfg, download_url, timeout_seconds=15, **_kwargs):
     common_kwargs = _get_common_client_kwargs(client_cfg)
     return add_pneumatic(
         watch_folder=common_kwargs["url"],
@@ -335,14 +335,14 @@ def _queue_pneumatic(_client_type, client_cfg, download_url, timeout_seconds=15,
     )
 
 
-def _test_pneumatic_client(_client_type, url, timeout_seconds=10, **_kwargs):
+def _test_pneumatic_client(client_type, url, timeout_seconds=10, **_kwargs):
     return test_pneumatic(
         watch_folder=url,
         timeout_seconds=timeout_seconds,
     )
 
 
-def _queue_downloadstation_usenet(_client_type, client_cfg, download_url, timeout_seconds=15, **_kwargs):
+def _queue_downloadstation_usenet(client_type, client_cfg, download_url, timeout_seconds=15, **_kwargs):
     common_kwargs = _get_common_client_kwargs(client_cfg)
     return add_downloadstation_nzb(
         url=common_kwargs["url"],
@@ -354,7 +354,7 @@ def _queue_downloadstation_usenet(_client_type, client_cfg, download_url, timeou
     )
 
 
-def _list_active_downloadstation_usenet(_client_type, client_cfg, timeout_seconds=15):
+def _list_active_downloadstation_usenet(client_type, client_cfg, timeout_seconds=15):
     common_kwargs = _get_common_client_kwargs(client_cfg)
     return [item for item in list_downloadstation(
         url=common_kwargs["url"],
@@ -365,7 +365,7 @@ def _list_active_downloadstation_usenet(_client_type, client_cfg, timeout_second
     ) if item.get("status") != "completed"]
 
 
-def _list_completed_downloadstation_usenet(_client_type, client_cfg, timeout_seconds=15):
+def _list_completed_downloadstation_usenet(client_type, client_cfg, timeout_seconds=15):
     common_kwargs = _get_common_client_kwargs(client_cfg)
     return [item for item in list_downloadstation(
         url=common_kwargs["url"],
@@ -376,7 +376,7 @@ def _list_completed_downloadstation_usenet(_client_type, client_cfg, timeout_sec
     ) if item.get("status") == "completed"]
 
 
-def _remove_downloadstation_usenet(_client_type, client_cfg, item_id, timeout_seconds=15, delete_files=False):
+def _remove_downloadstation_usenet(client_type, client_cfg, item_id, timeout_seconds=15, delete_files=False):
     common_kwargs = _get_common_client_kwargs(client_cfg)
     return remove_downloadstation(
         url=common_kwargs["url"],
@@ -388,7 +388,7 @@ def _remove_downloadstation_usenet(_client_type, client_cfg, item_id, timeout_se
     )
 
 
-def _test_downloadstation_usenet(_client_type, url, username=None, password=None, timeout_seconds=10, **_kwargs):
+def _test_downloadstation_usenet(client_type, url, username=None, password=None, timeout_seconds=10, **_kwargs):
     return test_downloadstation(
         url=url,
         username=username,
@@ -397,7 +397,7 @@ def _test_downloadstation_usenet(_client_type, url, username=None, password=None
     )
 
 
-def _queue_nzbvortex(_client_type, client_cfg, download_url, timeout_seconds=15, **_kwargs):
+def _queue_nzbvortex(client_type, client_cfg, download_url, timeout_seconds=15, **_kwargs):
     common_kwargs = _get_common_client_kwargs(client_cfg)
     return add_nzbvortex(
         url=common_kwargs["url"],
@@ -408,7 +408,7 @@ def _queue_nzbvortex(_client_type, client_cfg, download_url, timeout_seconds=15,
     )
 
 
-def _list_active_nzbvortex(_client_type, client_cfg, timeout_seconds=15):
+def _list_active_nzbvortex(client_type, client_cfg, timeout_seconds=15):
     common_kwargs = _get_common_client_kwargs(client_cfg)
     return [item for item in list_nzbvortex(
         url=common_kwargs["url"],
@@ -418,7 +418,7 @@ def _list_active_nzbvortex(_client_type, client_cfg, timeout_seconds=15):
     ) if item.get("status") != "completed"]
 
 
-def _list_completed_nzbvortex(_client_type, client_cfg, timeout_seconds=15):
+def _list_completed_nzbvortex(client_type, client_cfg, timeout_seconds=15):
     common_kwargs = _get_common_client_kwargs(client_cfg)
     return [item for item in list_nzbvortex(
         url=common_kwargs["url"],
@@ -428,7 +428,7 @@ def _list_completed_nzbvortex(_client_type, client_cfg, timeout_seconds=15):
     ) if item.get("status") == "completed"]
 
 
-def _remove_nzbvortex(_client_type, client_cfg, item_id, timeout_seconds=15, delete_files=False):
+def _remove_nzbvortex(client_type, client_cfg, item_id, timeout_seconds=15, delete_files=False):
     common_kwargs = _get_common_client_kwargs(client_cfg)
     return remove_nzbvortex(
         url=common_kwargs["url"],
@@ -439,7 +439,7 @@ def _remove_nzbvortex(_client_type, client_cfg, item_id, timeout_seconds=15, del
     )
 
 
-def _test_nzbvortex_client(_client_type, url, api_key=None, timeout_seconds=10, **_kwargs):
+def _test_nzbvortex_client(client_type, url, api_key=None, timeout_seconds=10, **_kwargs):
     return test_nzbvortex(
         url=url,
         api_key=api_key,
@@ -456,7 +456,7 @@ def _unsupported_queue(client_type, _client_cfg, _download_url, **_kwargs):
     return False, f"{client_type} is listed by Sonarr but is not implemented in AeroFoil yet.", None
 
 
-def _unsupported_list(_client_type, _client_cfg, **_kwargs):
+def _unsupported_list(client_type, _client_cfg, **_kwargs):
     return []
 
 
