@@ -23,8 +23,6 @@ ALEMBIC_CONF = os.path.join(ALEMBIC_DIR, 'alembic.ini')
 TITLEDB_DIR = os.path.join(DATA_DIR, 'titledb')
 TITLEDB_URL = 'https://github.com/blawar/titledb.git'
 TITLEDB_ARTEFACTS_URL = 'https://nightly.link/luketanti/aerofoil/workflows/region_titles/master/titledb.zip'
-TITLEDB_DESCRIPTIONS_BASE_URL = 'https://raw.githubusercontent.com/blawar/titledb/master'
-TITLEDB_DESCRIPTIONS_DEFAULT_FILE = 'US.en.json'
 TITLEDB_DEFAULT_FILES = [
     'cnmts.json',
     'versions.json',
@@ -279,5 +277,5 @@ ESRB_AGE_BY_CODE = {item["code"]: item["age"] for item in ESRB_RATINGS}
 ESRB_VALID_AGES = [item["age"] for item in ESRB_RATINGS]
 
 # Bump to force a one-time rebuild of the titles SQLite index when its on-disk
-# schema changes (the `rating` column was added in this version).
-TITLES_INDEX_SCHEMA_VERSION = 'rating-v1'
+# schema changes (the `screenshots` column was added in this version).
+TITLES_INDEX_SCHEMA_VERSION = 'screenshots-v2'

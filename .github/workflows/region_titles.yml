@@ -8,6 +8,23 @@ on:
     - cron: '0 */4 * * *'
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even when the source revisions are unchanged
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write # Cancel unchanged runs without replacing nightly.link's last successful build.
+
+concurrency:
+  group: region-titles-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TITLEDB_REPOSITORY: https://github.com/luketanti/titledb
+  NUT_REPOSITORY: https://github.com/blawar/nut
 
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
@@ -20,25 +37,97 @@ jobs:
     steps:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v5
+      - name: Resolve source revisions
+        id: sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          titledb_sha=$(git ls-remote "$TITLEDB_REPOSITORY" HEAD | cut -f1)
+          nut_sha=$(git ls-remote "$NUT_REPOSITORY" HEAD | cut -f1)
+          [[ "$titledb_sha" =~ ^[0-9a-f]{40}$ && "$nut_sha" =~ ^[0-9a-f]{40}$ ]]
+          workflow_sha=$(sha256sum .github/workflows/region_titles.yml | cut -d' ' -f1)
+          build_key=$(printf '%s\n' "$TITLEDB_REPOSITORY" "$titledb_sha" "$NUT_REPOSITORY" "$nut_sha" "$workflow_sha" | sha256sum | cut -d' ' -f1)
+          echo "titledb_sha=$titledb_sha" >> "$GITHUB_OUTPUT"
+          echo "nut_sha=$nut_sha" >> "$GITHUB_OUTPUT"
+          echo "build_key=$build_key" >> "$GITHUB_OUTPUT"
+
+      - name: Check for updates
+        id: updates
+        uses: actions/github-script@v7
+        env:
+          BUILD_KEY: ${{ steps.sources.outputs.build_key }}
+          FORCE_REBUILD: ${{ inputs.force || false }}
+        with:
+          script: |
+            if (process.env.FORCE_REBUILD === 'true') {
+              core.setOutput('build', 'true');
+              core.info('Forced rebuild requested.');
+              return;
+            }
+            // Only scheduled builds are used by the existing nightly.link URL.
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              ...context.repo, workflow_id: 'region_titles.yml',
+              branch: context.ref.replace('refs/heads/', ''),
+              event: 'schedule', status: 'success', per_page: 1,
+            });
+            const previous = data.workflow_runs[0];
+            let unchanged = false;
+            if (previous) {
+              const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+                ...context.repo, run_id: previous.id, per_page: 100,
+              });
+              // Refresh before expiry even if the sources have not changed.
+              const usable = artifacts.filter(a => !a.expired &&
+                Date.parse(a.expires_at) > Date.now() + 24 * 60 * 60 * 1000);
+              unchanged = usable.some(a => a.name === 'titledb') &&
+                usable.some(a => a.name === `titledb-state-${process.env.BUILD_KEY}`);
+            }
+            core.setOutput('build', unchanged ? 'false' : 'true');
+            await core.summary.addRaw(unchanged
+              ? 'Sources unchanged; keeping the previous titledb artifact. This run is cancelled to preserve the nightly.link download.'
+              : 'Building titledb: sources or workflow changed, or no usable artifact remains.').write();
+
+      - name: Cancel unchanged run
+        if: steps.updates.outputs.build == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.cancelWorkflowRun({ ...context.repo, run_id: context.runId });
+            // Keep the runner alive until cancellation arrives. Never finish successfully without an artifact.
+            await new Promise(resolve => setTimeout(resolve, 60000));
+            throw new Error('Cancellation did not arrive; refusing success without an artifact.');
+
       - uses: actions/setup-python@v5
+        if: steps.updates.outputs.build == 'true'
         with:
           python-version: '3.10'
 
       # Runs a set of commands using the runners shell
       - name: Setup folders
+        if: steps.updates.outputs.build == 'true'
+        env:
+          TITLEDB_SHA: ${{ steps.sources.outputs.titledb_sha }}
+          NUT_SHA: ${{ steps.sources.outputs.nut_sha }}
         run: |
           sudo apt update && sudo apt install -y libcurl4-openssl-dev libssl-dev
-          git clone https://github.com/blawar/nut
+          git init nut
+          git -C nut remote add origin "$NUT_REPOSITORY"
+          git -C nut fetch --depth=1 origin "$NUT_SHA"
+          git -C nut checkout --detach FETCH_HEAD
           cd nut
           pip install -r requirements.txt
           mkdir build_artefacts
-          git clone --depth=1 https://github.com/blawar/titledb
+          git init titledb
+          git -C titledb remote add origin "$TITLEDB_REPOSITORY"
+          git -C titledb fetch --depth=1 origin "$TITLEDB_SHA"
+          git -C titledb checkout --detach FETCH_HEAD
           titledb_commit=$(git -C titledb rev-parse --short HEAD)
           echo "formatted_date=$(date +"%Y-%m-%d_%H%M%S")" >> $GITHUB_ENV
           touch "build_artefacts/latest_${titledb_commit}"
 
       - uses: jannekem/run-python-script-action@v1
         name: Generate region titles
+        if: steps.updates.outputs.build == 'true'
         with:
           script: |
             import os, sys
@@ -120,7 +209,21 @@ jobs:
             
 
       - uses: actions/upload-artifact@v4
+        if: steps.updates.outputs.build == 'true'
         with:
           name: titledb
           path: nut/build_artefacts/*
           compression-level: 9
+          if-no-files-found: error
+
+      # Written only after the database artifact was uploaded successfully.
+      - name: Record successful build
+        if: steps.updates.outputs.build == 'true'
+        run: touch titledb-state
+
+      - uses: actions/upload-artifact@v4
+        if: steps.updates.outputs.build == 'true'
+        with:
+          name: titledb-state-${{ steps.sources.outputs.build_key }}
+          path: titledb-state
+          if-no-files-found: error

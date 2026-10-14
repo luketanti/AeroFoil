@@ -6,7 +6,6 @@ import sqlite3
 import gc
 import ctypes
 import unicodedata
-import requests
 import threading
 import time
 import shutil
@@ -106,9 +105,6 @@ _titles_db_loaded = False
 _cnmts_db = None
 _titles_db = None
 _titles_by_title_id = None
-_titles_desc_db = None
-_titles_desc_by_title_id = None
-_titles_images_by_title_id = None
 _versions_db = None
 _versions_txt_db = None
 _cnmts_index_ready = False
@@ -166,9 +162,6 @@ def _reset_titledb_state():
     global _titles_index_ready
     global _versions_index_ready
     global _cnmts_index_file
-    global _titles_desc_db
-    global _titles_desc_by_title_id
-    global _titles_images_by_title_id
     global _titles_db_loaded
     global _english_titles_index_ready
 
@@ -181,9 +174,6 @@ def _reset_titledb_state():
     _titles_index_ready = False
     _versions_index_ready = False
     _cnmts_index_file = _cnmts_default_index_file
-    _titles_desc_db = None
-    _titles_desc_by_title_id = None
-    _titles_images_by_title_id = None
     _english_titles_index_ready = False
     _titles_db_loaded = False
     with _title_lookup_cache_lock:
@@ -526,6 +516,12 @@ def _ensure_cnmts_index(cnmts_file):
     _release_process_memory()
     return True
 
+def _normalize_screenshots(value):
+    if not isinstance(value, list):
+        return []
+    return [url.strip() for url in value if isinstance(url, str) and url.strip()][:12]
+
+
 def _ensure_titles_index_from_sources(source_files, index_file, log_label='titles'):
     source_files = [path for path in (source_files or []) if path]
     if not source_files:
@@ -548,6 +544,7 @@ def _ensure_titles_index_from_sources(source_files, index_file, log_label='title
                 "nsu_id TEXT, "
                 "description TEXT, "
                 "rating INTEGER, "
+                "screenshots TEXT, "
                 "search_hay TEXT, "
                 "sort_order INTEGER NOT NULL)"
             )
@@ -587,6 +584,7 @@ def _ensure_titles_index_from_sources(source_files, index_file, log_label='title
                 "nsu_id TEXT, "
                 "description TEXT, "
                 "rating INTEGER, "
+                "screenshots TEXT, "
                 "search_hay TEXT, "
                 "sort_order INTEGER NOT NULL)"
             )
@@ -616,6 +614,7 @@ def _ensure_titles_index_from_sources(source_files, index_file, log_label='title
                     nsu_id = None if nsu_id_raw is None else str(nsu_id_raw)
                     description = str(item.get('description') or '').strip() or None
                     rating = _coerce_rating(item.get('rating'))
+                    screenshots = json.dumps(_normalize_screenshots(item.get('screenshots')))
                     search_hay = _normalize_title_search_text(f"{title_id} {name}")
                     batch.append((
                         title_id,
@@ -626,22 +625,23 @@ def _ensure_titles_index_from_sources(source_files, index_file, log_label='title
                         nsu_id,
                         description,
                         rating,
+                        screenshots,
                         search_hay,
                         int(order),
                     ))
                     if len(batch) >= batch_size:
                         conn.executemany(
                             "INSERT OR REPLACE INTO titles "
-                            "(title_id, name, banner_url, icon_url, category, nsu_id, description, rating, search_hay, sort_order) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            "(title_id, name, banner_url, icon_url, category, nsu_id, description, rating, screenshots, search_hay, sort_order) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             batch,
                         )
                         batch.clear()
             if batch:
                 conn.executemany(
                     "INSERT OR REPLACE INTO titles "
-                    "(title_id, name, banner_url, icon_url, category, nsu_id, description, rating, search_hay, sort_order) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(title_id, name, banner_url, icon_url, category, nsu_id, description, rating, screenshots, search_hay, sort_order) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     batch,
                 )
 
@@ -789,36 +789,6 @@ def get_titledb_cache_token():
         return str(_titledb_data_signature or 'missing')
 
 
-def _ensure_titledb_descriptions_file(app_settings):
-    """Ensure the descriptions index file exists locally."""
-    try:
-        desc_url, desc_filename = titledb.get_descriptions_url(app_settings)
-        desc_path = os.path.join(TITLEDB_DIR, desc_filename)
-        if os.path.isfile(desc_path):
-            return desc_path
-
-        os.makedirs(TITLEDB_DIR, exist_ok=True)
-        tmp_path = desc_path + '.tmp'
-        try:
-            logger.info(f"Downloading {desc_filename} from {desc_url}...")
-            r = requests.get(desc_url, stream=True, timeout=120)
-            r.raise_for_status()
-            with open(tmp_path, 'wb') as fp:
-                for chunk in r.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        fp.write(chunk)
-            os.replace(tmp_path, desc_path)
-            return desc_path
-        finally:
-            try:
-                if os.path.isfile(tmp_path):
-                    os.remove(tmp_path)
-            except Exception:
-                pass
-    except Exception as e:
-        logger.warning(f"Failed to ensure TitleDB descriptions: {e}")
-        return None
-
 def getDirsAndFiles(path):
     entries = os.listdir(path)
     allFiles = []
@@ -937,9 +907,6 @@ def load_titledb():
     global _titles_index_ready
     global _versions_index_ready
     global _cnmts_index_file
-    global _titles_desc_db
-    global _titles_desc_by_title_id
-    global _titles_images_by_title_id
     global _english_titles_index_ready
     global identification_in_progress_count
     global _titles_db_loaded
@@ -1029,45 +996,6 @@ def load_titledb():
                 _titles_db = None
                 _titles_by_title_id = None
 
-                _titles_desc_db = None
-                _titles_desc_by_title_id = None
-                _titles_images_by_title_id = None
-                try:
-                    _, desc_filename = titledb.get_descriptions_url(app_settings)
-                    desc_path = os.path.join(TITLEDB_DIR, desc_filename)
-                    if not os.path.isfile(desc_path):
-                        desc_path = _ensure_titledb_descriptions_file(app_settings)
-                    if desc_path and os.path.isfile(desc_path):
-                        _titles_desc_db = _load_json_file(desc_path, 'descriptions')
-
-                        by_id = {}
-                        images_by_id = {}
-                        if isinstance(_titles_desc_db, dict):
-                            for item in _titles_desc_db.values():
-                                if not isinstance(item, dict):
-                                    continue
-                                tid = (item.get('id') or '').strip().upper()
-                                if not tid:
-                                    continue
-                                desc = (item.get('description') or '').strip()
-                                if desc:
-                                    by_id[tid] = desc
-
-                                screenshots = item.get('screenshots')
-                                if isinstance(screenshots, list):
-                                    urls = [str(u).strip() for u in screenshots if str(u or '').strip()]
-                                    if urls:
-                                        images_by_id[tid] = urls[:12]
-                        _titles_desc_by_title_id = by_id
-                        _titles_images_by_title_id = images_by_id
-                        # Release raw descriptions payload after deriving lightweight indexes.
-                        _titles_desc_db = None
-                except CorruptedTitleDBFileError:
-                    # Descriptions are optional for core operation; skip hard-failing on this file.
-                    raise
-                except Exception as e:
-                    logger.warning(f"Failed to load TitleDB descriptions: {e}")
-
                 _versions_txt_db = {}
                 with open(versions_txt_file, encoding="utf-8") as f:
                     for line in f:
@@ -1136,8 +1064,6 @@ def get_titledb_diagnostics():
                 'titles_index_rows': _titles_index_row_count(),
                 'titles_index_ready': bool(_titles_index_ready),
                 'english_titles_index_ready': bool(_english_titles_index_ready),
-                'titles_desc_by_title_id': len(_titles_desc_by_title_id) if isinstance(_titles_desc_by_title_id, dict) else 0,
-                'titles_images_by_title_id': len(_titles_images_by_title_id) if isinstance(_titles_images_by_title_id, dict) else 0,
                 'versions': _versions_index_row_count(),
                 'versions_index_ready': bool(_versions_index_ready),
                 'versions_txt': len(_versions_txt_db) if isinstance(_versions_txt_db, dict) else 0,
@@ -1154,9 +1080,6 @@ def unload_titledb():
     global _cnmts_index_ready
     global _titles_index_ready
     global _versions_index_ready
-    global _titles_desc_db
-    global _titles_desc_by_title_id
-    global _titles_images_by_title_id
     global _english_titles_index_ready
     global identification_in_progress_count
     global _titles_db_loaded
@@ -1177,9 +1100,6 @@ def unload_titledb():
         _cnmts_index_ready = False
         _titles_index_ready = False
         _versions_index_ready = False
-        _titles_desc_db = None
-        _titles_desc_by_title_id = None
-        _titles_images_by_title_id = None
         _english_titles_index_ready = False
         _titles_db_loaded = False
         with _title_lookup_cache_lock:
@@ -1397,7 +1317,7 @@ def _get_title_info_from_index_file(title_key, index_file, cache_store, cache_lo
         conn = _open_versions_index_db(index_file)
         try:
             row = conn.execute(
-                "SELECT name, banner_url, icon_url, title_id, category, nsu_id, description, rating "
+                "SELECT name, banner_url, icon_url, title_id, category, nsu_id, description, rating, screenshots "
                 "FROM titles WHERE title_id = ? LIMIT 1",
                 (title_key,),
             ).fetchone()
@@ -1419,6 +1339,7 @@ def _get_title_info_from_index_file(title_key, index_file, cache_store, cache_lo
         'nsuId': row[5],
         'description': row[6],
         'rating': row[7],
+        'screenshots': _normalize_screenshots(json.loads(row[8] or '[]')),
     }
     with cache_lock:
         cache_store[title_key] = info
@@ -1456,6 +1377,9 @@ def _merge_preferred_title_info(base_info, preferred_info):
         if isinstance(value, str) and not value.strip():
             continue
         merged[key] = value
+    screenshots = _normalize_screenshots(preferred_info.get('screenshots'))
+    if screenshots:
+        merged['screenshots'] = screenshots
     return merged
 
 
@@ -1732,8 +1656,6 @@ def get_game_info(title_id):
     global _titles_by_title_id
     global _titles_index_ready
     global _english_titles_index_ready
-    global _titles_desc_by_title_id
-    global _titles_images_by_title_id
     title_key = str(title_id or '').strip().upper()
     if not _titles_index_ready and _titles_db is None and _titles_by_title_id is None:
         _warn_titledb_state_once('titles_not_loaded', "titles index is not loaded. Call load_titledb first.")
@@ -1771,18 +1693,7 @@ def get_game_info(title_id):
             raise KeyError(title_id)
 
         description = (resolved_title_info.get('description') or '').strip() or None
-        if not description and isinstance(_titles_desc_by_title_id, dict):
-            try:
-                description = (_titles_desc_by_title_id.get(title_key) or '').strip() or None
-            except Exception:
-                pass
-
-        screenshots = []
-        if isinstance(_titles_images_by_title_id, dict):
-            try:
-                screenshots = _titles_images_by_title_id.get(title_key) or []
-            except Exception:
-                screenshots = []
+        screenshots = _normalize_screenshots(resolved_title_info.get('screenshots'))
         merged_title_info = dict(resolved_title_info or {})
         needs_local_backfill = not str(merged_title_info.get('name') or '').strip()
         if needs_local_backfill:

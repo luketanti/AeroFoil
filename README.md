@@ -278,7 +278,7 @@ The `Game info` modal uses TitleDB metadata:
 - `DLC search`: admins can trigger a download search for related add-ons directly from the details flow.
 - `Expand/Collapse toggle`: toggles the details card width (between standard `modal-lg` and `90vw` expanded layout) to provide more screen space when browsing. This preference is saved for the duration of the browser session.
 
-AeroFoil will download the TitleDB descriptions/screenshot dataset on demand to `./data/titledb/US.en.json` (Docker path: `/app/data/titledb/US.en.json`).
+AeroFoil reads descriptions and screenshots from the generated region TitleDB file, such as `titles.US.en.json`, downloaded in the TitleDB artifact. It does not download or read the separate raw `US.en.json` dataset.
 
 > [!NOTE]
 > On first boot, game titles may temporarily appear as `Unrecognized` while TitleDB is being downloaded in the background.
@@ -436,7 +436,7 @@ Set `trusted_proxies` to your proxy IP(s) and/or your Docker network subnet so t
 - nx-versions refreshes use persisted HTTP validators (ETag/Last-Modified), allowing unchanged data to return without downloading the file again. Version lookups reuse a parsed in-memory cache. The changelog is downloaded and parsed once per source revision into a local SQLite date index; normal date lookups query this index without loading the full changelog. Unchanged source revisions skip the changelog download entirely.
 - **Source updated** shows the upstream commit date for the dataset in use, in your local time: the TitleDB revision embedded in its artifacts, or the last commit changing nx-versions' `versions.txt`. These dates do not advance on unchanged refreshes. Small, cached GitHub commit metadata requests supply the dates; unavailable dates appear as **Unknown**.
 - TitleDB artifacts are downloaded separately from the metadata dataset.
-- The descriptions/screenshot dataset (`US.en.json`) is downloaded to `/app/data/titledb/US.en.json` and is not part of the TitleDB artifacts zip.
+- Descriptions and screenshots come from the generated `titles.<region>.<language>.json` files in the TitleDB artifact and are stored in the local SQLite title index. Older indexes rebuild automatically; obsolete raw files such as `US.en.json` and their `.meta` files are ignored and can be removed.
 - The TitleDB artifacts zip may be very large (multi-GB) depending on the upstream workflow output.
 
 </details>
