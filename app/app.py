@@ -3930,7 +3930,9 @@ def sphaira_graphql_api():
 
 @app.get('/api/shop/screenshot/<title_id>/<int:position>')
 def sphaira_screenshot_api(title_id, position):
-    denied = _sphaira_access_error()
+    # CyberFoil uses the same host/client/authentication policy as shop icons.
+    # Keep native Sphaira's existing JSON authentication flow on this shared URL.
+    denied = tinfoil_access(lambda: None)() if _is_shop_client_request() else _sphaira_access_error()
     if denied is not None:
         return denied
     from app.sphaira import SCREENSHOT_SIZES, cached_screenshot, screenshot_source
@@ -3941,12 +3943,16 @@ def sphaira_screenshot_api(title_id, position):
     if size not in SCREENSHOT_SIZES:
         return jsonify({'error': 'Invalid screenshot size.'}), 400
     cap, block_unrated = _user_rating_cap()
-    with titles.titledb_session():
-        info = titles.get_game_info(title_id) or {}
+    try:
+        with titles.titledb_session():
+            info = titles.get_game_info(title_id) or {}
+    except Exception:
+        logger.warning('Could not load screenshot metadata for title %s.', title_id, exc_info=True)
+        return jsonify({'success': False, 'error': 'Title metadata is unavailable.'}), 503
     if not _title_allowed(cap, _coerce_rating_value(info.get('rating')), block_unrated):
         return Response(status=403)
     screenshots = info.get('screenshots') or []
-    if position >= len(screenshots):
+    if not isinstance(screenshots, list) or position < 0 or position >= len(screenshots):
         return Response(status=404)
     source = screenshot_source(screenshots[position])
     if not source:
@@ -3959,6 +3965,41 @@ def sphaira_screenshot_api(title_id, position):
     response = send_from_directory(os.path.dirname(path), os.path.basename(path))
     # The URL is positional, so it may point at new artwork after a metadata update.
     response.headers['Cache-Control'] = 'private, max-age=3600'
+    return response
+
+
+@app.get('/api/shop/title-info/<title_id>')
+@tinfoil_access
+def shop_title_info_api(title_id):
+    """Shop metadata with URLs indexed by the zero-based TitleDB position."""
+    from app.sphaira import screenshot_source
+
+    title_id = str(title_id or '').strip().upper()
+    if not re.fullmatch(r'[0-9A-F]{16}', title_id):
+        return jsonify({'success': False, 'error': 'invalid_title_id'}), 400
+    try:
+        with titles.titledb_session():
+            info = titles.get_game_info(title_id) or {}
+    except Exception:
+        logger.warning('Could not load shop metadata for title %s.', title_id, exc_info=True)
+        return jsonify({'success': False, 'error': 'Title metadata is unavailable.'}), 503
+
+    cap, block_unrated = _user_rating_cap()
+    if not _title_allowed(cap, _coerce_rating_value(info.get('rating')), block_unrated):
+        return jsonify({'success': False, 'error': 'Title is restricted.'}), 403
+    screenshots = info.get('screenshots') or []
+    if not isinstance(screenshots, list):
+        screenshots = []
+    response = jsonify({
+        'success': True,
+        'title_id': title_id,
+        'description': info.get('description') if isinstance(info.get('description'), str) else None,
+        'screenshots': [
+            url_for('sphaira_screenshot_api', title_id=title_id, position=index)
+            for index, source in enumerate(screenshots) if screenshot_source(source)
+        ],
+    })
+    response.headers['Cache-Control'] = 'private, no-store'
     return response
 
 

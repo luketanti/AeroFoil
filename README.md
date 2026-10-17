@@ -171,6 +171,54 @@ In CyberFoil, set the AeroFoil Remote URL in Settings:
 See [CyberFoil virtual compressed streaming](#cyberfoil-virtual-compressed-streaming)
 for server-side decompression of compressed library files.
 
+### Shop title descriptions and screenshots
+
+CyberFoil can fetch title details using `GET /api/shop/title-info/<title_id>`.
+Send the shop username and password with HTTP Basic authentication on **each**
+metadata and image request; no web login or cookies are required. Public shops
+also allow anonymous requests. Use CyberFoil's normal `User-Agent` and the same
+HTTPS host-verification headers used for `/api/shop/icon/<title_id>`. The existing
+shop client restrictions, frozen-account checks, and title age limits apply.
+
+Title IDs must contain exactly 16 hexadecimal characters (case-insensitive).
+A successful response is HTTP 200 with JSON:
+
+```json
+{
+  "success": true,
+  "title_id": "0100AAAABBBB0000",
+  "description": "Example description",
+  "screenshots": [
+    "/api/shop/screenshot/0100AAAABBBB0000/0",
+    "/api/shop/screenshot/0100AAAABBBB0000/1"
+  ]
+}
+```
+
+Resolve these relative URLs against the AeroFoil server. `description` is a string
+or `null`; `screenshots` is always an array of URLs. Missing TitleDB metadata
+returns `description: null` and `screenshots: []` (subject to unrated-title access
+rules). Metadata responses use `Cache-Control: private, no-store`.
+
+`GET /api/shop/screenshot/<title_id>/<index>` returns `image/jpeg`. The index is
+**zero-based in the original TitleDB screenshot list**. Invalid source entries
+are omitted from metadata responses, so URL indexes may have gaps; fetch the
+returned URLs directly. Optional `?size=client` (default), `screen`, or `thumb`
+limits dimensions to 720×405, 1280×720, or 320×180 respectively. Images retain
+their aspect ratio without cropping, stretching, or upscaling. Downloads are
+cached under `data/cache/screenshots`, keyed by title, index, source URL and size;
+successful image responses use `Cache-Control: private, max-age=3600` and support
+conditional requests. Shop credentials are never forwarded to image hosts.
+
+Invalid metadata title IDs return HTTP 400 with `success: false` and an `error`.
+Invalid image IDs/indexes, absent screenshots and unusable source URLs return
+404; invalid image sizes return 400; restricted titles return 403. Metadata
+lookup failures return 503. Image download or decode failures return 502 with
+`{"error": "Screenshot is unavailable."}` and can be retried. Shop authentication
+and host-verification failures retain the icon API's JSON `error` response format
+(which can use HTTP 200); clients must check for `error` before consuming metadata
+or image bytes. The existing web `/api/title-info/<title_id>` endpoint is unchanged.
+
 ## Cheats
 
 AeroFoil includes an admin Cheat Manager under **Content → Cheats** for Atmosphère-compatible cheat files. Cheats are associated with a title ID and build ID, then stored as `<build-id>.txt`.
