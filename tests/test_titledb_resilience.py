@@ -140,8 +140,6 @@ class TitleDBResilienceTests(unittest.TestCase):
         with self._patch_titles_env(), \
             patch("app.titles.load_settings", return_value=self.settings), \
             patch("app.titles.titledb.get_region_titles_file", return_value="titles.US.en.json"), \
-            patch("app.titles.titledb.get_descriptions_url", return_value=("https://example.invalid/US.en.json", "US.en.json")), \
-            patch("app.titles._ensure_titledb_descriptions_file", return_value=None), \
             patch("app.titles.titledb.update_titledb", side_effect=_recover_missing) as mocked_update:
             first_load = titles.load_titledb()
             recovered.wait(timeout=2)
@@ -201,9 +199,7 @@ class TitleDBResilienceTests(unittest.TestCase):
 
         with self._patch_titles_env(), \
             patch("app.titles.load_settings", return_value=self.settings), \
-            patch("app.titles.titledb.get_region_titles_file", return_value="titles.US.en.json"), \
-            patch("app.titles.titledb.get_descriptions_url", return_value=("https://example.invalid/US.en.json", "US.en.json")), \
-            patch("app.titles._ensure_titledb_descriptions_file", return_value=None):
+            patch("app.titles.titledb.get_region_titles_file", return_value="titles.US.en.json"):
             loaded = titles.load_titledb()
 
         self.assertTrue(loaded)
@@ -218,8 +214,6 @@ class TitleDBResilienceTests(unittest.TestCase):
         with self._patch_titles_env(), \
             patch("app.titles.load_settings", return_value=self.settings), \
             patch("app.titles.titledb.get_region_titles_file", return_value="titles.US.en.json"), \
-            patch("app.titles.titledb.get_descriptions_url", return_value=("https://example.invalid/US.en.json", "US.en.json")), \
-            patch("app.titles._ensure_titledb_descriptions_file", return_value=None), \
             patch("app.titles._build_titledb_data_signature", side_effect=["sig-v1", "sig-v2", "sig-v2"]):
             first_loaded = titles.load_titledb()
             self.assertTrue(first_loaded)
@@ -254,9 +248,7 @@ class TitleDBResilienceTests(unittest.TestCase):
 
         with self._patch_titles_env(), \
             patch("app.titles.load_settings", return_value=self.settings), \
-            patch("app.titles.titledb.get_region_titles_file", return_value="titles.US.en.json"), \
-            patch("app.titles.titledb.get_descriptions_url", return_value=("https://example.invalid/US.en.json", "US.en.json")), \
-            patch("app.titles._ensure_titledb_descriptions_file", return_value=None):
+            patch("app.titles.titledb.get_region_titles_file", return_value="titles.US.en.json"):
             loaded = titles.load_titledb()
             self.assertEqual(titles._cnmts_index_file, fixed_index_path)
 
@@ -294,8 +286,7 @@ class TitleDBResilienceTests(unittest.TestCase):
             patch.object(titledb, "TITLEDB_ARTEFACTS_URL", "https://example.invalid/titledb.zip"), \
             patch("app.titledb._get_with_retry", return_value=types.SimpleNamespace(status_code=302, headers={"Location": "https://example.invalid/direct.zip"})), \
             patch("app.titledb.unzip_http.RemoteZipFile", return_value=fake_zip), \
-            patch("app.titledb.download_titledb_files") as mocked_download, \
-            patch("app.titledb._download_json_file", return_value=False):
+            patch("app.titledb.download_titledb_files") as mocked_download:
             titledb.update_titledb_files(self.settings)
 
         mocked_download.assert_called_once_with(fake_zip, ["cnmts-fixed.json"])
@@ -334,8 +325,7 @@ class TitleDBResilienceTests(unittest.TestCase):
             patch.object(titledb, "TITLEDB_ARTEFACTS_URL", "https://example.invalid/titledb.zip"), \
             patch("app.titledb._get_with_retry", return_value=types.SimpleNamespace(status_code=302, headers={"Location": "https://example.invalid/direct.zip"})), \
             patch("app.titledb.unzip_http.RemoteZipFile", return_value=fake_zip), \
-            patch("app.titledb.download_titledb_files") as mocked_download, \
-            patch("app.titledb._download_json_file", return_value=False):
+            patch("app.titledb.download_titledb_files") as mocked_download:
             titledb.update_titledb_files(settings_with_english)
 
         mocked_download.assert_called_once_with(

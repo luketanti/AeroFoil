@@ -20,6 +20,7 @@ import threading
 import logging
 import copy
 import hashlib
+import math
 import flask.cli
 from datetime import timedelta, datetime
 flask.cli.show_server_banner = lambda *args: None
@@ -36,6 +37,7 @@ from app.utils import *
 from app.library import *
 from app.library import _get_nsz_runner, _ensure_unique_path
 from app import titledb
+from app import metadata_sources
 from app import cheats
 from app.title_requests import create_title_request, list_requests
 import requests
@@ -52,6 +54,7 @@ import zipfile
 import tempfile
 from urllib.parse import quote
 
+from app import discovery
 from app import compressed_stream
 
 from app.db import add_access_event, get_access_events
@@ -506,6 +509,8 @@ titles_metadata_cache = {
 }
 titles_total_cache_lock = threading.Lock()
 titles_total_cache = {}
+titles_sorted_cache_lock = threading.Lock()
+titles_sorted_cache = {}
 library_size_cache_lock = threading.Lock()
 library_size_cache = {
     'state_token': None,
@@ -755,6 +760,46 @@ def _store_titles_total(cache_key, total):
             titles_total_cache.clear()
             for key, value in ordered:
                 titles_total_cache[key] = value
+
+
+# Name-sort ordering for /api/titles used to re-run the full unpaginated scan +
+# a titledb lookup per row + a Python sort on every single page/search/filter
+# request. Cache the sorted app_pk order the same way `total` above is already
+# cached (same key, same TTL knob) - a page fetch then only needs to look up
+# the titledb metadata for the rows actually being returned.
+def _get_cached_titles_sorted(cache_key):
+    if TITLES_TOTAL_CACHE_TTL_S == 0:
+        return None
+    now = time.time()
+    with titles_sorted_cache_lock:
+        cached = titles_sorted_cache.get(cache_key)
+        if not isinstance(cached, dict):
+            return None
+        if TITLES_TOTAL_CACHE_TTL_S is not None:
+            age = now - float(cached.get('timestamp') or 0.0)
+            if age > float(TITLES_TOTAL_CACHE_TTL_S):
+                titles_sorted_cache.pop(cache_key, None)
+                return None
+        return list(cached.get('order') or [])
+
+
+def _store_titles_sorted(cache_key, order):
+    if TITLES_TOTAL_CACHE_TTL_S == 0:
+        return
+    with titles_sorted_cache_lock:
+        titles_sorted_cache[cache_key] = {
+            'order': list(order),
+            'timestamp': time.time(),
+        }
+        if len(titles_sorted_cache) > TITLES_TOTAL_CACHE_MAX_ENTRIES:
+            ordered = sorted(
+                titles_sorted_cache.items(),
+                key=lambda kv: float((kv[1] or {}).get('timestamp') or 0.0),
+                reverse=True,
+            )[:TITLES_TOTAL_CACHE_MAX_ENTRIES]
+            titles_sorted_cache.clear()
+            for key, value in ordered:
+                titles_sorted_cache[key] = value
 
 def _build_enriched_shop_files():
     """Build the shop file list annotated with each file's ESRB rating.
@@ -1134,6 +1179,7 @@ def _get_discovery_sections(limit=12):
 
     now = time.time()
     state_token = _get_titledb_aware_state_token()
+    rotation_key = _recommendation_rotation_key()
     payload = None
     with shop_sections_cache_lock:
         cache_enabled = SHOP_SECTIONS_CACHE_TTL_S is None or SHOP_SECTIONS_CACHE_TTL_S > 0
@@ -1144,6 +1190,7 @@ def _get_discovery_sections(limit=12):
             cache_enabled
             and shop_sections_cache['payload'] is not None
             and shop_sections_cache.get('state_token') == state_token
+            and _shop_sections_payload_matches_rotation(shop_sections_cache['payload'], rotation_key)
             and cache_valid
         )
         if cache_hit:
@@ -1156,6 +1203,7 @@ def _get_discovery_sections(limit=12):
                 disk_cache
                 and disk_cache.get('limit') == max(limit, 50)
                 and str(disk_cache.get('state_token') or '') == state_token
+                and _shop_sections_payload_matches_rotation(disk_cache.get('payload'), rotation_key)
             ):
                 disk_payload = disk_cache.get('payload')
                 disk_ts = float(disk_cache.get('timestamp') or 0)
@@ -1318,12 +1366,70 @@ def _read_proc_meminfo_bytes():
         'vms_bytes': values.get('VmSize')
     }
 
+
+def _recommendation_rotation_key(now=None):
+    """Return the local calendar day used to keep recommendations stable for a day."""
+    if now is None:
+        import datetime as dt_mod
+        now = dt_mod.datetime.now()
+    current = now
+    return current.strftime('%Y-%m-%d')
+
+
+def _shop_sections_payload_matches_rotation(payload, rotation_key=None):
+    if not isinstance(payload, dict):
+        return False
+    expected = rotation_key or _recommendation_rotation_key()
+    return str(payload.get('rotation_key') or '') == expected
+
+
+def _build_rotating_recommendations(base_items, limit=40, rotation_key=None, newest_visible_count=12):
+    """Build stable daily recommendations weighted by local download popularity.
+
+    The titles visible at the front of the New row are considered only after older
+    candidates, keeping the two discovery rows distinct whenever the library is
+    large enough. A deterministic weighted shuffle changes with the calendar day,
+    while larger download counts improve (but do not guarantee) placement.
+    """
+    items = list(base_items or [])
+    try:
+        limit = max(0, int(limit))
+    except (TypeError, ValueError):
+        limit = 40
+    if not items or limit == 0:
+        return []
+
+    try:
+        newest_visible_count = max(0, int(newest_visible_count))
+    except (TypeError, ValueError):
+        newest_visible_count = 12
+    rotation_key = rotation_key or _recommendation_rotation_key()
+
+    def _rank(item):
+        identity = '|'.join((
+            str(item.get('title_id') or ''),
+            str(item.get('app_id') or ''),
+            str(item.get('file_id') or ''),
+        ))
+        digest = hashlib.sha256(f'{rotation_key}|{identity}'.encode('utf-8')).digest()
+        unit_value = (int.from_bytes(digest[:8], 'big') + 1) / ((1 << 64) + 1)
+        downloads = max(0, _safe_int(item.get('download_count')))
+        popularity_weight = 1.0 + min(math.log1p(downloads), 6.0)
+        return (-math.log(unit_value) / popularity_weight, identity)
+
+    split_at = min(newest_visible_count, len(items))
+    older_items = sorted(items[split_at:], key=_rank)
+    newest_items = sorted(items[:split_at], key=_rank)
+    return (older_items + newest_items)[:limit]
+
+
 def _build_shop_sections_payload(limit, full_catalog=False):
     try:
         limit = int(limit or 50)
     except (TypeError, ValueError):
         limit = 50
     limit = max(1, limit)
+    rotation_key = _recommendation_rotation_key()
     ranked_files = (
         db.session.query(
             app_files.c.app_id.label('app_pk'),
@@ -1431,9 +1537,12 @@ def _build_shop_sections_payload(limit, full_catalog=False):
         discovery_limit = 40
         new_items = base_items[:discovery_limit]
 
-        recommended_items = sorted(base_items, key=lambda item: item['download_count'], reverse=True)[:discovery_limit]
-        if not any(item['download_count'] for item in recommended_items):
-            recommended_items = new_items[:discovery_limit]
+        recommended_items = _build_rotating_recommendations(
+            base_items,
+            limit=discovery_limit,
+            rotation_key=rotation_key,
+            newest_visible_count=12,
+        )
 
         all_limit = None
         updates_dlc_limit = None
@@ -1522,7 +1631,8 @@ def _build_shop_sections_payload(limit, full_catalog=False):
                 'truncated': False,
             })
         return {
-            'sections': sections
+            'rotation_key': rotation_key,
+            'sections': sections,
         }
 
 
@@ -1804,27 +1914,46 @@ def _save_sync_resolve_note():
     return ''
 
 
-def _save_sync_title_dir(user, title_id):
-    return os.path.join(_save_sync_user_dir(user), title_id)
+def _normalize_save_type(value):
+    save_type = str(value or 'unknown').strip().lower()
+    if save_type not in ('unknown', 'account', 'device'):
+        raise ValueError('Invalid save_type. Use account, device, or unknown.')
+    return save_type
 
 
-def _save_sync_latest_dir(user, title_id):
-    return os.path.join(_save_sync_title_dir(user, title_id), 'latest')
+def _save_sync_requested_type():
+    query_type = request.args.get('save_type')
+    form_type = request.form.get('save_type')
+    if query_type is not None and form_type is not None:
+        if _normalize_save_type(query_type) != _normalize_save_type(form_type):
+            raise ValueError('Invalid conflicting save_type values.')
+    return _normalize_save_type(form_type if form_type is not None else query_type)
 
 
-def _save_sync_latest_archive_path(user, title_id):
-    return os.path.join(_save_sync_title_dir(user, title_id), '_latest.zip')
+def _save_sync_title_dir(user, title_id, save_type='unknown'):
+    save_type = _normalize_save_type(save_type)
+    title_dir = os.path.join(_save_sync_user_dir(user), title_id)
+    # Untyped historical files stay exactly where they are.
+    return title_dir if save_type == 'unknown' else os.path.join(title_dir, save_type)
 
 
-def _save_sync_archive_path(user, title_id, save_id=None):
+def _save_sync_latest_dir(user, title_id, save_type='unknown'):
+    return os.path.join(_save_sync_title_dir(user, title_id, save_type=save_type), 'latest')
+
+
+def _save_sync_latest_archive_path(user, title_id, save_type='unknown'):
+    return os.path.join(_save_sync_title_dir(user, title_id, save_type=save_type), '_latest.zip')
+
+
+def _save_sync_archive_path(user, title_id, save_id=None, save_type='unknown'):
     if save_id:
-        return os.path.join(_save_sync_title_dir(user, title_id), f'{save_id}.zip')
+        return os.path.join(_save_sync_title_dir(user, title_id, save_type=save_type), f'{save_id}.zip')
     # Legacy single-save path.
     return os.path.join(_save_sync_user_dir(user), f'{title_id}.zip')
 
 
-def _save_sync_metadata_path(user, title_id, save_id):
-    return os.path.join(_save_sync_title_dir(user, title_id), f'{save_id}.json')
+def _save_sync_metadata_path(user, title_id, save_id, save_type='unknown'):
+    return os.path.join(_save_sync_title_dir(user, title_id, save_type=save_type), f'{save_id}.json')
 
 
 def _save_sync_format_created_at(created_ts):
@@ -1924,10 +2053,10 @@ def _save_sync_clear_directory(path):
             continue
 
 
-def _save_sync_refresh_latest_from_archive(user, title_id, archive_path):
-    latest_dir = _save_sync_latest_dir(user, title_id)
+def _save_sync_refresh_latest_from_archive(user, title_id, archive_path, save_type='unknown'):
+    latest_dir = _save_sync_latest_dir(user, title_id, save_type=save_type)
     os.makedirs(latest_dir, exist_ok=True)
-    temp_dir = os.path.join(_save_sync_title_dir(user, title_id), '.latest_tmp')
+    temp_dir = os.path.join(_save_sync_title_dir(user, title_id, save_type=save_type), '.latest_tmp')
     if os.path.isdir(temp_dir):
         shutil.rmtree(temp_dir, ignore_errors=True)
     os.makedirs(temp_dir, exist_ok=True)
@@ -1988,16 +2117,16 @@ def _save_sync_build_archive_from_directory(source_dir, archive_path):
         raise
 
 
-def _save_sync_refresh_latest_for_title(user, title_id):
-    versions = _save_sync_collect_versions_for_title(user, title_id)
+def _save_sync_refresh_latest_for_title(user, title_id, save_type='unknown'):
+    versions = _save_sync_collect_versions_for_title(user, title_id, save_type=save_type)
     latest_archive = None
     for version in versions:
         archive_path = str(version.get('archive_path') or '')
         if archive_path and os.path.isfile(archive_path):
             latest_archive = archive_path
             break
-    latest_dir = _save_sync_latest_dir(user, title_id)
-    latest_archive_path = _save_sync_latest_archive_path(user, title_id)
+    latest_dir = _save_sync_latest_dir(user, title_id, save_type=save_type)
+    latest_archive_path = _save_sync_latest_archive_path(user, title_id, save_type=save_type)
     if not latest_archive:
         _save_sync_clear_directory(latest_dir)
         try:
@@ -2006,12 +2135,12 @@ def _save_sync_refresh_latest_for_title(user, title_id):
         except Exception:
             pass
         return
-    _save_sync_refresh_latest_from_archive(user, title_id, latest_archive)
+    _save_sync_refresh_latest_from_archive(user, title_id, latest_archive, save_type=save_type)
 
 
-def _save_sync_collect_versions_for_title(user, title_id):
+def _save_sync_collect_versions_for_title(user, title_id, save_type='unknown'):
     versions = []
-    title_dir = _save_sync_title_dir(user, title_id)
+    title_dir = _save_sync_title_dir(user, title_id, save_type=save_type)
     if os.path.isdir(title_dir):
         try:
             for filename in sorted(os.listdir(title_dir)):
@@ -2031,7 +2160,7 @@ def _save_sync_collect_versions_for_title(user, title_id):
                 except Exception:
                     size = 0
 
-                meta = _save_sync_read_metadata(_save_sync_metadata_path(user, title_id, save_id))
+                meta = _save_sync_read_metadata(_save_sync_metadata_path(user, title_id, save_id, save_type=save_type))
                 created_ts = _save_sync_parse_created_ts(meta.get('created_ts'))
                 if created_ts <= 0:
                     created_ts = _save_sync_parse_created_ts(meta.get('createdAt'))
@@ -2050,20 +2179,21 @@ def _save_sync_collect_versions_for_title(user, title_id):
                 note = _normalize_save_note(meta.get('note'))
                 versions.append({
                     'title_id': title_id,
+                    'save_type': save_type,
                     'save_id': save_id,
                     'size': size,
                     'note': note,
                     'created_ts': int(created_ts),
                     'created_at': created_at,
-                    'download_url': f'/api/saves/download/{title_id}/{save_id}.zip',
-                    'delete_url': f'/api/saves/delete/{title_id}/{save_id}',
+                    'download_url': f'/api/saves/download/{title_id}/{save_id}.zip?save_type={save_type}',
+                    'delete_url': f'/api/saves/delete/{title_id}/{save_id}?save_type={save_type}',
                     'archive_path': archive_path,
                     'legacy': False,
                 })
         except Exception as e:
             logger.warning('Failed listing versioned saves for title %s: %s', title_id, e)
 
-    legacy_archive = _save_sync_archive_path(user, title_id)
+    legacy_archive = _save_sync_archive_path(user, title_id) if save_type == 'unknown' else ''
     if os.path.isfile(legacy_archive):
         try:
             legacy_size = int(os.path.getsize(legacy_archive))
@@ -2075,13 +2205,14 @@ def _save_sync_collect_versions_for_title(user, title_id):
             legacy_created_ts = int(time.time())
         versions.append({
             'title_id': title_id,
+            'save_type': save_type,
             'save_id': 'legacy',
             'size': legacy_size,
             'note': '',
             'created_ts': legacy_created_ts,
             'created_at': _save_sync_format_created_at(legacy_created_ts),
-            'download_url': f'/api/saves/download/{title_id}.zip',
-            'delete_url': f'/api/saves/delete/{title_id}',
+            'download_url': f'/api/saves/download/{title_id}.zip?save_type={save_type}',
+            'delete_url': f'/api/saves/delete/{title_id}?save_type={save_type}',
             'archive_path': legacy_archive,
             'legacy': True,
         })
@@ -2108,17 +2239,18 @@ def _save_sync_collect_versions(user):
 
     saves = []
     for title_id in sorted(title_ids):
-        saves.extend(_save_sync_collect_versions_for_title(user, title_id))
+        for save_type in ('unknown', 'account', 'device'):
+            saves.extend(_save_sync_collect_versions_for_title(user, title_id, save_type=save_type))
 
     saves.sort(key=lambda item: (str(item.get('title_id') or ''), -(int(item.get('created_ts') or 0)), str(item.get('save_id') or '')))
     return saves
 
 
-def _save_sync_resolve_download_archive(user, title_id, save_id=None):
-    latest_archive_path = _save_sync_latest_archive_path(user, title_id)
+def _save_sync_resolve_download_archive(user, title_id, save_id=None, save_type='unknown'):
+    latest_archive_path = _save_sync_latest_archive_path(user, title_id, save_type=save_type)
     wants_generated_latest = (save_id is None) or (str(save_id).strip().lower() == 'latest')
     if wants_generated_latest:
-        latest_dir = _save_sync_latest_dir(user, title_id)
+        latest_dir = _save_sync_latest_dir(user, title_id, save_type=save_type)
         if os.path.isdir(latest_dir):
             try:
                 _save_sync_build_archive_from_directory(latest_dir, latest_archive_path)
@@ -2142,19 +2274,20 @@ def _save_sync_resolve_download_archive(user, title_id, save_id=None):
             latest_created_ts = int(time.time())
         return {
             'title_id': title_id,
+            'save_type': save_type,
             'save_id': 'latest',
             'size': latest_size,
             'note': 'latest',
             'created_ts': latest_created_ts,
             'created_at': _save_sync_format_created_at(latest_created_ts),
-            'download_url': f'/api/saves/download/{title_id}.zip',
+            'download_url': f'/api/saves/download/{title_id}.zip?save_type={save_type}',
             'delete_url': '',
             'archive_path': latest_archive_path,
             'legacy': False,
             'generated_latest': True,
         }, None
 
-    versions = _save_sync_collect_versions_for_title(user, title_id)
+    versions = _save_sync_collect_versions_for_title(user, title_id, save_type=save_type)
     if not versions:
         return None, 'Save archive not found.'
     if save_id:
@@ -2168,8 +2301,8 @@ def _save_sync_resolve_download_archive(user, title_id, save_id=None):
     return versions[0], None
 
 
-def _save_sync_delete_archive(user, title_id, save_id=None):
-    selected_archive, resolve_error = _save_sync_resolve_download_archive(user, title_id, save_id=save_id)
+def _save_sync_delete_archive(user, title_id, save_id=None, save_type='unknown'):
+    selected_archive, resolve_error = _save_sync_resolve_download_archive(user, title_id, save_id=save_id, save_type=save_type)
     if selected_archive is None:
         return None, resolve_error or 'Save archive not found.'
 
@@ -2189,13 +2322,13 @@ def _save_sync_delete_archive(user, title_id, save_id=None):
 
     if not is_legacy and selected_save_id:
         try:
-            metadata_path = _save_sync_metadata_path(user, title_id, selected_save_id)
+            metadata_path = _save_sync_metadata_path(user, title_id, selected_save_id, save_type=save_type)
             if os.path.isfile(metadata_path):
                 os.remove(metadata_path)
         except Exception as e:
             logger.warning('Failed deleting save metadata for user %s title %s save %s: %s', getattr(user, 'user', '?'), title_id, selected_save_id, e)
 
-        title_dir = _save_sync_title_dir(user, title_id)
+        title_dir = _save_sync_title_dir(user, title_id, save_type=save_type)
         try:
             if os.path.isdir(title_dir) and not os.listdir(title_dir):
                 os.rmdir(title_dir)
@@ -2204,6 +2337,7 @@ def _save_sync_delete_archive(user, title_id, save_id=None):
 
     return {
         'title_id': title_id,
+        'save_type': save_type,
         'save_id': selected_save_id or '',
         'legacy': is_legacy,
     }, None
@@ -2296,13 +2430,12 @@ def on_library_change(events):
         created_events = [e for e in events if e.type == 'created']
         modified_events = [e for e in events if e.type != 'created']
 
+        deleted_paths = []
         for event in modified_events:
             if event.type == 'moved':
                 moved_outside_library = not event.dest_path or not event.dest_path.startswith(event.directory)
                 if moved_outside_library:
-                    if file_exists_in_db(event.src_path):
-                        has_changes = True
-                    delete_file_by_filepath(event.src_path)
+                    deleted_paths.append(event.src_path)
                     continue
                 if file_exists_in_db(event.src_path):
                     # update the path
@@ -2314,10 +2447,7 @@ def on_library_change(events):
                     created_events.append(event)
 
             elif event.type == 'deleted':
-                # delete the file from library if it exists
-                if file_exists_in_db(event.src_path):
-                    has_changes = True
-                delete_file_by_filepath(event.src_path)
+                deleted_paths.append(event.src_path)
 
             elif event.type == 'modified':
                 # can happen if file copy has started before the app was running
@@ -2325,6 +2455,26 @@ def on_library_change(events):
                     continue
                 add_files_to_library(event.directory, [event.src_path])
                 has_changes = True
+
+        if deleted_paths:
+            # One transaction for the whole event batch: per-event deletes paid
+            # an existence query plus a commit (and fsync) per file, which made
+            # mass deletions crawl through the watcher one file at a time.
+            unique_deleted = list(dict.fromkeys(deleted_paths))
+            try:
+                deleted_count, apps_updated = delete_files_by_filepaths_batch(unique_deleted, commit=True)
+            except Exception as e:
+                # Keep the watcher thread alive; the periodic scan reconciles
+                # anything this batch failed to remove.
+                db.session.rollback()
+                logger.error(f"Failed to remove deleted files from the database: {e}")
+                deleted_count, apps_updated = 0, 0
+            if deleted_count > 0:
+                has_changes = True
+                logger.info(
+                    f"Removed {deleted_count} deleted files from the database "
+                    f"({apps_updated} app references updated)."
+                )
 
         if created_events:
             directories = list(set(e.directory for e in created_events))
@@ -2362,6 +2512,16 @@ def create_app():
 
 # Create app
 app = create_app()
+
+
+@app.context_processor
+def inject_static_asset_version():
+    """Make template assets refresh after an in-place application update."""
+    try:
+        version = os.stat(os.path.join(app.static_folder, 'style.css')).st_mtime_ns
+    except OSError:
+        version = None
+    return {'static_asset_version': version}
 
 
 @app.errorhandler(RequestEntityTooLarge)
@@ -2487,7 +2647,7 @@ def _block_frozen_web_ui():
             return None
 
         message = (getattr(current_user, 'frozen_message', None) or '').strip() or 'Account is frozen.'
-        if path.startswith('/api/'):
+        if path.startswith('/api/') or (path == '/' and request.method == 'OPTIONS'):
             return jsonify({'success': False, 'error': message}), 403
         return render_template('frozen.html', title='Library', message=message)
     except Exception:
@@ -3742,8 +3902,135 @@ def access_shop():
 def access_shop_auth():
     return access_shop()
 
-@app.route('/')
+def _sphaira_access_error():
+    """Use shop credentials without the Tinfoil encryption/Hauth response format."""
+    _maybe_sync_request_settings()
+    shop = app_settings.get('shop') or {}
+    if bool(shop.get('external_tinfoil_only')):
+        remote = _effective_remote_addr()
+        if remote and not _is_private_ip(remote):
+            return jsonify({'error': 'External access is restricted to Tinfoil/CyberFoil clients.'}), 403
+    if request.authorization is not None:
+        success, error, _ = basic_auth(request)
+        if not success:
+            return jsonify({'error': error}), 401
+    elif current_user.is_authenticated:
+        if bool(getattr(current_user, 'frozen', False)) or not current_user.has_access('shop'):
+            return jsonify({'error': 'This account does not have access to the shop.'}), 403
+    elif not shop.get('public', False):
+        success, error, _ = basic_auth(request)
+        if not success:
+            return jsonify({'error': error}), 401
+    return None
+
+
+def sphaira_handshake():
+    denied = _sphaira_access_error()
+    if denied is not None:
+        return denied
+    from app import discovery
+    shop = app_settings.get('shop') or {}
+    return jsonify({
+        'uid': discovery._server_uid(), 'name': shop.get('discovery_name') or 'AeroFoil',
+        'version': APP_VERSION, 'protocol_version': 1,
+        'motd': _render_motd_template(shop.get('motd') or '') if shop.get('motd_enabled', True) else '',
+        'public': bool(shop.get('public', False)), 'remote': shop.get('host') or '',
+        'features': {'shop': True, 'resumable_download': True, 'dumps_upload': False,
+                     'save_backup': False, 'resumable_upload': False},
+    })
+
+
+@app.post('/api/graphql')
+def sphaira_graphql_api():
+    denied = _sphaira_access_error()
+    if denied is not None:
+        return denied
+    from app.sphaira import Catalogue, execute
+    cap, block_unrated = _user_rating_cap()
+    catalogue = Catalogue(cap, block_unrated, _title_allowed, _file_blocked_by_cap)
+    with titles.titledb_session():
+        return jsonify(execute(request.get_json(silent=True), catalogue))
+
+
+@app.get('/api/shop/screenshot/<title_id>/<int:position>')
+def sphaira_screenshot_api(title_id, position):
+    # CyberFoil uses the same host/client/authentication policy as shop icons.
+    # Keep native Sphaira's existing JSON authentication flow on this shared URL.
+    denied = tinfoil_access(lambda: None)() if _is_shop_client_request() else _sphaira_access_error()
+    if denied is not None:
+        return denied
+    from app.sphaira import SCREENSHOT_SIZES, cached_screenshot, screenshot_source
+    title_id = str(title_id).strip().upper()
+    if not re.fullmatch(r'[0-9A-F]{16}', title_id):
+        return Response(status=404)
+    size = str(request.args.get('size') or 'client').upper()
+    if size not in SCREENSHOT_SIZES:
+        return jsonify({'error': 'Invalid screenshot size.'}), 400
+    cap, block_unrated = _user_rating_cap()
+    try:
+        with titles.titledb_session():
+            info = titles.get_game_info(title_id) or {}
+    except Exception:
+        logger.warning('Could not load screenshot metadata for title %s.', title_id, exc_info=True)
+        return jsonify({'success': False, 'error': 'Title metadata is unavailable.'}), 503
+    if not _title_allowed(cap, _coerce_rating_value(info.get('rating')), block_unrated):
+        return Response(status=403)
+    screenshots = info.get('screenshots') or []
+    if not isinstance(screenshots, list) or position < 0 or position >= len(screenshots):
+        return Response(status=404)
+    source = screenshot_source(screenshots[position])
+    if not source:
+        return Response(status=404)
+    try:
+        path = cached_screenshot(os.path.join(CACHE_DIR, 'screenshots'), title_id, position, source, size)
+    except Exception:
+        logger.warning('Could not load screenshot %s for title %s.', position, title_id, exc_info=True)
+        return jsonify({'error': 'Screenshot is unavailable.'}), 502
+    response = send_from_directory(os.path.dirname(path), os.path.basename(path))
+    # The URL is positional, so it may point at new artwork after a metadata update.
+    response.headers['Cache-Control'] = 'private, max-age=3600'
+    return response
+
+
+@app.get('/api/shop/title-info/<title_id>')
+@tinfoil_access
+def shop_title_info_api(title_id):
+    """Shop metadata with URLs indexed by the zero-based TitleDB position."""
+    from app.sphaira import screenshot_source
+
+    title_id = str(title_id or '').strip().upper()
+    if not re.fullmatch(r'[0-9A-F]{16}', title_id):
+        return jsonify({'success': False, 'error': 'invalid_title_id'}), 400
+    try:
+        with titles.titledb_session():
+            info = titles.get_game_info(title_id) or {}
+    except Exception:
+        logger.warning('Could not load shop metadata for title %s.', title_id, exc_info=True)
+        return jsonify({'success': False, 'error': 'Title metadata is unavailable.'}), 503
+
+    cap, block_unrated = _user_rating_cap()
+    if not _title_allowed(cap, _coerce_rating_value(info.get('rating')), block_unrated):
+        return jsonify({'success': False, 'error': 'Title is restricted.'}), 403
+    screenshots = info.get('screenshots') or []
+    if not isinstance(screenshots, list):
+        screenshots = []
+    response = jsonify({
+        'success': True,
+        'title_id': title_id,
+        'description': info.get('description') if isinstance(info.get('description'), str) else None,
+        'screenshots': [
+            url_for('sphaira_screenshot_api', title_id=title_id, position=index)
+            for index, source in enumerate(screenshots) if screenshot_source(source)
+        ],
+    })
+    response.headers['Cache-Control'] = 'private, no-store'
+    return response
+
+
+@app.route('/', methods=['GET', 'OPTIONS'])
 def index():
+    if request.method == 'OPTIONS':
+        return sphaira_handshake()
     is_shop_client = _is_shop_client_request()
     is_allowed_external_client = _is_shop_client_request()
     tinfoil_only_mode = bool((app_settings.get('shop') or {}).get('tinfoil_only_mode', False))
@@ -4297,6 +4584,7 @@ def request_prowlarr_search_api():
         timeout_seconds = max(5, min(timeout_seconds, 180))
         search_limit = _get_prowlarr_search_limit(prowlarr_cfg)
         client = ProwlarrClient(prowlarr_cfg['url'], prowlarr_cfg['api_key'], timeout_seconds=timeout_seconds)
+        logger.info(f'Prowlarr search (requests page): "{full_query}" (title {title_id or "-"})')
         results = client.search(
             full_query,
             indexer_ids=prowlarr_cfg.get('indexer_ids') or [],
@@ -4576,6 +4864,7 @@ def get_settings_api():
         pass
     settings.setdefault('downloads', {})
     settings['downloads']['client_capabilities'] = get_supported_download_clients()
+    settings['metadata_source_status'] = metadata_sources.get_metadata_source_status()
     return jsonify(settings)
 
 @app.post('/api/settings/content-filter')
@@ -4588,6 +4877,20 @@ def set_content_filter_settings_api():
     # Encrypted shop payloads vary by filter; drop caches so changes apply now.
     _invalidate_shop_root_cache()
     return jsonify({'success': True, 'errors': []})
+
+
+@app.post('/api/settings/metadata-sources')
+@access_required('admin')
+def set_metadata_sources_settings_api():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or type(data.get('nx_versions_enabled')) is not bool:
+        return jsonify({'success': False, 'errors': [{'error': 'nx_versions_enabled must be a boolean.'}]}), 400
+    set_metadata_sources_settings(data)
+    reload_conf()
+    warning = metadata_sources.update_metadata_sources(app_settings)
+    post_library_change()
+    return jsonify({'success': True, 'errors': [], 'warning': warning,
+                    'metadata_source_status': metadata_sources.get_metadata_source_status()})
 
 
 @app.post('/api/settings/titles')
@@ -4659,6 +4962,7 @@ def set_shop_settings_api():
     if not success:
         return jsonify({'success': False, 'errors': errors}), 400
     set_shop_settings(shop_data)
+    discovery.reconcile()
     if security_data:
         set_security_settings(security_data)
     reload_conf()
@@ -5078,6 +5382,7 @@ def downloads_search():
             if suffix and not full_query.lower().endswith(suffix.lower()):
                 full_query = f"{full_query} {suffix}".strip()
         client = ProwlarrClient(prowlarr_cfg['url'], prowlarr_cfg['api_key'], timeout_seconds=timeout_seconds)
+        logger.info(f'Prowlarr search (manual): "{full_query}"')
         results = client.search(
             full_query,
             indexer_ids=prowlarr_cfg.get('indexer_ids') or [],
@@ -5824,12 +6129,24 @@ def upload_library_status(upload_id):
     return jsonify({'success': True, 'job': payload})
 
 
+@app.get('/api/saves/capabilities')
+@save_sync_access
+def save_capabilities_api():
+    return jsonify({'save_types': True, 'types': ['unknown', 'account', 'device']})
+
+
 @app.get('/api/saves/list')
 @save_sync_access
 def list_saves_api():
     user = getattr(g, 'save_sync_user', None)
     if user is None:
         return api_error('Save sync authorization failed.', 403)
+
+    try:
+        requested_type = _save_sync_requested_type()
+    except ValueError as error:
+        return api_error(str(error), 400)
+    include_all_types = request.args.get('save_types') == '1' and 'save_type' not in request.args
 
     saves = []
     titledb_loaded = False
@@ -5841,13 +6158,15 @@ def list_saves_api():
     try:
         is_cyberfoil = _is_cyberfoil_request()
         save_versions = _save_sync_collect_versions(user)
+        if not include_all_types:
+            save_versions = [version for version in save_versions if version['save_type'] == requested_type]
         seen_titles = {
-            str(item.get('title_id') or '').strip().upper()
+            (str(item.get('title_id') or '').strip().upper(), item['save_type'])
             for item in save_versions
             if str(item.get('title_id') or '').strip()
         }
-        for title_id in sorted(seen_titles):
-            latest_dir = _save_sync_latest_dir(user, title_id)
+        for title_id, save_type in sorted(seen_titles):
+            latest_dir = _save_sync_latest_dir(user, title_id, save_type=save_type)
             if not os.path.isdir(latest_dir):
                 continue
             latest_created_ts = int(time.time())
@@ -5858,11 +6177,12 @@ def list_saves_api():
             save_versions.append({
                 'title_id': title_id,
                 'save_id': 'latest',
+                'save_type': save_type,
                 'size': 0,
                 'note': 'latest directory',
                 'created_ts': latest_created_ts,
                 'created_at': _save_sync_format_created_at(latest_created_ts),
-                'download_url': f'/api/saves/download/{title_id}/latest.zip',
+                'download_url': f'/api/saves/download/{title_id}/latest.zip?save_type={save_type}',
                 'delete_url': '',
                 'archive_path': '',
                 'legacy': False,
@@ -5875,9 +6195,9 @@ def list_saves_api():
                 continue
             created_ts = int(version.get('created_ts') or 0)
             save_id = str(version.get('save_id') or '')
-            current = latest_by_title.get(title_id)
+            current = latest_by_title.get((title_id, version['save_type']))
             if current is None or created_ts > current.get('created_ts', 0):
-                latest_by_title[title_id] = {'created_ts': created_ts, 'save_id': save_id}
+                latest_by_title[(title_id, version['save_type'])] = {'created_ts': created_ts, 'save_id': save_id}
         title_metadata = {}
         for version in save_versions:
             title_id = str(version.get('title_id') or '').strip().upper()
@@ -5908,7 +6228,7 @@ def list_saves_api():
             download_url = str(version.get('download_url') or '')
             delete_url = str(version.get('delete_url') or '')
             icon_url = f'/api/shop/icon/{title_id}'
-            latest_info = latest_by_title.get(title_id) or {}
+            latest_info = latest_by_title.get((title_id, version['save_type'])) or {}
             is_latest = (
                 int(latest_info.get('created_ts') or 0) == created_ts
                 and str(latest_info.get('save_id') or '') == save_id
@@ -5918,6 +6238,8 @@ def list_saves_api():
             saves.append({
                 'title_id': title_id,
                 'titleId': title_id,
+                'save_type': version['save_type'],
+                'saveType': version['save_type'],
                 'app_id': title_id,
                 'name': cached_meta['title_name'],
                 'title_name': cached_meta['title_name'],
@@ -5956,7 +6278,7 @@ def list_saves_api():
         except Exception:
             pass
 
-    return jsonify({'saves': saves})
+    return jsonify({'saves': saves, 'save_types': True})
 
 
 @app.post('/api/saves/upload/<title_id>')
@@ -5965,6 +6287,11 @@ def upload_save_api(title_id):
     user = getattr(g, 'save_sync_user', None)
     if user is None:
         return api_error('Save sync authorization failed.', 403)
+
+    try:
+        save_type = _save_sync_requested_type()
+    except ValueError as error:
+        return api_error(str(error), 400)
 
     normalized_title_id = _save_sync_resolve_title_id(title_id)
     if not normalized_title_id:
@@ -5989,9 +6316,9 @@ def upload_save_api(title_id):
 
     note = _save_sync_resolve_note()
     save_id = _save_sync_generate_save_id(note)
-    title_dir = _save_sync_title_dir(user, normalized_title_id)
+    title_dir = _save_sync_title_dir(user, normalized_title_id, save_type=save_type)
     os.makedirs(title_dir, exist_ok=True)
-    archive_path = _save_sync_archive_path(user, normalized_title_id, save_id=save_id)
+    archive_path = _save_sync_archive_path(user, normalized_title_id, save_id=save_id, save_type=save_type)
     temp_path = archive_path + '.tmp'
 
     try:
@@ -6014,6 +6341,8 @@ def upload_save_api(title_id):
     created_at = _save_sync_format_created_at(created_ts)
     metadata = {
         'title_id': normalized_title_id,
+        'save_type': save_type,
+        'saveType': save_type,
         'save_id': save_id,
         'created_at': created_at,
         'created_ts': created_ts,
@@ -6022,11 +6351,11 @@ def upload_save_api(title_id):
         'size': int(file_size),
     }
     try:
-        _save_sync_write_metadata(_save_sync_metadata_path(user, normalized_title_id, save_id), metadata)
+        _save_sync_write_metadata(_save_sync_metadata_path(user, normalized_title_id, save_id, save_type=save_type), metadata)
     except Exception as e:
         logger.warning('Failed writing save metadata for user %s title %s save %s: %s', getattr(user, 'user', '?'), normalized_title_id, save_id, e)
     try:
-        _save_sync_refresh_latest_from_archive(user, normalized_title_id, archive_path)
+        _save_sync_refresh_latest_from_archive(user, normalized_title_id, archive_path, save_type=save_type)
     except Exception as e:
         logger.warning(
             'Failed to refresh latest extracted save for user %s title %s save %s: %s',
@@ -6038,6 +6367,8 @@ def upload_save_api(title_id):
 
     return api_success({
         'title_id': normalized_title_id,
+        'save_type': save_type,
+        'saveType': save_type,
         'titleId': normalized_title_id,
         'save_id': save_id,
         'saveId': save_id,
@@ -6047,10 +6378,10 @@ def upload_save_api(title_id):
         'createdTs': created_ts,
         'note': note,
         'size': int(file_size),
-        'download_url': f'/api/saves/download/{normalized_title_id}/{save_id}.zip',
-        'downloadUrl': f'/api/saves/download/{normalized_title_id}/{save_id}.zip',
-        'delete_url': f'/api/saves/delete/{normalized_title_id}/{save_id}',
-        'deleteUrl': f'/api/saves/delete/{normalized_title_id}/{save_id}',
+        'download_url': f'/api/saves/download/{normalized_title_id}/{save_id}.zip?save_type={save_type}',
+        'downloadUrl': f'/api/saves/download/{normalized_title_id}/{save_id}.zip?save_type={save_type}',
+        'delete_url': f'/api/saves/delete/{normalized_title_id}/{save_id}?save_type={save_type}',
+        'deleteUrl': f'/api/saves/delete/{normalized_title_id}/{save_id}?save_type={save_type}',
     }, message='Save uploaded successfully.')
 
 
@@ -6063,6 +6394,11 @@ def download_save_api(title_id, save_id=None):
     user = getattr(g, 'save_sync_user', None)
     if user is None:
         return api_error('Save sync authorization failed.', 403)
+
+    try:
+        save_type = _save_sync_requested_type()
+    except ValueError as error:
+        return api_error(str(error), 400)
 
     requested_save_id = str(save_id or '').strip()
     client_kind = 'cyberfoil' if _is_cyberfoil_request() else 'other'
@@ -6086,7 +6422,7 @@ def download_save_api(title_id, save_id=None):
         client_kind,
     )
 
-    selected_archive, resolve_error = _save_sync_resolve_download_archive(user, normalized_title_id, save_id=save_id)
+    selected_archive, resolve_error = _save_sync_resolve_download_archive(user, normalized_title_id, save_id=save_id, save_type=save_type)
     if selected_archive is None:
         logger.warning(
             'Save download resolve failed user=%s title=%s save_id=%s client=%s error=%s',
@@ -6135,7 +6471,7 @@ def download_save_api(title_id, save_id=None):
         archive_path,
     )
 
-    return send_from_directory(
+    response = send_from_directory(
         os.path.dirname(archive_path),
         os.path.basename(archive_path),
         as_attachment=True,
@@ -6143,6 +6479,8 @@ def download_save_api(title_id, save_id=None):
         mimetype='application/zip'
     )
 
+    response.headers['X-Save-Type'] = save_type
+    return response
 
 @app.route('/api/saves/delete/<title_id>/<save_id>', methods=['DELETE', 'POST'])
 @app.route('/api/saves/delete/<title_id>/<save_id>.zip', methods=['DELETE', 'POST'])
@@ -6154,6 +6492,11 @@ def delete_save_api(title_id, save_id=None):
     if user is None:
         return api_error('Save sync authorization failed.', 403)
 
+    try:
+        save_type = _save_sync_requested_type()
+    except ValueError as error:
+        return api_error(str(error), 400)
+
     normalized_title_id = _normalize_save_title_id(title_id)
     if not normalized_title_id:
         return api_error('Invalid title_id for save delete.', 400)
@@ -6164,7 +6507,7 @@ def delete_save_api(title_id, save_id=None):
         if not selected_save_id:
             return api_error('Invalid save_id for save delete.', 400)
 
-    deleted_info, delete_error = _save_sync_delete_archive(user, normalized_title_id, save_id=selected_save_id)
+    deleted_info, delete_error = _save_sync_delete_archive(user, normalized_title_id, save_id=selected_save_id, save_type=save_type)
     if deleted_info is None:
         status = 404
         error_text = str(delete_error or '')
@@ -6177,7 +6520,7 @@ def delete_save_api(title_id, save_id=None):
     deleted_save_id = str(deleted_info.get('save_id') or '')
     is_legacy = bool(deleted_info.get('legacy'))
     try:
-        _save_sync_refresh_latest_for_title(user, normalized_title_id)
+        _save_sync_refresh_latest_for_title(user, normalized_title_id, save_type=save_type)
     except Exception as e:
         logger.warning(
             'Failed to refresh latest extracted save after delete for user %s title %s: %s',
@@ -6187,6 +6530,8 @@ def delete_save_api(title_id, save_id=None):
         )
     return api_success({
         'title_id': normalized_title_id,
+        'save_type': save_type,
+        'saveType': save_type,
         'titleId': normalized_title_id,
         'save_id': deleted_save_id,
         'saveId': deleted_save_id,
@@ -6201,10 +6546,11 @@ def get_all_titles_api():
     start_ts = time.time()
 
     page = max(1, request.args.get('page', 1, type=int))
-    per_page = max(1, min(request.args.get('per_page', 50, type=int), 200))
+    per_page = max(1, min(request.args.get('per_page', 50, type=int), 10000))
     lite = str(request.args.get('lite', '')).lower() in ('1', 'true', 'yes')
     sort_key = str(request.args.get('sort') or 'title_asc').strip().lower()
     search = (request.args.get('search') or '').strip()
+    initial = str(request.args.get('initial') or '').strip().upper()
     types = request.args.get('types')
     owned = request.args.get('owned')
     updates = request.args.get('updates')
@@ -6434,6 +6780,18 @@ def get_all_titles_api():
                 search_filters.append(Titles.title_id.in_(title_ids_from_search))
             query = query.filter(or_(*search_filters))
 
+    if initial in {'#', '@'} or (len(initial) == 1 and initial.isalpha()):
+        if titles_metadata is None:
+            titles_metadata = _get_cached_titles_metadata()
+        title_name_map = titles_metadata.get('title_name_map') or {}
+        if initial == '#':
+            initial_title_ids = [title_id for title_id, name in title_name_map.items() if str(name or '')[:1].isdigit()]
+        elif initial == '@':
+            initial_title_ids = [title_id for title_id, name in title_name_map.items() if not str(name or '')[:1].isalnum()]
+        else:
+            initial_title_ids = [title_id for title_id, name in title_name_map.items() if str(name or '').startswith(initial.lower())]
+        query = query.filter(Titles.title_id.in_(initial_title_ids) if initial_title_ids else Titles.id == -1)
+
     if genre or recognized in ('recognized', 'unrecognized'):
         if titles_metadata is None:
             titles_metadata = _get_cached_titles_metadata()
@@ -6487,6 +6845,7 @@ def get_all_titles_api():
     count_cache_key = (
         state_token,
         search_normalized,
+        initial,
         ','.join(sorted(allowed_types)),
         str(owned or ''),
         str(updates or ''),
@@ -6510,34 +6869,46 @@ def get_all_titles_api():
     info_cache = {}
     release_dates_by_title = {}
     if use_name_sort:
-        rows_for_sort = query.order_by(None).all()
-        total = len(rows_for_sort)
-        all_lookup_ids.update([row.title_id for row in rows_for_sort if row.title_id])
-        all_lookup_ids.update([row.app_id for row in rows_for_sort if row.app_type == APP_TYPE_DLC and row.app_id])
+        ordered_pks = _get_cached_titles_sorted(count_cache_key)
+        if ordered_pks is None:
+            rows_for_sort = query.order_by(None).all()
+            all_lookup_ids.update([row.title_id for row in rows_for_sort if row.title_id])
+            all_lookup_ids.update([row.app_id for row in rows_for_sort if row.app_type == APP_TYPE_DLC and row.app_id])
 
-        with titles.titledb_session() as titledb_loaded:
-            if titledb_loaded:
-                for lookup_id in all_lookup_ids:
-                    info_cache[lookup_id] = titles.get_game_info(lookup_id) or {}
+            with titles.titledb_session() as titledb_loaded:
+                if titledb_loaded:
+                    for lookup_id in all_lookup_ids:
+                        info_cache[lookup_id] = titles.get_game_info(lookup_id) or {}
 
-        def _row_sort_key(row):
-            title_info_local = info_cache.get(row.title_id) or {}
-            app_info_local = title_info_local if row.app_type == APP_TYPE_BASE else (info_cache.get(row.app_id) or title_info_local)
-            display_name = (
-                app_info_local.get('name')
-                or title_info_local.get('name')
-                or row.app_id
-                or row.title_id
-                or ''
-            )
-            return (
-                str(display_name).lower(),
-                str(row.title_id or ''),
-                str(row.app_id or ''),
-            )
+            def _row_sort_key(row):
+                title_info_local = info_cache.get(row.title_id) or {}
+                app_info_local = title_info_local if row.app_type == APP_TYPE_BASE else (info_cache.get(row.app_id) or title_info_local)
+                display_name = (
+                    app_info_local.get('name')
+                    or title_info_local.get('name')
+                    or row.app_id
+                    or row.title_id
+                    or ''
+                )
+                return (
+                    str(display_name).lower(),
+                    str(row.title_id or ''),
+                    str(row.app_id or ''),
+                )
 
-        rows_for_sort.sort(key=_row_sort_key, reverse=(sort_key == 'title_desc'))
-        rows = rows_for_sort[start:start + per_page]
+            # always ascending in the cache - title_desc just reverses the cached order below
+            rows_for_sort.sort(key=_row_sort_key)
+            ordered_pks = [row.app_pk for row in rows_for_sort]
+            _store_titles_sorted(count_cache_key, ordered_pks)
+
+        total = len(ordered_pks)
+        page_pks = ordered_pks[::-1] if sort_key == 'title_desc' else ordered_pks
+        page_pks = page_pks[start:start + per_page]
+        if page_pks:
+            page_rows_by_pk = {row.app_pk: row for row in query.filter(Apps.id.in_(page_pks)).all()}
+            rows = [page_rows_by_pk[pk] for pk in page_pks if pk in page_rows_by_pk]
+        else:
+            rows = []
     else:
         rows = query.offset(start).limit(per_page).all()
 
@@ -6586,12 +6957,14 @@ def get_all_titles_api():
             'release_date': 'Unknown',
         })
 
-    if not use_name_sort:
-        all_lookup_ids.update([tid for tid in title_id_by_fk.values() if tid])
-        all_lookup_ids.update([aid for aid in dlc_app_ids if aid])
+    # A cold name sort already loaded metadata; fetch only missing page IDs.
+    page_lookup_ids = {tid for tid in title_id_by_fk.values() if tid}
+    page_lookup_ids.update(aid for aid in dlc_app_ids if aid)
+    missing_lookup_ids = page_lookup_ids.difference(info_cache)
+    if missing_lookup_ids:
         with titles.titledb_session() as titledb_loaded:
             if titledb_loaded:
-                for lookup_id in all_lookup_ids:
+                for lookup_id in missing_lookup_ids:
                     info_cache[lookup_id] = titles.get_game_info(lookup_id) or {}
 
     with titles.titledb_session() as titledb_loaded:
@@ -6828,6 +7201,7 @@ def get_title_details_api():
                 'category': app_info.get('category') or '',
                 'genre': app_info.get('category') or '',
                 'nsuId': app_info.get('nsuId'),
+                'rating': app_info.get('rating'),
                 'description': app_info.get('description'),
                 'screenshots': app_info.get('screenshots') or [],
                 'title_id': row.title_id,
@@ -6961,6 +7335,32 @@ def set_ignored_library_content_api():
     return jsonify({'success': True, 'ignored': ignored, 'updated': updated})
 
 
+@app.post('/api/library/ignored-missing-dlc')
+@access_required('admin')
+def ignore_missing_library_dlc_api():
+    data = request.get_json(silent=True) or {}
+    title_id = str(data.get('title_id') or '').strip().upper()
+    if not title_id:
+        return jsonify({'success': False, 'error': 'missing_title_id'}), 400
+
+    updated = (
+        Apps.query
+        .filter(
+            Apps.title_id.in_(db.session.query(Titles.id).filter(Titles.title_id == title_id)),
+            Apps.app_type == APP_TYPE_DLC,
+            Apps.owned.is_(False),
+            Apps.ignored.is_(False),
+        )
+        .update({Apps.ignored: True}, synchronize_session=False)
+    )
+    db.session.commit()
+    if updated:
+        update_titles()
+        invalidate_library_cache_state_token()
+        post_library_change()
+    return jsonify({'success': True, 'updated': updated})
+
+
 def _build_title_details_dlc_items(title_fk, title_id):
     dlc_rows = (
         db.session.query(Apps.app_id, Apps.app_version, Apps.owned, Apps.ignored)
@@ -7054,6 +7454,9 @@ def get_title_info_api(title_id):
         'iconUrl': info.get('iconUrl'),
         'bannerUrl': info.get('bannerUrl'),
         'description': info.get('description'),
+        'category': info.get('category'),
+        'nsuId': info.get('nsuId'),
+        'rating': info.get('rating'),
         'screenshots': info.get('screenshots') or []
     })
 
@@ -7070,6 +7473,9 @@ def set_manual_title_info_api():
         'description': data.get('description'),
         'iconUrl': data.get('iconUrl'),
         'bannerUrl': data.get('bannerUrl'),
+        'category': data.get('category'),
+        'nsuId': data.get('nsuId'),
+        'rating': data.get('rating'),
         'screenshots': data.get('screenshots') or [],
     }
     ok = set_manual_title_override(title_id, payload)
@@ -7346,6 +7752,7 @@ def shop_sections_api():
 
     now = time.time()
     state_token = _get_titledb_aware_state_token()
+    rotation_key = _recommendation_rotation_key()
     payload = None
     with shop_sections_cache_lock:
         cache_enabled = SHOP_SECTIONS_CACHE_TTL_S is None or SHOP_SECTIONS_CACHE_TTL_S > 0
@@ -7357,6 +7764,7 @@ def shop_sections_api():
             and shop_sections_cache['payload'] is not None
             and shop_sections_cache['limit'] == cache_limit
             and shop_sections_cache.get('state_token') == state_token
+            and _shop_sections_payload_matches_rotation(shop_sections_cache['payload'], rotation_key)
             and cache_valid
         )
         if cache_hit:
@@ -7376,6 +7784,7 @@ def shop_sections_api():
                 disk_cache
                 and disk_cache.get('limit') == cache_limit
                 and str(disk_cache.get('state_token') or '') == state_token
+                and _shop_sections_payload_matches_rotation(disk_cache.get('payload'), rotation_key)
             ):
                 disk_payload = disk_cache.get('payload')
                 disk_ts = float(disk_cache.get('timestamp') or 0)
@@ -7883,11 +8292,15 @@ def _run_post_library_change():
                 payload = _build_shop_sections_payload(50)
                 _store_shop_sections_cache(payload, 50, now, state_token, persist_disk=True)
         finally:
-            titles.release_titledb()
-            _release_process_memory()
-            with library_rebuild_lock:
-                library_rebuild_status['in_progress'] = False
-                library_rebuild_status['updated_at'] = time.time()
+            try:
+                titles.release_titledb()
+            finally:
+                try:
+                    _release_process_memory()
+                finally:
+                    with library_rebuild_lock:
+                        library_rebuild_status['in_progress'] = False
+                        library_rebuild_status['updated_at'] = time.time()
 
 @debounce(10)
 def post_library_change():
@@ -7910,8 +8323,8 @@ def scan_library_api():
         if scan_in_progress:
             logger.info('Skipping scan_library_api call: Scan already in progress')
             return {'success': False, 'errors': []}
-    # Set the scan status to in progress
-    scan_in_progress = True
+        # Claim the scan while holding the lock.
+        scan_in_progress = True
 
     try:
         if path is None:
@@ -7919,7 +8332,7 @@ def scan_library_api():
         else:
             scan_library_path(path)
     except Exception as e:
-        errors.append(e)
+        errors.append(str(e))
         success = False
         logger.error(f"Error during library scan: {e}")
     finally:
@@ -7949,6 +8362,7 @@ if __name__ == '__main__':
     port = _read_int_env('AEROFOIL_PORT', _read_int_env('OWNFOIL_PORT', 8465, minimum=1, maximum=65535), minimum=1, maximum=65535)
     use_flask_dev_server = str(os.environ.get('AEROFOIL_USE_FLASK_DEV') or os.environ.get('OWNFOIL_USE_FLASK_DEV') or '').strip().lower() in ('1', 'true', 'yes', 'on')
 
+    discovery.reconcile(http_port=port)
     try:
         if waitress_serve is not None and not use_flask_dev_server:
             wsgi_threads = _read_int_env('AEROFOIL_WSGI_THREADS', _read_int_env('OWNFOIL_WSGI_THREADS', 32, minimum=1, maximum=512), minimum=1, maximum=512)
@@ -7998,10 +8412,14 @@ if __name__ == '__main__':
     finally:
         # Shutdown server
         logger.info('Shutting down server...')
+        discovery.stop()
         try:
             watcher.stop()
-            watcher_thread.join()
-            logger.debug('Watcher thread terminated.')
+            watcher_thread.join(timeout=5)
+            if watcher_thread.is_alive():
+                logger.warning('Watcher shutdown still waiting for filesystem I/O; continuing shutdown.')
+            else:
+                logger.debug('Watcher thread terminated.')
         except Exception:
             logger.exception('Watcher shutdown failed')
         # Shutdown scheduler

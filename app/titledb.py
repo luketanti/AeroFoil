@@ -3,8 +3,8 @@ import requests
 from requests.exceptions import RequestException, ConnectionError, Timeout
 import os, re
 import json
-import email.utils
 import logging
+import threading
 import time
 
 from app.constants import *
@@ -174,89 +174,8 @@ def _is_valid_json_file(path):
     except Exception:
         return False
 
-def _get_json_meta_path(store_path):
-    return f"{store_path}.meta"
-
-def _get_descriptions_filename(app_settings):
-    try:
-        region = str(app_settings['titles']['region']).strip()
-        language = str(app_settings['titles']['language']).strip()
-        if region and language:
-            return f"{region}.{language}.json"
-    except Exception:
-        pass
-    return TITLEDB_DESCRIPTIONS_DEFAULT_FILE
-
-def _get_descriptions_url(app_settings):
-    filename = _get_descriptions_filename(app_settings)
-    return f"{TITLEDB_DESCRIPTIONS_BASE_URL}/{filename}", filename
-
-def get_descriptions_url(app_settings):
-    return _get_descriptions_url(app_settings)
-
-def _load_json_meta(meta_path):
-    try:
-        if not os.path.isfile(meta_path):
-            return {}
-        with open(meta_path, 'r', encoding='utf-8') as fp:
-            return json.load(fp) or {}
-    except Exception:
-        return {}
-
-def _save_json_meta(meta_path, headers):
-    try:
-        meta = {
-            "etag": headers.get('ETag'),
-            "last_modified": headers.get('Last-Modified'),
-            "content_length": headers.get('Content-Length'),
-        }
-        with open(meta_path, 'w', encoding='utf-8') as fp:
-            json.dump(meta, fp)
-    except Exception:
-        pass
-
-def _build_conditional_headers(store_path, meta):
-    headers = {}
-    if meta.get('etag'):
-        headers['If-None-Match'] = meta['etag']
-    if meta.get('last_modified'):
-        headers['If-Modified-Since'] = meta['last_modified']
-    elif os.path.isfile(store_path):
-        mtime = os.path.getmtime(store_path)
-        headers['If-Modified-Since'] = email.utils.formatdate(mtime, usegmt=True)
-    return headers
-
-def _download_json_file(url, store_path, conditional=False):
-    temp_path = f"{store_path}.tmp"
-    meta_path = _get_json_meta_path(store_path)
-    headers = {}
-    if conditional:
-        meta = _load_json_meta(meta_path)
-        headers = _build_conditional_headers(store_path, meta)
-
-    r = _get_with_retry(url, headers=headers, allow_redirects=True)
-    if r is None:
-        raise ValueError("No response received for JSON download")
-    if r.status_code == 304:
-        return False
-    r.raise_for_status()
-    with open(temp_path, 'wb') as fp:
-        for chunk in r.iter_content(chunk_size=1024 * 1024):
-            if chunk:
-                fp.write(chunk)
-    if not _is_valid_json_file(temp_path):
-        try:
-            os.remove(temp_path)
-        except Exception:
-            pass
-        raise ValueError("Downloaded JSON file is invalid or empty")
-    os.replace(temp_path, store_path)
-    _save_json_meta(meta_path, r.headers)
-    return True
-
 def update_titledb_files(app_settings):
     files_to_update = []
-    need_descriptions = False
     
     region_titles_file = get_region_titles_file(app_settings)
     try:
@@ -279,7 +198,6 @@ def update_titledb_files(app_settings):
     update_available, latest_remote_commit = is_titledb_update_available(rzf)
     if update_available:
         files_to_update = TITLEDB_DEFAULT_FILES + [region_titles_file] + english_titles_files
-        need_descriptions = True
         old_region_titles_files = [f for f in os.listdir(TITLEDB_DIR) if re.match(r"titles\.[A-Z]{2}\.[a-z]{2}\.json", f) and f not in files_to_update]
         files_to_update += old_region_titles_files
 
@@ -291,7 +209,6 @@ def update_titledb_files(app_settings):
             ", ".join(missing_core_files)
         )
         files_to_update.extend(missing_core_files)
-        need_descriptions = True
 
     missing_english_files = [file for file in english_titles_files if file not in current_files]
     if missing_english_files:
@@ -312,40 +229,36 @@ def update_titledb_files(app_settings):
         )
         files_to_update.extend(missing_optional_files)
 
-    # Ensure we have a local description index (used for game info descriptions).
-    desc_url, desc_filename = _get_descriptions_url(app_settings)
-    descriptions_path = os.path.join(TITLEDB_DIR, desc_filename)
-    descriptions_valid = _is_valid_json_file(descriptions_path)
-    need_descriptions = True
-
     if files_to_update:
         # Keep deterministic order without duplicates.
         files_to_update = list(dict.fromkeys(files_to_update))
         download_titledb_files(rzf, files_to_update)
 
-    # Description index is not part of the nightly artefacts zip; download it directly.
-    if need_descriptions:
-        try:
-            store_path = descriptions_path
-            rel_store_path = os.path.relpath(store_path, start=APP_DIR)
-            logger.info(f'Downloading {desc_filename} from {desc_url} to {rel_store_path}')
-            _download_json_file(desc_url, store_path, conditional=descriptions_valid)
-        except Exception as e:
-            logger.warning(f'Failed to download {desc_filename}: {e}')
-
     if update_available:
         _write_latest_commit(latest_remote_commit)
+    from app.metadata_sources import update_titledb_source_status
+    update_titledb_source_status(latest_remote_commit, TITLEDB_DIR)
 
+
+# Serializes concurrent runs of update_titledb (scheduled job, TitleDB
+# recovery, settings save). Without it, two runs downloaded into the same
+# fixed <file>.tmp paths and corrupted each other's files. A run that
+# waited here typically finds everything up to date and becomes a cheap
+# no-op.
+_update_titledb_run_lock = threading.Lock()
 
 def update_titledb(app_settings):
-    logger.info('Updating titledb...')
-    if not os.path.isdir(TITLEDB_DIR):
-        os.makedirs(TITLEDB_DIR, exist_ok=True)
+    with _update_titledb_run_lock:
+        from app.metadata_sources import update_metadata_sources
+        update_metadata_sources(app_settings)
+        logger.info('Updating titledb...')
+        if not os.path.isdir(TITLEDB_DIR):
+            os.makedirs(TITLEDB_DIR, exist_ok=True)
 
-    try:
-        update_titledb_files(app_settings)
-        logger.info('titledb update done.')
-    except Exception as e:
-        logger.error(f'TitleDB update failed: {e}')
-        logger.warning('TitleDB files may be missing. Some features may not work until TitleDB is successfully downloaded.')
-        raise
+        try:
+            update_titledb_files(app_settings)
+            logger.info('titledb update done.')
+        except Exception as e:
+            logger.error(f'TitleDB update failed: {e}')
+            logger.warning('TitleDB files may be missing. Some features may not work until TitleDB is successfully downloaded.')
+            raise

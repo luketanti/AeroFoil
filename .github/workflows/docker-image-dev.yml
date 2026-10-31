@@ -6,61 +6,57 @@ on:
       - dev
       - dev2
   workflow_dispatch:
+    inputs:
+      validation_only:
+        description: Publish only a unique validation tag, leaving normal tags unchanged
+        type: boolean
+        default: false
 
 concurrency:
-  group: docker-dev
+  group: docker-dev${{ inputs.validation_only && format('-validation-{0}', github.ref) || '' }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  docker-build-branch-cache:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30  # Add timeout to prevent hanging jobs
-    permissions:
-      contents: read
+  metadata:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tags: ${{ steps.meta.outputs.tags }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Compute tags
         id: meta
+        env:
+          VALIDATION_ONLY: ${{ inputs.validation_only || false }}
         run: |
-          echo "sha_tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-          VERSION=$(git describe --tags --always)
-          echo "aerofoil_version=${VERSION}-dev" >> "$GITHUB_OUTPUT"
+          version=$(git describe --tags --always)
+          echo "version=${version}-dev" >> "$GITHUB_OUTPUT"
+          if [[ "$VALIDATION_ONLY" == true ]]; then
+            tags="luketanti/aerofoil:validation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          else
+            [[ "$GITHUB_REF_NAME" == dev || "$GITHUB_REF_NAME" == dev2 ]]
+            tags=$(printf 'luketanti/aerofoil:dev\nluketanti/aerofoil:sha-%s' "${GITHUB_SHA::7}")
+          fi
+          {
+            echo 'tags<<IMAGE_TAGS'
+            printf '%s\n' "$tags"
+            echo IMAGE_TAGS
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Build and push Docker image with branch-scoped cache
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          push: true
-          platforms: linux/amd64,linux/arm64
-          build-args: |
-            AEROFOIL_VERSION=${{ steps.meta.outputs.aerofoil_version }}
-          tags: |
-            luketanti/aerofoil:dev
-            luketanti/aerofoil:sha-${{ steps.meta.outputs.sha_tag }}
-          cache-from: type=gha,scope=${{ github.ref_name }}
-          cache-to: type=gha,mode=max,scope=${{ github.ref_name }}
-          provenance: false
-
-      - name: Job failed
-        if: failure()
-        run: echo "Build failed - check if it's a transient GitHub issue"
+  build:
+    needs: metadata
+    uses: ./.github/workflows/docker-native-build.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      tags: ${{ needs.metadata.outputs.tags }}
+      cache_scope: ${{ github.ref_name }}
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}

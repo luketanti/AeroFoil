@@ -13,6 +13,7 @@ from app.downloads.client import (
     queue_download,
     remove_active_download,
     remove_completed_download,
+    test_download_client,
 )
 from app.downloads.manager import (
     _check_completed,
@@ -90,6 +91,37 @@ class ProwlarrProtocolTests(unittest.TestCase):
 
 
 class QueueRoutingTests(unittest.TestCase):
+    @patch("app.downloads.client.test_sabnzbd")
+    def test_test_download_client_routes_to_sabnzbd(self, test_sabnzbd_mock):
+        test_sabnzbd_mock.return_value = (True, "SABnzbd OK.")
+
+        ok, message = test_download_client(
+            "sabnzbd", "http://sab.local", api_key="secret"
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(message, "SABnzbd OK.")
+        test_sabnzbd_mock.assert_called_once_with(
+            url="http://sab.local", api_key="secret", timeout_seconds=10
+        )
+
+    @patch("app.downloads.client.test_nzbget")
+    def test_test_download_client_routes_to_nzbget(self, test_nzbget_mock):
+        test_nzbget_mock.return_value = (True, "NZBGet OK.")
+
+        ok, message = test_download_client(
+            "nzbget", "http://nzbget.local", username="user", password="secret"
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(message, "NZBGet OK.")
+        test_nzbget_mock.assert_called_once_with(
+            url="http://nzbget.local",
+            username="user",
+            password="secret",
+            timeout_seconds=10,
+        )
+
     def test_supported_download_clients_includes_torrent_and_usenet(self):
         supported = get_supported_download_clients()
         keys = {(item.get("protocol"), item.get("type")) for item in supported}
@@ -453,9 +485,12 @@ class QueueRoutingTests(unittest.TestCase):
             {"title": "Example Release Torrent", "protocol": "torrent", "download_url": "magnet:?xt=urn:btih:abcdef"},
             {"title": "Example Release NZB", "protocol": "usenet", "download_url": "https://indexer.example/file.nzb"},
         ]
-        pick_best_result_mock.side_effect = lambda items, **kwargs: (
-            items[0] if items[0].get("protocol") in (kwargs.get("allowed_protocols") or []) else None
-        )
+        def pick_result(items, **kwargs):
+            self.assertTrue(kwargs["require_exact_version"])
+            self.assertEqual(kwargs["version"], 123)
+            return items[0] if items[0].get("protocol") in (kwargs.get("allowed_protocols") or []) else None
+
+        pick_best_result_mock.side_effect = pick_result
 
         ok, message, results = search_update_options("0100000000010000", 123, limit=20)
 
@@ -1894,6 +1929,7 @@ class CompletedAdoptionTests(unittest.TestCase):
 
         move_completed_mock.assert_called_once()
         self.assertTrue(move_completed_mock.call_args.kwargs["copy_files"])
+        self.assertFalse(move_completed_mock.call_args.kwargs["hardlink_files"])
         remove_completed_mock.assert_not_called()
         enqueue_paths_mock.assert_called_once_with(["X:\\fixture-root\\Example Title [0100]\\Example Base.nsp"])
         enqueue_cleanup_roots_mock.assert_called_once_with([])
@@ -1921,6 +1957,37 @@ class CompletedAdoptionTests(unittest.TestCase):
 
         self.assertEqual(moved_path, "X:\\library\\Example Base.nsp")
         self.assertIsNone(reason)
+        copy_mock.assert_called_once_with("C:\\tests\\completed\\Example Base.nsp", "X:\\library\\Example Base.nsp")
+        move_mock.assert_not_called()
+        cleanup_mock.assert_not_called()
+
+    @patch("app.downloads.manager._cleanup_download_path")
+    @patch("app.downloads.manager._normalize_imported_wrapped_files", side_effect=lambda path: path)
+    @patch("app.downloads.manager._build_generic_import_destination", return_value="X:\\library\\Example Base.nsp")
+    @patch("app.downloads.manager.shutil.copy2")
+    @patch("app.downloads.manager.os.link", side_effect=OSError("cross-device link"))
+    @patch("app.downloads.manager.shutil.move")
+    @patch("app.downloads.manager._iter_importable_download_files", return_value=["C:\\tests\\completed\\Example Base.nsp"])
+    def test_retained_torrent_hardlink_falls_back_to_copy(
+        self,
+        importable_files_mock,
+        move_mock,
+        link_mock,
+        copy_mock,
+        build_destination_mock,
+        normalize_mock,
+        cleanup_mock,
+    ):
+        moved_path, reason = downloads_manager._move_generic_importable_files(
+            "C:\\tests\\completed\\Example Release",
+            "X:\\library",
+            copy_files=True,
+            hardlink_files=True,
+        )
+
+        self.assertEqual(moved_path, "X:\\library\\Example Base.nsp")
+        self.assertIsNone(reason)
+        link_mock.assert_called_once_with("C:\\tests\\completed\\Example Base.nsp", "X:\\library\\Example Base.nsp")
         copy_mock.assert_called_once_with("C:\\tests\\completed\\Example Base.nsp", "X:\\library\\Example Base.nsp")
         move_mock.assert_not_called()
         cleanup_mock.assert_not_called()
@@ -2102,6 +2169,12 @@ class CompletedAdoptionTests(unittest.TestCase):
 
 
 class ManagedCompletionStateTests(unittest.TestCase):
+    def setUp(self):
+        # _move_completed_with_reason opens a TitleDB session; keep tests off the real TitleDB.
+        patcher = patch("app.downloads.manager.titles_lib.load_titledb", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     @patch("app.downloads.manager.os.path.getsize", return_value=100)
     @patch("app.downloads.manager._iter_completed_files")
     def test_select_completed_update_candidate_ignores_rar_archives(
@@ -2143,6 +2216,33 @@ class ManagedCompletionStateTests(unittest.TestCase):
         self.assertIsNone(reason)
         move_generic_mock.assert_called_once_with("C:\\tests\\completed\\Example Title BASE", "X:\\library")
         select_candidate_mock.assert_not_called()
+
+    @patch("app.downloads.manager.titles_lib.identify_file")
+    @patch("app.downloads.manager.titles_lib.titledb_session")
+    @patch("app.downloads.manager._iter_importable_download_files", return_value=["C:\\tests\\completed\\Example DLC.nsp"])
+    @patch("app.downloads.manager._move_generic_importable_files", return_value=("X:\\library\\Example DLC.nsp", None))
+    @patch("app.downloads.manager.get_libraries_path", return_value=["X:\\library"])
+    @patch("app.downloads.manager.os.path.exists", return_value=True)
+    def test_move_completed_identifies_files_with_titledb_loaded(
+        self,
+        exists_mock,
+        get_libraries_path_mock,
+        move_generic_mock,
+        iter_importable_mock,
+        titledb_session_mock,
+        identify_file_mock,
+    ):
+        state = {"loaded": False}
+        session = titledb_session_mock.return_value
+        session.__enter__.side_effect = lambda *args: state.update(loaded=True)
+        session.__exit__.side_effect = lambda *args: state.update(loaded=False)
+        loaded_at_identify = []
+        identify_file_mock.side_effect = lambda path: loaded_at_identify.append(state["loaded"]) or (None, False, [], "")
+
+        _move_completed_with_reason({"path": "C:\\tests\\completed\\Example DLC"})
+
+        self.assertTrue(loaded_at_identify)
+        self.assertTrue(all(loaded_at_identify))
 
     @patch("app.downloads.manager._cleanup_download_path")
     @patch("app.downloads.manager.shutil.move")
@@ -2663,12 +2763,65 @@ class ManagedCompletionStateTests(unittest.TestCase):
         _state_lock_mock,
         delete_payload_mock,
     ):
-        ok, message = remove_duplicate_download("dup-1")
+        snapshot = {
+            "active_by_protocol": {"torrent": {"items": []}},
+            "errors_by_protocol": {},
+        }
+        with patch.object(downloads_manager, "load_settings", return_value={}), \
+                patch.object(downloads_manager, "_get_download_activity_snapshot", return_value=snapshot):
+            ok, message = remove_duplicate_download("dup-1")
 
         self.assertTrue(ok)
         self.assertEqual(message, "Deleted rejected duplicate file.")
         self.assertEqual(downloads_manager._state.get("duplicates"), [])
         delete_payload_mock.assert_called_once_with("X:\\fixture-root\\downloads\\Example Release")
+
+    def test_remove_duplicate_download_refuses_when_activity_cannot_be_verified(self):
+        cases = (
+            ("snapshot exception", {}, {"side_effect": RuntimeError("client unavailable")}),
+            ("settings exception", {"side_effect": RuntimeError("settings unavailable")}, {}),
+            ("snapshot error", {}, {"return_value": {
+                "active_by_protocol": {"torrent": {"items": []}},
+                "errors_by_protocol": {"torrent": ["active: timeout"]},
+            }}),
+        )
+        for label, settings_args, snapshot_args in cases:
+            with self.subTest(label):
+                state = {"duplicates": [{
+                    "id": "dup-unverified",
+                    "path": "X:\\fixture-root\\downloads\\Example Release",
+                }]}
+                with patch.object(downloads_manager, "_state", state), \
+                        patch.object(downloads_manager, "_state_lock"), \
+                        patch.object(downloads_manager, "_ensure_downloads_state_loaded"), \
+                        patch.object(downloads_manager, "load_settings", **({"return_value": {}} | settings_args)), \
+                        patch.object(downloads_manager, "_get_download_activity_snapshot", **snapshot_args), \
+                        patch.object(downloads_manager, "_delete_download_payload") as delete_mock, \
+                        patch.object(downloads_manager, "_persist_downloads_state_locked") as persist_mock:
+                    ok, message = remove_duplicate_download("dup-unverified")
+
+                self.assertFalse(ok)
+                self.assertIn("Could not verify downloader activity", message)
+                self.assertIn("dismiss", message)
+                self.assertEqual(len(state["duplicates"]), 1)
+                delete_mock.assert_not_called()
+                persist_mock.assert_not_called()
+
+    @patch("app.downloads.manager._delete_download_payload", return_value=(True, None))
+    @patch("app.downloads.manager.load_settings", return_value={})
+    @patch("app.downloads.manager._get_download_activity_snapshot", return_value={
+        "active_by_protocol": {"torrent": {"items": [{"name": "Example Release"}]}},
+    })
+    @patch("app.downloads.manager._state_lock")
+    @patch("app.downloads.manager._state", {
+        "duplicates": [{"id": "dup-active", "path": "X:\\fixture-root\\downloads\\Example Release"}],
+    })
+    def test_remove_duplicate_download_refuses_while_still_downloading(self, _lock, _snapshot, _settings, delete_mock):
+        ok, message = remove_duplicate_download("dup-active")
+
+        self.assertFalse(ok)
+        self.assertIn("Still downloading", message)
+        delete_mock.assert_not_called()
 
     @patch("app.downloads.manager._state_lock")
     @patch("app.downloads.manager._state", {

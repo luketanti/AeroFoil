@@ -23,8 +23,6 @@ ALEMBIC_CONF = os.path.join(ALEMBIC_DIR, 'alembic.ini')
 TITLEDB_DIR = os.path.join(DATA_DIR, 'titledb')
 TITLEDB_URL = 'https://github.com/blawar/titledb.git'
 TITLEDB_ARTEFACTS_URL = 'https://nightly.link/luketanti/aerofoil/workflows/region_titles/master/titledb.zip'
-TITLEDB_DESCRIPTIONS_BASE_URL = 'https://raw.githubusercontent.com/blawar/titledb/master'
-TITLEDB_DESCRIPTIONS_DEFAULT_FILE = 'US.en.json'
 TITLEDB_DEFAULT_FILES = [
     'cnmts.json',
     'versions.json',
@@ -46,6 +44,9 @@ AEROFOIL_DB = 'sqlite:///' + DB_FILE
 OWNFOIL_DB = AEROFOIL_DB
 
 DEFAULT_SETTINGS = {
+    "metadata_sources": {
+        "nx_versions_enabled": True,
+    },
     "security": {
         # When true, the application will not re-enter "setup mode" even if all admin
         # accounts are removed. Recovery must be done via environment-initialized users.
@@ -139,6 +140,7 @@ DEFAULT_SETTINGS = {
             "download_path": "",
             "min_seeders": 2,
             "remove_completed_torrents_on_finish": True,
+            "use_hardlinks_when_seeding": False,
         },
         "usenet_client": {
             "type": "sabnzbd",
@@ -149,6 +151,9 @@ DEFAULT_SETTINGS = {
         }
     },
     "shop": {
+        "discovery_enabled": False,
+        "discovery_name": "AeroFoil",
+        "discovery_http_port": 0,
         "motd_enabled": True,
         "motd": "Welcome to your own shop!",
         "motd_api_url": "",
@@ -272,5 +277,5 @@ ESRB_AGE_BY_CODE = {item["code"]: item["age"] for item in ESRB_RATINGS}
 ESRB_VALID_AGES = [item["age"] for item in ESRB_RATINGS]
 
 # Bump to force a one-time rebuild of the titles SQLite index when its on-disk
-# schema changes (the `rating` column was added in this version).
-TITLES_INDEX_SCHEMA_VERSION = 'rating-v1'
+# schema changes (the `screenshots` column was added in this version).
+TITLES_INDEX_SCHEMA_VERSION = 'screenshots-v2'

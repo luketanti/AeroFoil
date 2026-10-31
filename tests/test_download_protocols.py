@@ -74,6 +74,7 @@ class DownloadProtocolTests(unittest.TestCase):
         self.assertEqual(normalized["usenet_client"]["category"], "shared-tag")
         self.assertEqual(normalized["torrent_client"]["min_seeders"], 7)
         self.assertTrue(normalized["torrent_client"]["remove_completed_torrents_on_finish"])
+        self.assertFalse(normalized["torrent_client"]["use_hardlinks_when_seeding"])
         self.assertEqual(normalized["usenet_client"]["min_age_minutes"], 0)
         self.assertEqual(normalized["prowlarr"]["search_limit"], 100)
         self.assertEqual(normalized["required_terms_match"], "all")
@@ -90,6 +91,15 @@ class DownloadProtocolTests(unittest.TestCase):
             },
         })
         self.assertFalse(normalized["torrent_client"]["remove_completed_torrents_on_finish"])
+
+    def test_download_settings_allow_hardlinks_when_seeding(self):
+        normalized = _normalize_download_settings({
+            "torrent_client": {
+                "use_hardlinks_when_seeding": True,
+            },
+        })
+
+        self.assertTrue(normalized["torrent_client"]["use_hardlinks_when_seeding"])
 
     @patch.object(ProwlarrClient, "_get")
     def test_prowlarr_search_sends_type_and_nonzero_limit(self, get_mock):
@@ -186,6 +196,13 @@ class DownloadProtocolTests(unittest.TestCase):
         ]
 
         self.assertEqual(select_update_file_indices(file_names), [1])
+
+    def test_select_update_file_indices_rejects_torrent_without_requested_version(self):
+        file_names = [
+            "Example Title Update [0100DAA012C1A800][v4054232].nsp",
+        ]
+
+        self.assertEqual(select_update_file_indices(file_names, expected_version=4128768), [])
 
     def test_extract_update_version_prefers_bracketed_token(self):
         self.assertEqual(_extract_update_version_from_name("Game [v1245184] v999.nsp"), 1245184)

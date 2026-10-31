@@ -85,6 +85,7 @@ class ShopTinfoilPayloadTests(unittest.TestCase):
                 'timestamp': time.time(),
                 'state_token': 'test-token',
                 'payload': {
+                    'rotation_key': 'test-day',
                     'sections': [
                         {'id': 'all', 'title': 'All', 'items': []},
                     ]
@@ -97,6 +98,7 @@ class ShopTinfoilPayloadTests(unittest.TestCase):
                 patch('app.app._maybe_sync_request_settings', return_value=None),
                 patch('app.app.app_settings', {'shop': shop_settings}),
                 patch('app.app._get_titledb_aware_state_token', return_value='test-token'),
+                patch('app.app._recommendation_rotation_key', return_value='test-day'),
             ):
                 response = shop_sections_api()
 

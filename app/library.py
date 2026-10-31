@@ -14,6 +14,8 @@ from sqlalchemy.orm import aliased, joinedload
 from app.constants import *
 from app.db import *
 from app import titles as titles_lib
+from app import metadata_sources
+from app.settings import load_settings
 import datetime
 from pathlib import Path
 from app.utils import *
@@ -485,8 +487,10 @@ def identify_library_files(library):
                         file.last_attempt = datetime.datetime.now()
                     processed += 1
 
+                    # Commit per file: an open transaction holds SQLite's write
+                    # lock while the next (slow) file is identified.
+                    db.session.commit()
                     if processed % _IDENTIFY_COMMIT_INTERVAL == 0:
-                        db.session.commit()
                         db.session.expunge_all()
                         _diag_sample_identity_map(phase)
                         if processed % (_IDENTIFY_COMMIT_INTERVAL * 10) == 0:
@@ -833,7 +837,7 @@ def _compute_library_cache_state_token():
                 parts.append(f"{label}:{int(mtime_ns)}:{int(st.st_size)}")
             except OSError:
                 parts.append(f"{label}:missing")
-        return "|".join(parts)
+        return "|".join(parts) + '|' + metadata_sources.get_metadata_cache_token()
     else:
         fingerprint = ":".join(str(int(value or 0)) for value in row)
 
@@ -843,7 +847,7 @@ def _compute_library_cache_state_token():
     except OSError:
         config_token = "missing"
 
-    return f"lib:{fingerprint}|cfg:{config_token}"
+    return f"lib:{fingerprint}|cfg:{config_token}|{metadata_sources.get_metadata_cache_token()}"
 
 
 def invalidate_library_cache_state_token():
@@ -1053,6 +1057,7 @@ def generate_library():
 
                     title_apps = apps_by_title.get(title.get('title_id'), [])
                     dlc_apps = [app for app in title_apps if app.get('app_type') == APP_TYPE_DLC and app['app_id'] == title['app_id']]
+                    dlc_version_dates = metadata_sources.get_version_dates(title['app_id'], load_settings())
 
                     version_list = []
                     for dlc_app in dlc_apps:
@@ -1060,7 +1065,7 @@ def generate_library():
                         version_list.append({
                             'version': app_version,
                             'owned': dlc_app.get('owned', False),
-                            'release_date': 'Unknown'
+                            'release_date': dlc_version_dates.get(app_version, 'Unknown')
                         })
 
                     title['version'] = sorted(version_list, key=lambda x: x['version'], reverse=True)
@@ -1361,6 +1366,13 @@ def _finalize_staged_conversion_output(source_path, staged_output_path, staging_
     shutil.move(staged_output_path, final_output_path)
     _cleanup_empty_parent_dirs(os.path.dirname(staged_output_path), staging_root)
     return final_output_path
+
+
+def _is_hardlinked_file(path):
+    try:
+        return os.stat(path).st_nlink > 1
+    except OSError:
+        return False
 
 def _summarize_conversion_failure(log_text, output_file=None):
     text = str(log_text or '')
@@ -2444,7 +2456,7 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
     query = Files.query.filter(Files.extension.in_(['nsp', 'xci']))
     if library_id:
         query = query.filter_by(library_id=library_id)
-    files = query.all()
+    files = [file_entry for file_entry in query.all() if not _is_hardlinked_file(file_entry.filepath)]
     total_files = len(files)
     processed = 0
     if progress_cb:
@@ -2472,6 +2484,16 @@ def convert_to_nsz(command_template, delete_original=True, dry_run=False, verbos
             add_detail('Skip missing file path.')
             if log_cb:
                 log_cb('Skip missing file path.')
+            processed += 1
+            if progress_cb:
+                progress_cb(processed, total_files)
+            continue
+
+        if _is_hardlinked_file(source_path):
+            results['skipped'] += 1
+            add_detail(f"Skip hardlinked file retained for torrent seeding: {source_path}.")
+            if log_cb:
+                log_cb(f"Skip hardlinked file retained for torrent seeding: {source_path}.")
             processed += 1
             if progress_cb:
                 progress_cb(processed, total_files)
@@ -2682,7 +2704,8 @@ def list_convertible_files(limit=2000, library_id=None, min_size_bytes=200 * 102
             'size': file.size or 0
         }
         for file in files
-        if not min_size_bytes or not file.size or file.size >= min_size_bytes
+        if (not min_size_bytes or not file.size or file.size >= min_size_bytes)
+        and not _is_hardlinked_file(file.filepath)
     ]
     return filtered
 
@@ -2721,6 +2744,15 @@ def convert_single_to_nsz(file_id, command_template, delete_original=True, dry_r
     if not source_path or not os.path.exists(source_path):
         results['success'] = False
         results['errors'].append('File path missing.')
+        return results
+
+    if _is_hardlinked_file(source_path):
+        results['skipped'] = 1
+        results['details'].append('Skip hardlinked file retained for torrent seeding.')
+        if log_cb:
+            log_cb(f"Skip hardlinked file retained for torrent seeding: {source_path}.")
+        if progress_cb:
+            progress_cb(1, 1)
         return results
 
     keys_ok, keys_error = _ensure_nsz_keys()

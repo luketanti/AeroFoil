@@ -11,8 +11,6 @@ class TitlesLanguagePreferenceTests(unittest.TestCase):
         titles._reset_titledb_state()
         titles._titles_index_ready = True
         titles._english_titles_index_ready = False
-        titles._titles_desc_by_title_id = {}
-        titles._titles_images_by_title_id = {}
 
     def tearDown(self):
         titles._reset_titledb_state()
@@ -38,9 +36,7 @@ class TitlesLanguagePreferenceTests(unittest.TestCase):
             'description': 'English description',
         }
         titles._english_titles_index_ready = True
-        titles._titles_images_by_title_id = {
-            title_id: ['https://example.invalid/shot-1.jpg']
-        }
+        english_info['screenshots'] = ['https://example.invalid/shot-1.jpg']
 
         with patch(
             'app.titles.load_settings',
@@ -74,9 +70,7 @@ class TitlesLanguagePreferenceTests(unittest.TestCase):
             'description': '',
         }
         titles._english_titles_index_ready = True
-        titles._titles_desc_by_title_id = {
-            title_id: 'Localized fallback description'
-        }
+        localized_info['description'] = 'Localized fallback description'
 
         with patch(
             'app.titles.load_settings',
@@ -122,6 +116,9 @@ class TitlesLanguagePreferenceTests(unittest.TestCase):
                 'description': '',
                 'iconUrl': '',
                 'bannerUrl': '',
+                'category': '',
+                'nsuId': '',
+                'rating': '',
                 'screenshots': [],
             },
         })

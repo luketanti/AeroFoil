@@ -137,6 +137,9 @@ def _normalize_titles_manual_overrides(raw_overrides):
             'description': str(value.get('description') or '').strip(),
             'iconUrl': str(value.get('iconUrl') or '').strip(),
             'bannerUrl': str(value.get('bannerUrl') or '').strip(),
+            'category': str(value.get('category') or '').strip(),
+            'nsuId': str(value.get('nsuId') or '').strip(),
+            'rating': str(value.get('rating') or '').strip(),
             'screenshots': screenshots[:12],
         }
     return out
@@ -333,6 +336,10 @@ def _normalize_download_settings(downloads):
         raw_torrent_client.get('remove_completed_torrents_on_finish'),
         default=(defaults.get('torrent_client', {}) or {}).get('remove_completed_torrents_on_finish', True),
     )
+    merged['torrent_client']['use_hardlinks_when_seeding'] = _coerce_bool(
+        raw_torrent_client.get('use_hardlinks_when_seeding'),
+        default=(defaults.get('torrent_client', {}) or {}).get('use_hardlinks_when_seeding', False),
+    )
     raw_usenet_client = dict(raw_downloads.get('usenet_client') or {})
     merged['usenet_client'] = _normalize_download_client_config(
         raw_usenet_client,
@@ -519,6 +526,14 @@ def _normalize_shop_settings(raw_shop):
     merged = defaults.copy()
     if isinstance(raw_shop, dict):
         merged.update(raw_shop)
+
+    merged['discovery_enabled'] = _coerce_bool(merged.get('discovery_enabled'), default=False)
+    merged['discovery_name'] = str(merged.get('discovery_name') or 'AeroFoil').strip()[:100] or 'AeroFoil'
+    try:
+        discovery_port = int(merged.get('discovery_http_port', 0))
+    except (TypeError, ValueError):
+        discovery_port = 0
+    merged['discovery_http_port'] = discovery_port if 0 <= discovery_port <= 65535 else 0
 
     merged['motd_enabled'] = _coerce_bool(
         merged.get('motd_enabled'),
@@ -728,6 +743,7 @@ def load_settings(force_reload=False):
         _merge_section('security')
         _merge_section('shop')
         _merge_section('titles')
+        _merge_section('metadata_sources')
         _merge_section('library')
         _merge_section('cheats')
         _merge_section('content_filter')
@@ -763,6 +779,7 @@ def load_settings(force_reload=False):
         settings['security'] = _normalize_security_settings(settings.get('security'))
         settings['downloads'] = _normalize_download_settings(settings.get('downloads'))
         settings['titles'] = _normalize_titles_settings(settings.get('titles'))
+        settings['metadata_sources'] = _normalize_metadata_sources_settings(settings.get('metadata_sources'))
         settings['shop'] = _normalize_shop_settings(settings.get('shop'))
         settings['cheats'] = _normalize_cheats_settings(settings.get('cheats'))
         settings['content_filter'] = _normalize_content_filter_settings(settings.get('content_filter'))
@@ -858,6 +875,18 @@ def verify_settings(section, data):
                         })
                         break
     elif section == 'shop':
+        try:
+            discovery_port = int(data.get('discovery_http_port', 0))
+            valid_discovery_port = (
+                not isinstance(data.get('discovery_http_port'), bool)
+                and str(data.get('discovery_http_port', 0)).strip() == str(discovery_port)
+                and 0 <= discovery_port <= 65535
+            )
+        except (TypeError, ValueError):
+            valid_discovery_port = False
+        if not valid_discovery_port:
+            success = False
+            errors.append({'path': 'shop/discovery_http_port', 'error': 'Discovery web port must be 0 (automatic) or an integer from 1 to 65535.'})
         normalized = _normalize_shop_settings(data)
         public_key_ok, public_key_error = _validate_shop_public_key(normalized.get('public_key'))
         if not public_key_ok:
@@ -925,6 +954,19 @@ def delete_library_path_from_settings(path):
                 })
     return success, errors
 
+def _normalize_metadata_sources_settings(data):
+    data = data if isinstance(data, dict) else {}
+    return {'nx_versions_enabled': _coerce_bool(data.get('nx_versions_enabled'), default=True)}
+
+
+def set_metadata_sources_settings(data):
+    settings = load_settings(force_reload=True)
+    settings['metadata_sources'] = _normalize_metadata_sources_settings(data)
+    with open(CONFIG_FILE, 'w') as yaml_file:
+        yaml.dump(settings, yaml_file)
+    _invalidate_settings_cache()
+
+
 def set_titles_settings(region, language, prefer_english_metadata=False):
     settings = load_settings(force_reload=True)
     settings.setdefault('titles', {})
@@ -955,6 +997,9 @@ def set_manual_title_override(title_id, data):
         payload.get('description'),
         payload.get('iconUrl'),
         payload.get('bannerUrl'),
+        payload.get('category'),
+        payload.get('nsuId'),
+        payload.get('rating'),
         bool(payload.get('screenshots')),
     ])
     if has_value:

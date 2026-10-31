@@ -737,6 +737,23 @@ def remove_pending_download(key):
     return _remove_pending_live_download(key, delete_context)
 
 
+def _is_active_download(path):
+    """Return None when downloader activity cannot be verified."""
+    # The client may still be writing into a duplicate's folder (other files of the same torrent).
+    name = re.split(r"[\\/]", str(path).rstrip("\\/"))[-1]
+    try:
+        snapshot = _get_download_activity_snapshot(load_settings().get("downloads", {}))
+    except Exception:
+        return None
+    if snapshot.get("errors_by_protocol"):
+        return None
+    return any(
+        item.get("name") == name
+        for bucket in (snapshot.get("active_by_protocol") or {}).values()
+        for item in bucket.get("items") or []
+    )
+
+
 def remove_duplicate_download(duplicate_id):
     duplicate_id = str(duplicate_id or "").strip()
     if not duplicate_id:
@@ -766,6 +783,11 @@ def remove_duplicate_download(duplicate_id):
     target_path = str(target_entry.get("path") or "").strip()
     if not target_path:
         return False, "Duplicate entry has no deletable path."
+    active = _is_active_download(target_path)
+    if active is None:
+        return False, "Could not verify downloader activity: retry when the client is available or dismiss this entry."
+    if active:
+        return False, "Still downloading in the client: dismiss this entry or remove the download there first."
 
     delete_ok, delete_message = _delete_download_payload(target_path)
     if not delete_ok:
@@ -922,11 +944,12 @@ def search_update_options(title_id, version, limit=20):
     settings = load_settings()
     downloads = settings.get("downloads", {})
     prowlarr_cfg = downloads.get("prowlarr", {})
+    # Listing options only needs Prowlarr; a download client is required to
+    # queue, and queue_download_url reports that clearly at that point. With
+    # no client configured the protocol filter simply is not applied.
     allowed_protocols = _get_configured_protocols(downloads)
     if not prowlarr_cfg.get("url") or not prowlarr_cfg.get("api_key"):
         return False, "Prowlarr is not configured.", []
-    if not allowed_protocols:
-        return False, "No download client is configured.", []
 
     title_name = title_id
     titles_lib.load_titledb()
@@ -950,6 +973,12 @@ def search_update_options(title_id, version, limit=20):
     min_seeders = _get_torrent_min_seeders(downloads)
     min_age_minutes = _get_usenet_min_age_minutes(downloads)
     for query in query_candidates:
+        logger.info(
+            'Prowlarr search (options): "%s" (title %s v%s)',
+            query,
+            update.get("title_id"),
+            update.get("version"),
+        )
         results = client.search(
             query,
             indexer_ids=prowlarr_cfg.get("indexer_ids") or [],
@@ -968,6 +997,7 @@ def search_update_options(title_id, version, limit=20):
                 required_terms_match=downloads.get("required_terms_match") or "all",
                 blacklist_terms=downloads.get("blacklist_terms") or [],
                 allowed_protocols=allowed_protocols,
+                require_exact_version=True,
             ) is not None
         ]
         if results:
@@ -1078,6 +1108,12 @@ def _search_and_queue(
     query_candidates = _build_queries(update)
     result = None
     for query in query_candidates:
+        logger.info(
+            'Prowlarr search (queue): "%s" (title %s v%s)',
+            query,
+            update.get("title_id"),
+            update.get("version"),
+        )
         results = client.search(query, indexer_ids=indexer_ids, categories=categories, limit=search_limit)
         result = pick_best_result(
             results,
@@ -1647,6 +1683,11 @@ def _should_remove_completed_torrent(client_cfg):
     return bool(cfg.get("remove_completed_torrents_on_finish", True))
 
 
+def _should_use_hardlinks_when_seeding(client_cfg):
+    cfg = client_cfg or {}
+    return bool(cfg.get("use_hardlinks_when_seeding", False))
+
+
 def _build_completed_match_text(item):
     src_path = str((item or {}).get("path") or "").strip()
     parts = [str((item or {}).get("name") or "").strip(), os.path.basename(src_path)]
@@ -1783,7 +1824,12 @@ def _process_tracked_completed_item_locked(key, info, bucket):
         and not _should_remove_completed_torrent(bucket.get("client_cfg"))
     )
     if retain_torrent:
-        moved_result, move_reason = _move_completed_with_reason(match, move_info, copy_files=True)
+        moved_result, move_reason = _move_completed_with_reason(
+            match,
+            move_info,
+            copy_files=True,
+            hardlink_files=_should_use_hardlinks_when_seeding(bucket.get("client_cfg")),
+        )
     else:
         moved_result, move_reason = _move_completed_with_reason(match, move_info)
     moved_match_paths = _coerce_moved_paths(moved_result)
@@ -2013,7 +2059,17 @@ def _build_generic_import_destination(dest_root, src_path):
         basename = basename[:-4]
     return _ensure_unique_path(os.path.join(dest_root, basename))
 
-def _move_generic_importable_files(src_path, dest_root, excluded_paths=None, copy_files=False):
+def _hardlink_or_copy_file(source_path, dest_path):
+    try:
+        os.link(source_path, dest_path)
+        return True
+    except OSError as exc:
+        logger.info("Could not hardlink %s to %s; copying instead: %s", source_path, dest_path, exc)
+        shutil.copy2(source_path, dest_path)
+        return False
+
+
+def _move_generic_importable_files(src_path, dest_root, excluded_paths=None, copy_files=False, hardlink_files=False):
     excluded = {
         os.path.normcase(os.path.normpath(path))
         for path in (excluded_paths or [])
@@ -2032,14 +2088,18 @@ def _move_generic_importable_files(src_path, dest_root, excluded_paths=None, cop
         for import_path in importable_paths:
             dest_path = _build_generic_import_destination(dest_root, import_path)
             if copy_files:
-                shutil.copy2(import_path, dest_path)
+                if hardlink_files:
+                    _hardlink_or_copy_file(import_path, dest_path)
+                else:
+                    shutil.copy2(import_path, dest_path)
             else:
                 shutil.move(import_path, dest_path)
             dest_path = _normalize_imported_wrapped_files(dest_path)
             moved_paths.append(dest_path)
         if not copy_files:
             _cleanup_download_path(src_path, dest_root)
-        logger.info("%s download to library: %s", "Copied" if copy_files else "Moved", ", ".join(moved_paths))
+        operation = "Hardlinked or copied" if copy_files and hardlink_files else "Copied" if copy_files else "Moved"
+        logger.info("%s download to library: %s", operation, ", ".join(moved_paths))
         return (moved_paths[0] if len(moved_paths) == 1 else moved_paths), None
     except Exception as e:
         logger.warning("Failed to move download %s: %s", src_path, e)
@@ -2082,7 +2142,13 @@ def _normalize_imported_wrapped_files(dest_path):
     return renamed_single_path
 
 
-def _move_completed_with_reason(item, update_info=None, copy_files=False):
+def _move_completed_with_reason(item, update_info=None, copy_files=False, hardlink_files=False):
+    # Identifying DLC and update files needs TitleDB, which is unloaded while idle.
+    with titles_lib.titledb_session():
+        return _move_completed_in_titledb_session(item, update_info, copy_files, hardlink_files)
+
+
+def _move_completed_in_titledb_session(item, update_info=None, copy_files=False, hardlink_files=False):
     library_paths = get_libraries_path()
     if not library_paths:
         logger.warning("No library paths configured; cannot move download.")
@@ -2106,7 +2172,9 @@ def _move_completed_with_reason(item, update_info=None, copy_files=False):
         update_path, actual_version = _select_completed_update_candidate(src_path)
         if not update_path or not actual_version:
             if copy_files:
-                moved_result, move_reason = _move_generic_importable_files(src_path, dest_root, copy_files=True)
+                moved_result, move_reason = _move_generic_importable_files(
+                    src_path, dest_root, copy_files=True, hardlink_files=hardlink_files,
+                )
             else:
                 moved_result, move_reason = _move_generic_importable_files(src_path, dest_root)
             if moved_result:
@@ -2123,7 +2191,7 @@ def _move_completed_with_reason(item, update_info=None, copy_files=False):
         if actual_version <= effective_highest_owned:
             if copy_files:
                 moved_result, move_reason = _move_generic_importable_files(
-                    src_path, dest_root, excluded_paths=[update_path], copy_files=True,
+                    src_path, dest_root, excluded_paths=[update_path], copy_files=True, hardlink_files=hardlink_files,
                 )
             else:
                 moved_result, move_reason = _move_generic_importable_files(
@@ -2159,7 +2227,10 @@ def _move_completed_with_reason(item, update_info=None, copy_files=False):
         try:
             os.makedirs(dest_dir, exist_ok=True)
             if copy_files:
-                shutil.copy2(update_path, dest_path)
+                if hardlink_files:
+                    _hardlink_or_copy_file(update_path, dest_path)
+                else:
+                    shutil.copy2(update_path, dest_path)
             else:
                 shutil.move(update_path, dest_path)
             logger.info("%s update to library: %s", "Copied" if copy_files else "Moved", dest_path)
@@ -2182,7 +2253,9 @@ def _move_completed_with_reason(item, update_info=None, copy_files=False):
     if duplicate_reason:
         return None, duplicate_reason
     if copy_files:
-        moved_result, move_reason = _move_generic_importable_files(src_path, dest_root, copy_files=True)
+        moved_result, move_reason = _move_generic_importable_files(
+            src_path, dest_root, copy_files=True, hardlink_files=hardlink_files,
+        )
     else:
         moved_result, move_reason = _move_generic_importable_files(src_path, dest_root)
     if moved_result:
@@ -2191,9 +2264,11 @@ def _move_completed_with_reason(item, update_info=None, copy_files=False):
     return moved_result, move_reason
 
 
-def _move_completed(item, update_info=None, copy_files=False):
+def _move_completed(item, update_info=None, copy_files=False, hardlink_files=False):
     if copy_files:
-        moved_result, _ = _move_completed_with_reason(item, update_info=update_info, copy_files=True)
+        moved_result, _ = _move_completed_with_reason(
+            item, update_info=update_info, copy_files=True, hardlink_files=hardlink_files,
+        )
     else:
         moved_result, _ = _move_completed_with_reason(item, update_info=update_info)
     return moved_result

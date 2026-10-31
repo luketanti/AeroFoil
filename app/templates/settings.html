@@ -255,6 +255,46 @@
     }
 </style>
 
+<!-- Keep dialogs outside page stacking contexts and hidden settings sections. -->
+<!-- Delete library path modal -->
+                <div class="modal fade" id="deletePathModal" tabindex="-1" aria-labelledby="deletePathModalLabel"
+                    aria-hidden="true">
+                    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h1 class="modal-title fs-5" id="deletePathModalLabel">Delete library path</h1>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"
+                    aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                ...
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-danger" data-bs-dismiss="modal">Delete</button>
+            </div>
+        </div>
+                    </div>
+                </div>
+
+                <div class="modal fade" id="settingsNoticeModal" tabindex="-1" aria-labelledby="settingsNoticeModalLabel"
+                    aria-hidden="true">
+                    <div class="modal-dialog modal-dialog-centered">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h1 class="modal-title fs-5" id="settingsNoticeModalLabel">Settings notice</h1>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal"
+                                    aria-label="Close"></button>
+                            </div>
+                            <div class="modal-body" id="settingsNoticeModalBody"></div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-outline-secondary d-none" id="settingsNoticeDismissForeverBtn">Do not show again</button>
+                                <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Close</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
 <div class="container-fluid setting-body settings-body">
     <div class="row g-0 settings-shell-row">
         <!-- Sidebar Navigation -->
@@ -297,6 +337,16 @@
                     <span class="settings-nav-copy">
                         <span class="settings-nav-title">Downloads</span>
                         <span class="settings-nav-subtitle">Automation, providers, torrent and usenet clients</span>
+                    </span>
+                </a>
+                <a class="nav-link" href="#" data-section="metadata-sources">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true" style="vertical-align: -0.125em; margin-right: 0.5rem;">
+                        <ellipse cx="8" cy="3" rx="6" ry="2"/>
+                        <path d="M2 5v3c0 1.1 2.7 2 6 2s6-.9 6-2V5c-1.3 1-3.6 1.5-6 1.5S3.3 6 2 5zm0 5v3c0 1.1 2.7 2 6 2s6-.9 6-2v-3c-1.3 1-3.6 1.5-6 1.5S3.3 11 2 10z"/>
+                    </svg>
+                    <span class="settings-nav-copy">
+                        <span class="settings-nav-title">Metadata Sources</span>
+                        <span class="settings-nav-subtitle">Title information and update versions</span>
                     </span>
                 </a>
             </nav>
@@ -595,49 +645,47 @@
                     </div>
                 </div>
 
-                <!-- Delete User Modal -->
-                <div class="modal fade" id="deletePathModal" tabindex="-1" aria-labelledby="deletePathModalLabel"
-                    aria-hidden="true">
-                    <div class="modal-dialog modal-dialog-centered">
-                        <div class="modal-content">
-                            <div class="modal-header">
-                                <h1 class="modal-title fs-5" id="deletePathModalLabel">Delete library path</h1>
-                                <button type="button" class="btn-close" data-bs-dismiss="modal"
-                                    aria-label="Close"></button>
-                            </div>
-                            <div class="modal-body">
-                                ...
-                            </div>
-                            <div class="modal-footer">
-                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                                <button type="button" class="btn btn-danger" data-bs-dismiss="modal">Delete</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="modal fade" id="settingsNoticeModal" tabindex="-1" aria-labelledby="settingsNoticeModalLabel"
-                    aria-hidden="true">
-                    <div class="modal-dialog modal-dialog-centered">
-                        <div class="modal-content">
-                            <div class="modal-header">
-                                <h1 class="modal-title fs-5" id="settingsNoticeModalLabel">Settings notice</h1>
-                                <button type="button" class="btn-close" data-bs-dismiss="modal"
-                                    aria-label="Close"></button>
-                            </div>
-                            <div class="modal-body" id="settingsNoticeModalBody"></div>
-                            <div class="modal-footer">
-                                <button type="button" class="btn btn-outline-secondary d-none" id="settingsNoticeDismissForeverBtn">Do not show again</button>
-                                <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Close</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
                 </form>
                 </div>
 
                 <!-- Shop Section -->
+                <div class="settings-section d-none" id="section-metadata-sources" data-section="metadata-sources">
+                    <div class="settings-section-header">
+                        <h3 class="mb-1">Metadata Sources</h3>
+                        <div class="settings-section-subtitle">Choose additional sources to supplement title metadata.</div>
+                    </div>
+                    <div class="settings-panel activity-section aerofoil-card">
+                        <div class="card-body">
+                            <div class="border rounded p-3 mb-3">
+                                <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+                                    <div class="fw-semibold">TitleDB <span class="badge text-bg-secondary">Primary source</span></div>
+                                    <span id="titledbLastUpdated" class="text-muted small" title="Upstream commit date of the TitleDB revision used by the downloaded dataset">Source updated: Unknown</span>
+                                </div>
+                                <div class="form-text">Provides title names, artwork, languages, release dates, and version history. Region and language are configured in Library.</div>
+                            </div>
+                            <div class="border rounded p-3 mb-3">
+                                <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" id="nxVersionsEnabledCheck" aria-describedby="nxVersionsHelp">
+                                        <label class="form-check-label fw-semibold" for="nxVersionsEnabledCheck">Enable nx-versions</label>
+                                    </div>
+                                    <span id="nxVersionsLastUpdated" class="text-muted small" title="Upstream commit date of the versions.txt dataset">Source updated: Unknown</span>
+                                </div>
+                                <div id="nxVersionsHelp" class="form-text">
+                                    Supplements TitleDB with the latest known update and DLC versions from
+                                    <a href="https://github.com/16BitWonder/nx-versions" target="_blank" rel="noopener noreferrer">16BitWonder/nx-versions</a>.
+                                    The highest known version is used. Changelog dates fill missing release dates using the first recorded availability of each version.
+                                    TitleDB dates take priority. This source has no title names or artwork, and observed dates may be later than the actual release.
+                                    It refreshes when enabled and during scheduled metadata updates. If a refresh fails, cached data is retained.
+                                    Disabling stops this source from refreshing or supplementing lookups; versions already discovered in your library remain recorded.
+                                </div>
+                            </div>
+                            <button type="button" id="submitMetadataSourcesBtn" class="btn btn-primary" onclick="submitMetadataSourcesSettings()">Save metadata sources</button>
+                            <div id="metadataSourcesStatus" class="form-text" role="status" aria-live="polite"></div>
+                        </div>
+                    </div>
+                </div>
+
                 <div class="settings-section d-none" id="section-shop" data-section="shop">
                 <div class="settings-section-header">
                     <div class="d-flex flex-wrap align-items-start justify-content-between gap-3">
@@ -684,6 +732,19 @@
                         </div>
 
                         <div class="settings-option-stack">
+                            <div class="settings-option">
+                                <div class="form-check">
+                                    <input type="checkbox" class="form-check-input" id="discoveryEnabledCheck">
+                                    <label class="form-check-label" for="discoveryEnabledCheck">LAN discovery</label>
+                                </div>
+                                <div class="form-text">Allow Sphaira and other compatible clients to find this server on your local network. Requires UDP port 8465. Catalogue support is a separate feature.</div>
+                                <label for="discoveryNameInput" class="form-label mt-2">Discovery name</label>
+                                <input class="form-control" id="discoveryNameInput" maxlength="100" placeholder="AeroFoil">
+                                <label for="discoveryHttpPortInput" class="form-label mt-2">Advertised web port</label>
+                                <input type="number" class="form-control" id="discoveryHttpPortInput" min="0" max="65535" value="0">
+                                <div class="form-text">Use 0 for the application port. For Docker or a proxy, enter the web port reachable from your LAN.</div>
+                            </div>
+
                             <div class="form-check">
                                 <input type="checkbox" class="form-check-input" id="publicShopCheck"
                                     aria-describedby="publicShopCheckHelp">
@@ -1041,6 +1102,11 @@
                             <label class="form-check-label" for="torrentClientRemoveOnFinishCheck">Remove finished torrents from client</label>
                             <div class="form-text">Disable this to keep finished torrents in the client for seeding.</div>
                         </div>
+                        <div class="form-check form-switch mb-3">
+                            <input class="form-check-input" type="checkbox" id="torrentClientHardlinksWhenSeedingCheck">
+                            <label class="form-check-label" for="torrentClientHardlinksWhenSeedingCheck">Use hardlinks instead of copying when seeding</label>
+                            <div class="form-text">Requires the torrent download and library paths to be on the same share or volume. AeroFoil copies files automatically when a hardlink is unavailable.</div>
+                        </div>
                         <div class="d-flex align-items-center gap-3">
                             <button type="button" id="testTorrentClientBtn" class="btn btn-outline-secondary"
                                 onClick='testTorrentClientSettings()'>Test torrent client</button>
@@ -1110,6 +1176,7 @@
 
     settings_map = {
         'library/path': 'libraryPathInput',
+        'shop/discovery_http_port': 'discoveryHttpPortInput',
         'shop/public_key': 'shopPublicKeyInput'
     };
 
@@ -1667,6 +1734,39 @@
         });
     }
 
+    function fillMetadataSourceStatus(status) {
+        status = status || {};
+        [['titledb', 'titledbLastUpdated'], ['nx-versions', 'nxVersionsLastUpdated']].forEach(function (entry) {
+            const timestamp = (status[entry[0]] || {}).last_updated;
+            const date = timestamp ? new Date(timestamp) : null;
+            const text = date && !Number.isNaN(date.getTime()) ? date.toLocaleString() : 'Unknown';
+            $('#' + entry[1]).text('Source updated: ' + text);
+        });
+    }
+
+    function submitMetadataSourcesSettings() {
+        $('#submitMetadataSourcesBtn').prop('disabled', true);
+        $('#metadataSourcesStatus').text('Saving and refreshing metadata sources...');
+        $.ajax({
+            url: '/api/settings/metadata-sources',
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({nx_versions_enabled: $('#nxVersionsEnabledCheck').is(':checked')}),
+            success: function (result) {
+                if (result.metadata_source_status) fillMetadataSourceStatus(result.metadata_source_status);
+                $('#metadataSourcesStatus').text(result.success
+                    ? (result.warning || 'Metadata sources saved.')
+                    : 'Could not save metadata sources.');
+            },
+            error: function () {
+                $('#metadataSourcesStatus').text('Could not complete the request. Reload settings to check the saved selection.');
+            },
+            complete: function () {
+                $('#submitMetadataSourcesBtn').prop('disabled', false);
+            }
+        });
+    }
+
     function submitTitlesSettings() {
         $('#submitTitlesSettingsBtn').prop('disabled', true);
         data = {
@@ -1893,6 +1993,9 @@
         data = {
             host: $('#shopHostInput').val(),
             hauth: $('#shopHauthInput').val(),
+            discovery_enabled: getCheckboxStatus("discoveryEnabledCheck"),
+            discovery_name: getInputVal("discoveryNameInput"),
+            discovery_http_port: getInputVal("discoveryHttpPortInput"),
             public: getCheckboxStatus("publicShopCheck"),
             external_tinfoil_only: getCheckboxStatus("externalTinfoilOnlyCheck"),
             encrypt: getCheckboxStatus("encryptShopCheck"),
@@ -2493,6 +2596,15 @@
         );
     }
 
+    function updateTorrentHardlinkFieldState() {
+        const isSeeding = !getCheckboxStatus("torrentClientRemoveOnFinishCheck");
+        const hardlinkInput = $("#torrentClientHardlinksWhenSeedingCheck");
+        hardlinkInput.prop("disabled", !isSeeding);
+        if (!isSeeding) {
+            hardlinkInput.prop("checked", false);
+        }
+    }
+
     function updateUsenetClientFieldState() {
         const clientType = getInputVal("usenetClientTypeSelect");
         const caps = downloadClientCapabilities.find(item => item.protocol === 'usenet' && item.type === clientType) || {};
@@ -2628,7 +2740,8 @@
                 api_key: getInputVal("torrentClientApiKeyInput"),
                 download_path: getInputVal("torrentClientPathInput"),
                 min_seeders: parseInt(getInputVal("torrentClientMinSeedersInput"), 10),
-                remove_completed_torrents_on_finish: getCheckboxStatus("torrentClientRemoveOnFinishCheck")
+                remove_completed_torrents_on_finish: getCheckboxStatus("torrentClientRemoveOnFinishCheck"),
+                use_hardlinks_when_seeding: getCheckboxStatus("torrentClientHardlinksWhenSeedingCheck")
             },
             usenet_client: {
                 type: getInputVal("usenetClientTypeSelect"),
@@ -2899,7 +3012,7 @@
     // Handle URL hash for direct navigation
     function handleHashNavigation() {
         const hash = window.location.hash.substring(1);
-        if (['library', 'shop', 'downloads'].includes(hash)) {
+        if (['library', 'shop', 'downloads', 'metadata-sources'].includes(hash)) {
             showSettingsSection(hash);
         } else {
             // Default to library if no hash
@@ -2924,6 +3037,7 @@
         fillLibraryTable();
         $("#torrentClientTypeSelect").on("change", updateTorrentClientFieldState);
         $("#usenetClientTypeSelect").on("change", updateUsenetClientFieldState);
+        $("#torrentClientRemoveOnFinishCheck").on("change", updateTorrentHardlinkFieldState);
         $("#tinfoilOnlyModeCheck").on("change", syncTinfoilOnlyModeControls);
         $('#libraryTemplateBaseFolderInput, #libraryTemplateBaseFilenameInput, #libraryTemplateUpdateFolderInput, #libraryTemplateUpdateFilenameInput, #libraryTemplateDlcFolderInput, #libraryTemplateDlcFilenameInput, #libraryTemplateOtherFolderInput, #libraryTemplateOtherFilenameInput')
             .on('change', function () { submitLibrarySettings(); });
@@ -3014,6 +3128,8 @@
             }
             // Titles settings
             titlesSettings = result['titles'];
+            $('#nxVersionsEnabledCheck').prop('checked', !!(result.metadata_sources || {}).nx_versions_enabled);
+            fillMetadataSourceStatus(result.metadata_source_status);
 
             // Fill region and language
             setInputVal("selectRegion", titlesSettings['region']);
@@ -3028,6 +3144,9 @@
             $("#motdEnabledCheck").prop("checked", shopSettings['motd_enabled'] !== false);
             setInputVal("motdTextArea", shopSettings['motd']);
             setInputVal("motdApiUrlInput", shopSettings['motd_api_url'] || '');
+            $("#discoveryEnabledCheck").prop("checked", shopSettings.discovery_enabled === true);
+            setInputVal("discoveryNameInput", shopSettings.discovery_name || "AeroFoil");
+            setInputVal("discoveryHttpPortInput", shopSettings.discovery_http_port ?? 0);
             $("#publicShopCheck").prop("checked", shopSettings['public']);
             $("#externalTinfoilOnlyCheck").prop("checked", !!shopSettings['external_tinfoil_only']);
             $("#encryptShopCheck").prop("checked", shopSettings['encrypt']);
@@ -3079,6 +3198,7 @@
             setInputVal("torrentClientPathInput", torrentSettings['download_path'] || '');
             setInputVal("torrentClientMinSeedersInput", torrentSettings['min_seeders'] ?? 2);
             $("#torrentClientRemoveOnFinishCheck").prop("checked", torrentSettings['remove_completed_torrents_on_finish'] !== false);
+            $("#torrentClientHardlinksWhenSeedingCheck").prop("checked", !!torrentSettings['use_hardlinks_when_seeding']);
             usenetSettings = downloadsSettings['usenet_client'] || {};
             setInputVal("usenetClientUrlInput", usenetSettings['url'] || '');
             setInputVal("usenetClientUserInput", usenetSettings['username'] || '');
@@ -3086,6 +3206,7 @@
             setInputVal("usenetClientApiKeyInput", usenetSettings['api_key'] || '');
             setInputVal("usenetClientMinAgeInput", usenetSettings['min_age_minutes'] ?? 0);
             updateTorrentClientFieldState();
+            updateTorrentHardlinkFieldState();
             updateUsenetClientFieldState();
         });
 
