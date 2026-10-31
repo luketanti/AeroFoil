@@ -1914,27 +1914,46 @@ def _save_sync_resolve_note():
     return ''
 
 
-def _save_sync_title_dir(user, title_id):
-    return os.path.join(_save_sync_user_dir(user), title_id)
+def _normalize_save_type(value):
+    save_type = str(value or 'unknown').strip().lower()
+    if save_type not in ('unknown', 'account', 'device'):
+        raise ValueError('Invalid save_type. Use account, device, or unknown.')
+    return save_type
 
 
-def _save_sync_latest_dir(user, title_id):
-    return os.path.join(_save_sync_title_dir(user, title_id), 'latest')
+def _save_sync_requested_type():
+    query_type = request.args.get('save_type')
+    form_type = request.form.get('save_type')
+    if query_type is not None and form_type is not None:
+        if _normalize_save_type(query_type) != _normalize_save_type(form_type):
+            raise ValueError('Invalid conflicting save_type values.')
+    return _normalize_save_type(form_type if form_type is not None else query_type)
 
 
-def _save_sync_latest_archive_path(user, title_id):
-    return os.path.join(_save_sync_title_dir(user, title_id), '_latest.zip')
+def _save_sync_title_dir(user, title_id, save_type='unknown'):
+    save_type = _normalize_save_type(save_type)
+    title_dir = os.path.join(_save_sync_user_dir(user), title_id)
+    # Untyped historical files stay exactly where they are.
+    return title_dir if save_type == 'unknown' else os.path.join(title_dir, save_type)
 
 
-def _save_sync_archive_path(user, title_id, save_id=None):
+def _save_sync_latest_dir(user, title_id, save_type='unknown'):
+    return os.path.join(_save_sync_title_dir(user, title_id, save_type=save_type), 'latest')
+
+
+def _save_sync_latest_archive_path(user, title_id, save_type='unknown'):
+    return os.path.join(_save_sync_title_dir(user, title_id, save_type=save_type), '_latest.zip')
+
+
+def _save_sync_archive_path(user, title_id, save_id=None, save_type='unknown'):
     if save_id:
-        return os.path.join(_save_sync_title_dir(user, title_id), f'{save_id}.zip')
+        return os.path.join(_save_sync_title_dir(user, title_id, save_type=save_type), f'{save_id}.zip')
     # Legacy single-save path.
     return os.path.join(_save_sync_user_dir(user), f'{title_id}.zip')
 
 
-def _save_sync_metadata_path(user, title_id, save_id):
-    return os.path.join(_save_sync_title_dir(user, title_id), f'{save_id}.json')
+def _save_sync_metadata_path(user, title_id, save_id, save_type='unknown'):
+    return os.path.join(_save_sync_title_dir(user, title_id, save_type=save_type), f'{save_id}.json')
 
 
 def _save_sync_format_created_at(created_ts):
@@ -2034,10 +2053,10 @@ def _save_sync_clear_directory(path):
             continue
 
 
-def _save_sync_refresh_latest_from_archive(user, title_id, archive_path):
-    latest_dir = _save_sync_latest_dir(user, title_id)
+def _save_sync_refresh_latest_from_archive(user, title_id, archive_path, save_type='unknown'):
+    latest_dir = _save_sync_latest_dir(user, title_id, save_type=save_type)
     os.makedirs(latest_dir, exist_ok=True)
-    temp_dir = os.path.join(_save_sync_title_dir(user, title_id), '.latest_tmp')
+    temp_dir = os.path.join(_save_sync_title_dir(user, title_id, save_type=save_type), '.latest_tmp')
     if os.path.isdir(temp_dir):
         shutil.rmtree(temp_dir, ignore_errors=True)
     os.makedirs(temp_dir, exist_ok=True)
@@ -2098,16 +2117,16 @@ def _save_sync_build_archive_from_directory(source_dir, archive_path):
         raise
 
 
-def _save_sync_refresh_latest_for_title(user, title_id):
-    versions = _save_sync_collect_versions_for_title(user, title_id)
+def _save_sync_refresh_latest_for_title(user, title_id, save_type='unknown'):
+    versions = _save_sync_collect_versions_for_title(user, title_id, save_type=save_type)
     latest_archive = None
     for version in versions:
         archive_path = str(version.get('archive_path') or '')
         if archive_path and os.path.isfile(archive_path):
             latest_archive = archive_path
             break
-    latest_dir = _save_sync_latest_dir(user, title_id)
-    latest_archive_path = _save_sync_latest_archive_path(user, title_id)
+    latest_dir = _save_sync_latest_dir(user, title_id, save_type=save_type)
+    latest_archive_path = _save_sync_latest_archive_path(user, title_id, save_type=save_type)
     if not latest_archive:
         _save_sync_clear_directory(latest_dir)
         try:
@@ -2116,12 +2135,12 @@ def _save_sync_refresh_latest_for_title(user, title_id):
         except Exception:
             pass
         return
-    _save_sync_refresh_latest_from_archive(user, title_id, latest_archive)
+    _save_sync_refresh_latest_from_archive(user, title_id, latest_archive, save_type=save_type)
 
 
-def _save_sync_collect_versions_for_title(user, title_id):
+def _save_sync_collect_versions_for_title(user, title_id, save_type='unknown'):
     versions = []
-    title_dir = _save_sync_title_dir(user, title_id)
+    title_dir = _save_sync_title_dir(user, title_id, save_type=save_type)
     if os.path.isdir(title_dir):
         try:
             for filename in sorted(os.listdir(title_dir)):
@@ -2141,7 +2160,7 @@ def _save_sync_collect_versions_for_title(user, title_id):
                 except Exception:
                     size = 0
 
-                meta = _save_sync_read_metadata(_save_sync_metadata_path(user, title_id, save_id))
+                meta = _save_sync_read_metadata(_save_sync_metadata_path(user, title_id, save_id, save_type=save_type))
                 created_ts = _save_sync_parse_created_ts(meta.get('created_ts'))
                 if created_ts <= 0:
                     created_ts = _save_sync_parse_created_ts(meta.get('createdAt'))
@@ -2160,20 +2179,21 @@ def _save_sync_collect_versions_for_title(user, title_id):
                 note = _normalize_save_note(meta.get('note'))
                 versions.append({
                     'title_id': title_id,
+                    'save_type': save_type,
                     'save_id': save_id,
                     'size': size,
                     'note': note,
                     'created_ts': int(created_ts),
                     'created_at': created_at,
-                    'download_url': f'/api/saves/download/{title_id}/{save_id}.zip',
-                    'delete_url': f'/api/saves/delete/{title_id}/{save_id}',
+                    'download_url': f'/api/saves/download/{title_id}/{save_id}.zip?save_type={save_type}',
+                    'delete_url': f'/api/saves/delete/{title_id}/{save_id}?save_type={save_type}',
                     'archive_path': archive_path,
                     'legacy': False,
                 })
         except Exception as e:
             logger.warning('Failed listing versioned saves for title %s: %s', title_id, e)
 
-    legacy_archive = _save_sync_archive_path(user, title_id)
+    legacy_archive = _save_sync_archive_path(user, title_id) if save_type == 'unknown' else ''
     if os.path.isfile(legacy_archive):
         try:
             legacy_size = int(os.path.getsize(legacy_archive))
@@ -2185,13 +2205,14 @@ def _save_sync_collect_versions_for_title(user, title_id):
             legacy_created_ts = int(time.time())
         versions.append({
             'title_id': title_id,
+            'save_type': save_type,
             'save_id': 'legacy',
             'size': legacy_size,
             'note': '',
             'created_ts': legacy_created_ts,
             'created_at': _save_sync_format_created_at(legacy_created_ts),
-            'download_url': f'/api/saves/download/{title_id}.zip',
-            'delete_url': f'/api/saves/delete/{title_id}',
+            'download_url': f'/api/saves/download/{title_id}.zip?save_type={save_type}',
+            'delete_url': f'/api/saves/delete/{title_id}?save_type={save_type}',
             'archive_path': legacy_archive,
             'legacy': True,
         })
@@ -2218,17 +2239,18 @@ def _save_sync_collect_versions(user):
 
     saves = []
     for title_id in sorted(title_ids):
-        saves.extend(_save_sync_collect_versions_for_title(user, title_id))
+        for save_type in ('unknown', 'account', 'device'):
+            saves.extend(_save_sync_collect_versions_for_title(user, title_id, save_type=save_type))
 
     saves.sort(key=lambda item: (str(item.get('title_id') or ''), -(int(item.get('created_ts') or 0)), str(item.get('save_id') or '')))
     return saves
 
 
-def _save_sync_resolve_download_archive(user, title_id, save_id=None):
-    latest_archive_path = _save_sync_latest_archive_path(user, title_id)
+def _save_sync_resolve_download_archive(user, title_id, save_id=None, save_type='unknown'):
+    latest_archive_path = _save_sync_latest_archive_path(user, title_id, save_type=save_type)
     wants_generated_latest = (save_id is None) or (str(save_id).strip().lower() == 'latest')
     if wants_generated_latest:
-        latest_dir = _save_sync_latest_dir(user, title_id)
+        latest_dir = _save_sync_latest_dir(user, title_id, save_type=save_type)
         if os.path.isdir(latest_dir):
             try:
                 _save_sync_build_archive_from_directory(latest_dir, latest_archive_path)
@@ -2252,19 +2274,20 @@ def _save_sync_resolve_download_archive(user, title_id, save_id=None):
             latest_created_ts = int(time.time())
         return {
             'title_id': title_id,
+            'save_type': save_type,
             'save_id': 'latest',
             'size': latest_size,
             'note': 'latest',
             'created_ts': latest_created_ts,
             'created_at': _save_sync_format_created_at(latest_created_ts),
-            'download_url': f'/api/saves/download/{title_id}.zip',
+            'download_url': f'/api/saves/download/{title_id}.zip?save_type={save_type}',
             'delete_url': '',
             'archive_path': latest_archive_path,
             'legacy': False,
             'generated_latest': True,
         }, None
 
-    versions = _save_sync_collect_versions_for_title(user, title_id)
+    versions = _save_sync_collect_versions_for_title(user, title_id, save_type=save_type)
     if not versions:
         return None, 'Save archive not found.'
     if save_id:
@@ -2278,8 +2301,8 @@ def _save_sync_resolve_download_archive(user, title_id, save_id=None):
     return versions[0], None
 
 
-def _save_sync_delete_archive(user, title_id, save_id=None):
-    selected_archive, resolve_error = _save_sync_resolve_download_archive(user, title_id, save_id=save_id)
+def _save_sync_delete_archive(user, title_id, save_id=None, save_type='unknown'):
+    selected_archive, resolve_error = _save_sync_resolve_download_archive(user, title_id, save_id=save_id, save_type=save_type)
     if selected_archive is None:
         return None, resolve_error or 'Save archive not found.'
 
@@ -2299,13 +2322,13 @@ def _save_sync_delete_archive(user, title_id, save_id=None):
 
     if not is_legacy and selected_save_id:
         try:
-            metadata_path = _save_sync_metadata_path(user, title_id, selected_save_id)
+            metadata_path = _save_sync_metadata_path(user, title_id, selected_save_id, save_type=save_type)
             if os.path.isfile(metadata_path):
                 os.remove(metadata_path)
         except Exception as e:
             logger.warning('Failed deleting save metadata for user %s title %s save %s: %s', getattr(user, 'user', '?'), title_id, selected_save_id, e)
 
-        title_dir = _save_sync_title_dir(user, title_id)
+        title_dir = _save_sync_title_dir(user, title_id, save_type=save_type)
         try:
             if os.path.isdir(title_dir) and not os.listdir(title_dir):
                 os.rmdir(title_dir)
@@ -2314,6 +2337,7 @@ def _save_sync_delete_archive(user, title_id, save_id=None):
 
     return {
         'title_id': title_id,
+        'save_type': save_type,
         'save_id': selected_save_id or '',
         'legacy': is_legacy,
     }, None
@@ -6105,12 +6129,24 @@ def upload_library_status(upload_id):
     return jsonify({'success': True, 'job': payload})
 
 
+@app.get('/api/saves/capabilities')
+@save_sync_access
+def save_capabilities_api():
+    return jsonify({'save_types': True, 'types': ['unknown', 'account', 'device']})
+
+
 @app.get('/api/saves/list')
 @save_sync_access
 def list_saves_api():
     user = getattr(g, 'save_sync_user', None)
     if user is None:
         return api_error('Save sync authorization failed.', 403)
+
+    try:
+        requested_type = _save_sync_requested_type()
+    except ValueError as error:
+        return api_error(str(error), 400)
+    include_all_types = request.args.get('save_types') == '1' and 'save_type' not in request.args
 
     saves = []
     titledb_loaded = False
@@ -6122,13 +6158,15 @@ def list_saves_api():
     try:
         is_cyberfoil = _is_cyberfoil_request()
         save_versions = _save_sync_collect_versions(user)
+        if not include_all_types:
+            save_versions = [version for version in save_versions if version['save_type'] == requested_type]
         seen_titles = {
-            str(item.get('title_id') or '').strip().upper()
+            (str(item.get('title_id') or '').strip().upper(), item['save_type'])
             for item in save_versions
             if str(item.get('title_id') or '').strip()
         }
-        for title_id in sorted(seen_titles):
-            latest_dir = _save_sync_latest_dir(user, title_id)
+        for title_id, save_type in sorted(seen_titles):
+            latest_dir = _save_sync_latest_dir(user, title_id, save_type=save_type)
             if not os.path.isdir(latest_dir):
                 continue
             latest_created_ts = int(time.time())
@@ -6139,11 +6177,12 @@ def list_saves_api():
             save_versions.append({
                 'title_id': title_id,
                 'save_id': 'latest',
+                'save_type': save_type,
                 'size': 0,
                 'note': 'latest directory',
                 'created_ts': latest_created_ts,
                 'created_at': _save_sync_format_created_at(latest_created_ts),
-                'download_url': f'/api/saves/download/{title_id}/latest.zip',
+                'download_url': f'/api/saves/download/{title_id}/latest.zip?save_type={save_type}',
                 'delete_url': '',
                 'archive_path': '',
                 'legacy': False,
@@ -6156,9 +6195,9 @@ def list_saves_api():
                 continue
             created_ts = int(version.get('created_ts') or 0)
             save_id = str(version.get('save_id') or '')
-            current = latest_by_title.get(title_id)
+            current = latest_by_title.get((title_id, version['save_type']))
             if current is None or created_ts > current.get('created_ts', 0):
-                latest_by_title[title_id] = {'created_ts': created_ts, 'save_id': save_id}
+                latest_by_title[(title_id, version['save_type'])] = {'created_ts': created_ts, 'save_id': save_id}
         title_metadata = {}
         for version in save_versions:
             title_id = str(version.get('title_id') or '').strip().upper()
@@ -6189,7 +6228,7 @@ def list_saves_api():
             download_url = str(version.get('download_url') or '')
             delete_url = str(version.get('delete_url') or '')
             icon_url = f'/api/shop/icon/{title_id}'
-            latest_info = latest_by_title.get(title_id) or {}
+            latest_info = latest_by_title.get((title_id, version['save_type'])) or {}
             is_latest = (
                 int(latest_info.get('created_ts') or 0) == created_ts
                 and str(latest_info.get('save_id') or '') == save_id
@@ -6199,6 +6238,8 @@ def list_saves_api():
             saves.append({
                 'title_id': title_id,
                 'titleId': title_id,
+                'save_type': version['save_type'],
+                'saveType': version['save_type'],
                 'app_id': title_id,
                 'name': cached_meta['title_name'],
                 'title_name': cached_meta['title_name'],
@@ -6237,7 +6278,7 @@ def list_saves_api():
         except Exception:
             pass
 
-    return jsonify({'saves': saves})
+    return jsonify({'saves': saves, 'save_types': True})
 
 
 @app.post('/api/saves/upload/<title_id>')
@@ -6246,6 +6287,11 @@ def upload_save_api(title_id):
     user = getattr(g, 'save_sync_user', None)
     if user is None:
         return api_error('Save sync authorization failed.', 403)
+
+    try:
+        save_type = _save_sync_requested_type()
+    except ValueError as error:
+        return api_error(str(error), 400)
 
     normalized_title_id = _save_sync_resolve_title_id(title_id)
     if not normalized_title_id:
@@ -6270,9 +6316,9 @@ def upload_save_api(title_id):
 
     note = _save_sync_resolve_note()
     save_id = _save_sync_generate_save_id(note)
-    title_dir = _save_sync_title_dir(user, normalized_title_id)
+    title_dir = _save_sync_title_dir(user, normalized_title_id, save_type=save_type)
     os.makedirs(title_dir, exist_ok=True)
-    archive_path = _save_sync_archive_path(user, normalized_title_id, save_id=save_id)
+    archive_path = _save_sync_archive_path(user, normalized_title_id, save_id=save_id, save_type=save_type)
     temp_path = archive_path + '.tmp'
 
     try:
@@ -6295,6 +6341,8 @@ def upload_save_api(title_id):
     created_at = _save_sync_format_created_at(created_ts)
     metadata = {
         'title_id': normalized_title_id,
+        'save_type': save_type,
+        'saveType': save_type,
         'save_id': save_id,
         'created_at': created_at,
         'created_ts': created_ts,
@@ -6303,11 +6351,11 @@ def upload_save_api(title_id):
         'size': int(file_size),
     }
     try:
-        _save_sync_write_metadata(_save_sync_metadata_path(user, normalized_title_id, save_id), metadata)
+        _save_sync_write_metadata(_save_sync_metadata_path(user, normalized_title_id, save_id, save_type=save_type), metadata)
     except Exception as e:
         logger.warning('Failed writing save metadata for user %s title %s save %s: %s', getattr(user, 'user', '?'), normalized_title_id, save_id, e)
     try:
-        _save_sync_refresh_latest_from_archive(user, normalized_title_id, archive_path)
+        _save_sync_refresh_latest_from_archive(user, normalized_title_id, archive_path, save_type=save_type)
     except Exception as e:
         logger.warning(
             'Failed to refresh latest extracted save for user %s title %s save %s: %s',
@@ -6319,6 +6367,8 @@ def upload_save_api(title_id):
 
     return api_success({
         'title_id': normalized_title_id,
+        'save_type': save_type,
+        'saveType': save_type,
         'titleId': normalized_title_id,
         'save_id': save_id,
         'saveId': save_id,
@@ -6328,10 +6378,10 @@ def upload_save_api(title_id):
         'createdTs': created_ts,
         'note': note,
         'size': int(file_size),
-        'download_url': f'/api/saves/download/{normalized_title_id}/{save_id}.zip',
-        'downloadUrl': f'/api/saves/download/{normalized_title_id}/{save_id}.zip',
-        'delete_url': f'/api/saves/delete/{normalized_title_id}/{save_id}',
-        'deleteUrl': f'/api/saves/delete/{normalized_title_id}/{save_id}',
+        'download_url': f'/api/saves/download/{normalized_title_id}/{save_id}.zip?save_type={save_type}',
+        'downloadUrl': f'/api/saves/download/{normalized_title_id}/{save_id}.zip?save_type={save_type}',
+        'delete_url': f'/api/saves/delete/{normalized_title_id}/{save_id}?save_type={save_type}',
+        'deleteUrl': f'/api/saves/delete/{normalized_title_id}/{save_id}?save_type={save_type}',
     }, message='Save uploaded successfully.')
 
 
@@ -6344,6 +6394,11 @@ def download_save_api(title_id, save_id=None):
     user = getattr(g, 'save_sync_user', None)
     if user is None:
         return api_error('Save sync authorization failed.', 403)
+
+    try:
+        save_type = _save_sync_requested_type()
+    except ValueError as error:
+        return api_error(str(error), 400)
 
     requested_save_id = str(save_id or '').strip()
     client_kind = 'cyberfoil' if _is_cyberfoil_request() else 'other'
@@ -6367,7 +6422,7 @@ def download_save_api(title_id, save_id=None):
         client_kind,
     )
 
-    selected_archive, resolve_error = _save_sync_resolve_download_archive(user, normalized_title_id, save_id=save_id)
+    selected_archive, resolve_error = _save_sync_resolve_download_archive(user, normalized_title_id, save_id=save_id, save_type=save_type)
     if selected_archive is None:
         logger.warning(
             'Save download resolve failed user=%s title=%s save_id=%s client=%s error=%s',
@@ -6416,7 +6471,7 @@ def download_save_api(title_id, save_id=None):
         archive_path,
     )
 
-    return send_from_directory(
+    response = send_from_directory(
         os.path.dirname(archive_path),
         os.path.basename(archive_path),
         as_attachment=True,
@@ -6424,6 +6479,8 @@ def download_save_api(title_id, save_id=None):
         mimetype='application/zip'
     )
 
+    response.headers['X-Save-Type'] = save_type
+    return response
 
 @app.route('/api/saves/delete/<title_id>/<save_id>', methods=['DELETE', 'POST'])
 @app.route('/api/saves/delete/<title_id>/<save_id>.zip', methods=['DELETE', 'POST'])
@@ -6435,6 +6492,11 @@ def delete_save_api(title_id, save_id=None):
     if user is None:
         return api_error('Save sync authorization failed.', 403)
 
+    try:
+        save_type = _save_sync_requested_type()
+    except ValueError as error:
+        return api_error(str(error), 400)
+
     normalized_title_id = _normalize_save_title_id(title_id)
     if not normalized_title_id:
         return api_error('Invalid title_id for save delete.', 400)
@@ -6445,7 +6507,7 @@ def delete_save_api(title_id, save_id=None):
         if not selected_save_id:
             return api_error('Invalid save_id for save delete.', 400)
 
-    deleted_info, delete_error = _save_sync_delete_archive(user, normalized_title_id, save_id=selected_save_id)
+    deleted_info, delete_error = _save_sync_delete_archive(user, normalized_title_id, save_id=selected_save_id, save_type=save_type)
     if deleted_info is None:
         status = 404
         error_text = str(delete_error or '')
@@ -6458,7 +6520,7 @@ def delete_save_api(title_id, save_id=None):
     deleted_save_id = str(deleted_info.get('save_id') or '')
     is_legacy = bool(deleted_info.get('legacy'))
     try:
-        _save_sync_refresh_latest_for_title(user, normalized_title_id)
+        _save_sync_refresh_latest_for_title(user, normalized_title_id, save_type=save_type)
     except Exception as e:
         logger.warning(
             'Failed to refresh latest extracted save after delete for user %s title %s: %s',
@@ -6468,6 +6530,8 @@ def delete_save_api(title_id, save_id=None):
         )
     return api_success({
         'title_id': normalized_title_id,
+        'save_type': save_type,
+        'saveType': save_type,
         'titleId': normalized_title_id,
         'save_id': deleted_save_id,
         'saveId': deleted_save_id,

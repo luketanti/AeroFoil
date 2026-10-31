@@ -238,7 +238,9 @@ Cheat management is admin-only. In **Users**, enable the **Cheats** permission f
 AeroFoil supports per-user save backup management when the user has the **Backup** flag enabled:
 
 - Save archives are stored per user under `data/saves/<username>/`.
-- Multiple backup versions per title are supported.
+- Multiple backup versions per title and save type are supported. Account saves and shared device saves have separate histories, extracted `latest/` directories, and `_latest.zip` caches.
+- Typed backups use `data/saves/<username>/<title_id>/<account|device>/`. Existing untyped files remain in their original locations and are reported as `unknown`; no database migration or automatic type guessing is performed.
+- In the web upload form, select Account, Device (shared), or Unknown / legacy. To classify an old backup, download it and reupload it with the correct type. CyberFoil will not restore an untyped backup automatically.
 - Each uploaded version can include a note.
 - Backups can be uploaded, downloaded, or deleted from:
   - CyberFoil `Saves` section,
@@ -246,10 +248,13 @@ AeroFoil supports per-user save backup management when the user has the **Backup
 
 Save sync API endpoints:
 
-- `GET /api/saves/list`
-- `POST /api/saves/upload/<title_id>`
+- `GET /api/saves/capabilities` advertises `save_types: true`.
+- `GET /api/saves/list?save_types=1` lists all types; `?save_type=account|device|unknown` selects one. A plain list request returns only untyped backups for older-client compatibility.
+- `POST /api/saves/upload/<title_id>` accepts multipart `save_type=account|device|unknown`; omitted types stay `unknown`.
 - `GET /api/saves/download/<title_id>/<save_id>.zip`
 - `DELETE /api/saves/delete/<title_id>/<save_id>` (also accepts `POST` for compatibility)
+
+Download and delete URLs include `?save_type=account|device|unknown`; the server returns correctly scoped URLs in list/upload responses. Missing type parameters access only untyped backups. Generated latest saves are resolved within the selected type. Download responses include an `X-Save-Type` header.
 
 ## Requests
 

@@ -36,6 +36,12 @@
                                 <div class="list-group save-upload-search-results" id="saveUploadTitleSearchResults"></div>
                             </div>
                             <div class="col-12 col-lg-3">
+                                <label for="saveUploadType" class="form-label mb-1">Save type</label>
+                                <select id="saveUploadType" class="form-select mb-2">
+                                    <option value="unknown">Unknown / legacy</option>
+                                    <option value="account">Account</option>
+                                    <option value="device">Device (shared)</option>
+                                </select>
                                 <label for="saveUploadNote" class="form-label mb-1">Note (optional)</label>
                                 <input type="text" class="form-control" id="saveUploadNote" placeholder="Example: before chapter 4">
                             </div>
@@ -164,6 +170,11 @@
         return div.innerHTML;
     }
 
+    function getSaveType(item) {
+        const value = item['save_type'] || item['saveType'] || 'unknown';
+        return ['account', 'device'].includes(value) ? value : 'unknown';
+    }
+
     function getTitleId(item) {
         return (item['title_id'] || item['titleId'] || item['app_id'] || '').toString();
     }
@@ -175,7 +186,7 @@
             || item['name']
             || titleId
             || 'Unknown title'
-        ).toString();
+        ).toString() + ' [' + getSaveType(item) + ']';
     }
 
     function getDownloadUrl(item, titleId) {
@@ -188,7 +199,7 @@
                 downloadUrl = `/api/saves/download/${encodeURIComponent(titleId)}.zip`;
             }
         }
-        return downloadUrl;
+        return downloadUrl && !downloadUrl.includes('save_type=') ? downloadUrl + (downloadUrl.includes('?') ? '&' : '?') + 'save_type=' + getSaveType(item) : downloadUrl;
     }
 
     function getDeleteUrl(item, titleId) {
@@ -204,7 +215,7 @@
                 deleteUrl = `/api/saves/delete/${encodeURIComponent(titleId)}`;
             }
         }
-        return deleteUrl;
+        return deleteUrl && !deleteUrl.includes('save_type=') ? deleteUrl + (deleteUrl.includes('?') ? '&' : '?') + 'save_type=' + getSaveType(item) : deleteUrl;
     }
 
     function getIconUrl(item, titleId) {
@@ -449,7 +460,7 @@
         $('#savesTableBody').html('<tr><td colspan="5" class="text-muted">Loading...</td></tr>');
         $('#savesIconGrid').html('<div class="col-12 text-muted">Loading...</div>');
 
-        $.getJSON('/api/saves/list', function (result) {
+        $.getJSON('/api/saves/list?save_types=1', function (result) {
             if (!result || result['success'] === false) {
                 const message = (result && result['message']) ? result['message'] : 'Failed to load saves.';
                 showSavesAlert(message, 'danger');
@@ -498,6 +509,7 @@
 
         const formData = new FormData();
         formData.append('file', file);
+        formData.append('save_type', $('#saveUploadType').val() || 'unknown');
         if (note) {
             formData.append('note', note);
         }
