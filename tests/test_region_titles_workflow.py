@@ -1,10 +1,14 @@
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
+import tempfile
 import unittest
 
 import yaml
+import zstandard
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -121,9 +125,131 @@ new AsyncFunction('github', 'context', 'core', script)(github, context, core)
             self.assertEqual(step['if'], "steps.updates.outputs.build == 'true'")
         uploads = [s for s in self.steps if s.get('uses', '').startswith('actions/upload-artifact@')]
         self.assertEqual(uploads[0]['with']['name'], 'titledb')
+        self.assertEqual(self.workflow['env']['TITLEDB_KEEP_PLAIN_JSON'], 'true')
+        self.assertEqual(uploads[0]['with']['compression-level'],
+                         "${{ env.TITLEDB_KEEP_PLAIN_JSON == 'true' && 9 || 0 }}")
         self.assertEqual(uploads[-1]['with']['name'],
                          'titledb-state-${{ steps.sources.outputs.build_key }}')
         self.assertEqual(self.workflow['concurrency']['cancel-in-progress'], 'false')
+
+    def test_generated_json_compression_preserves_content_and_other_files(self):
+        for keep_plain in ('true', 'false'):
+            with self.subTest(keep_plain=keep_plain):
+                self.check_generated_json_compression(keep_plain)
+
+    def check_generated_json_compression(self, keep_plain):
+        temporary_root = ROOT / '.tmp'
+        temporary_root.mkdir(exist_ok=True)
+        step = next(s for s in self.steps if s.get('name') == 'Compress generated JSON files')
+        uploads = [s for s in self.steps if s.get('uses', '').startswith('actions/upload-artifact@')]
+        self.assertLess(self.steps.index(step), self.steps.index(uploads[0]))
+        with tempfile.TemporaryDirectory(dir=temporary_root) as directory:
+            output = Path(directory) / 'nut' / 'build_artefacts'
+            output.mkdir(parents=True)
+            fixtures = {
+                'titles.US.en.json': b'{"0100000000001000": {"name": "Example Title"}}',
+                'cnmts-fixed.json': b'{}',
+                'languages.json': b'{"US": ["en"]}',
+                'versions.txt': b'id|version\n',
+                'latest_example123': b'',
+            }
+            for filename, content in fixtures.items():
+                (output / filename).write_bytes(content)
+            result = subprocess.run([sys.executable, '-c', step['run']], cwd=directory,
+                                    capture_output=True, text=True,
+                                    env={**os.environ, 'TITLEDB_KEEP_PLAIN_JSON': keep_plain})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for filename, content in fixtures.items():
+                if filename.endswith('.json'):
+                    if keep_plain == 'true':
+                        self.assertEqual((output / filename).read_bytes(), content)
+                    else:
+                        self.assertFalse((output / filename).exists())
+                    compressed = (output / (filename + '.zst')).read_bytes()
+                    self.assertEqual(zstandard.ZstdDecompressor().decompress(compressed), content)
+                    self.assertEqual(compressed, zstandard.ZstdCompressor(level=9).compress(content))
+                else:
+                    self.assertEqual((output / filename).read_bytes(), content)
+            self.assertFalse(list(output.glob('*.tmp')))
+
+    def run_source_preparation(self, files, verify):
+        temporary_root = ROOT / '.tmp'
+        temporary_root.mkdir(exist_ok=True)
+        script = next(s['run'] for s in self.steps
+                      if s.get('name') == 'Prepare TitleDB source files')
+        with tempfile.TemporaryDirectory(dir=temporary_root) as directory:
+            source_dir = Path(directory) / 'nut' / 'titledb'
+            source_dir.mkdir(parents=True)
+            for filename, content in files.items():
+                (source_dir / filename).write_bytes(content)
+            result = subprocess.run(
+                [sys.executable, '-c', script], cwd=directory,
+                capture_output=True, text=True,
+            )
+            verify(result, source_dir)
+
+    def source_fixture(self):
+        return {
+            'languages.json': b'{"US": ["en"], "JP": ["ja"]}',
+            'US.en.json': b'{"1": {"name": "Example Title"}}',
+            'JP.ja.json': b'{}',
+            'cnmts.json': b'{}',
+            'versions.json': b'{}',
+            'versions.txt': b'id|version\n',
+        }
+
+    def test_source_preparation_supports_plain_compressed_and_mixed_files(self):
+        expected = self.source_fixture()
+        for mode in ('plain', 'compressed', 'mixed'):
+            with self.subTest(mode=mode):
+                files = {}
+                for index, (filename, content) in enumerate(expected.items()):
+                    if mode == 'compressed' or (mode == 'mixed' and index % 2 == 0):
+                        # Streaming decompression must also support frames without a size header.
+                        files[filename + '.zst'] = zstandard.ZstdCompressor(
+                            write_content_size=False,
+                        ).compress(content)
+                    else:
+                        files[filename] = content
+                # The consolidated database must not become a seed for generation.
+                files['titles.json.zst'] = zstandard.ZstdCompressor().compress(b'{}')
+
+                def verify(result, source_dir):
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    for filename, content in expected.items():
+                        self.assertEqual((source_dir / filename).read_bytes(), content)
+                    self.assertFalse((source_dir / 'titles.json').exists())
+
+                self.run_source_preparation(files, verify)
+
+    def test_source_preparation_prefers_existing_json(self):
+        files = self.source_fixture()
+        files.update({filename + '.zst': b'invalid compressed data' for filename in files})
+
+        def verify(result, source_dir):
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for filename, content in self.source_fixture().items():
+                self.assertEqual((source_dir / filename).read_bytes(), content)
+
+        self.run_source_preparation(files, verify)
+
+    def test_source_preparation_fails_for_missing_or_corrupt_sources(self):
+        for filename in ('languages.json', 'US.en.json', 'cnmts.json', 'versions.txt'):
+            for corrupt in (False, True):
+                with self.subTest(filename=filename, corrupt=corrupt):
+                    files = self.source_fixture()
+                    del files[filename]
+                    if corrupt:
+                        files[filename + '.zst'] = b'invalid compressed data'
+
+                    def verify(result, source_dir):
+                        self.assertNotEqual(result.returncode, 0)
+                        if not corrupt:
+                            self.assertIn(filename, result.stderr)
+                        self.assertFalse((source_dir / filename).exists())
+                        self.assertFalse(list(source_dir.glob('*.tmp')))
+
+                    self.run_source_preparation(files, verify)
 
 
 if __name__ == '__main__':

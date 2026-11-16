@@ -6,6 +6,7 @@ import json
 import logging
 import threading
 import time
+import zstandard
 
 from app.constants import *
 
@@ -43,13 +44,23 @@ def get_preferred_english_titles_files(app_settings, available_files=None):
     return preferred
 
 def download_from_remote_zip(rzf, path, store_path):
-    with rzf.open(path) as fpin:
+    remote_files = {info.filename for info in rzf.infolist()}
+    compressed_path = path + '.zst'
+    compressed = path.endswith('.json') and compressed_path in remote_files
+    with rzf.open(compressed_path if compressed else path) as fpin:
         with open(store_path, mode='wb') as fpout:
+            decompressor = zstandard.ZstdDecompressor().decompressobj() if compressed else None
             while True:
                 r = fpin.read(65536)
                 if not r:
                     break
+                if decompressor is not None:
+                    r = decompressor.decompress(r)
+                    if decompressor.unused_data:
+                        raise ValueError(f'Unexpected trailing data in TitleDB file: {compressed_path}')
                 fpout.write(r)
+            if decompressor is not None and not decompressor.eof:
+                raise ValueError(f'Truncated TitleDB file: {compressed_path}')
 
 
 def is_titledb_update_available(rzf):
@@ -189,7 +200,11 @@ def update_titledb_files(app_settings):
             raise ValueError("No response received for TitleDB artefacts")
         direct_url = r.headers.get('Location') if (300 <= r.status_code < 400) else str(TITLEDB_ARTEFACTS_URL)
         rzf = unzip_http.RemoteZipFile(direct_url)
-        remote_files = {info.filename for info in rzf.infolist()}
+        # Selection uses local JSON names regardless of the archive's encoding.
+        remote_files = {
+            info.filename[:-4] if info.filename.endswith('.json.zst') else info.filename
+            for info in rzf.infolist()
+        }
     except Exception as e:
         logger.error(f'Failed to fetch TitleDB artefacts: {e}')
         raise

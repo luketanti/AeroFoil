@@ -23,8 +23,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  TITLEDB_REPOSITORY: https://github.com/luketanti/titledb
+  TITLEDB_REPOSITORY: https://github.com/borntohonk/titledb
   NUT_REPOSITORY: https://github.com/blawar/nut
+  TITLEDB_KEEP_PLAIN_JSON: 'true' # Set to false after the compatibility grace period.
 
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
@@ -125,6 +126,44 @@ jobs:
           echo "formatted_date=$(date +"%Y-%m-%d_%H%M%S")" >> $GITHUB_ENV
           touch "build_artefacts/latest_${titledb_commit}"
 
+      - name: Prepare TitleDB source files
+        if: steps.updates.outputs.build == 'true'
+        shell: python
+        run: |
+          import json
+          import shutil
+          from pathlib import Path
+
+          import zstandard
+
+          source_dir = Path('nut/titledb')
+
+          def ensure_uncompressed(filename):
+              destination = source_dir / filename
+              if destination.is_file():
+                  return
+              compressed = source_dir / (filename + '.zst')
+              if not compressed.is_file():
+                  raise FileNotFoundError(f'Missing TitleDB source: {filename} or {filename}.zst')
+              temporary = destination.with_name(destination.name + '.tmp')
+              try:
+                  with compressed.open('rb') as source, temporary.open('wb') as output:
+                      with zstandard.ZstdDecompressor().stream_reader(source) as reader:
+                          shutil.copyfileobj(reader, output)
+                  temporary.replace(destination)
+              finally:
+                  if temporary.exists():
+                      temporary.unlink()
+
+          ensure_uncompressed('languages.json')
+          with (source_dir / 'languages.json').open(encoding='utf-8-sig') as source:
+              languages = json.load(source)
+          for region, region_languages in languages.items():
+              for language in region_languages:
+                  ensure_uncompressed(f'{region}.{language}.json')
+          for filename in ('cnmts.json', 'versions.json', 'versions.txt'):
+              ensure_uncompressed(filename)
+
       - uses: jannekem/run-python-script-action@v1
         name: Generate region titles
         if: steps.updates.outputs.build == 'true'
@@ -206,14 +245,39 @@ jobs:
               'versions.txt',
             ]:
               os.rename(f'titledb/{f}', f'build_artefacts/{f}')
-            
+
+
+      - name: Compress generated JSON files
+        if: steps.updates.outputs.build == 'true'
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+
+          import zstandard
+
+          compressor = zstandard.ZstdCompressor(level=9)
+          keep_plain_json = os.environ.get('TITLEDB_KEEP_PLAIN_JSON', 'true').lower() == 'true'
+          for source in sorted(Path('nut/build_artefacts').glob('*.json')):
+              destination = source.with_name(source.name + '.zst')
+              temporary = destination.with_name(destination.name + '.tmp')
+              try:
+                  with source.open('rb') as reader, temporary.open('wb') as writer:
+                      compressor.copy_stream(reader, writer, size=source.stat().st_size)
+                  temporary.replace(destination)
+                  if not keep_plain_json:
+                      source.unlink()
+              finally:
+                  if temporary.exists():
+                      temporary.unlink()
 
       - uses: actions/upload-artifact@v4
         if: steps.updates.outputs.build == 'true'
         with:
           name: titledb
           path: nut/build_artefacts/*
-          compression-level: 9
+          # Compress the legacy JSON copies during the grace period.
+          compression-level: ${{ env.TITLEDB_KEEP_PLAIN_JSON == 'true' && 9 || 0 }}
           if-no-files-found: error
 
       # Written only after the database artifact was uploaded successfully.

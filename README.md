@@ -491,6 +491,7 @@ Set `trusted_proxies` to your proxy IP(s) and/or your Docker network subnet so t
 - TitleDB artifacts are downloaded separately from the metadata dataset.
 - Descriptions and screenshots come from the generated `titles.<region>.<language>.json` files in the TitleDB artifact and are stored in the local SQLite title index. Older indexes rebuild automatically; obsolete raw files such as `US.en.json` and their `.meta` files are ignored and can be removed.
 - The TitleDB artifacts zip may be very large (multi-GB) depending on the upstream workflow output.
+- During the compatibility grace period, TitleDB artifacts contain both plain `.json` files for older AeroFoil versions and individual `.json.zst` files compressed with Zstandard level 9. Updated versions prefer the compressed entries and restore local `.json` files. The workflow's `TITLEDB_KEEP_PLAIN_JSON` setting defaults to `true`; set it to `false` after users have upgraded to publish compressed-only JSON entries. ZIP compression stays enabled while legacy JSON copies are included.
 
 </details>
 
